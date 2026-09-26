@@ -205,8 +205,9 @@ static void cmd_key_erase(const char *arg) {
         return;
     }
     unsigned n = (unsigned)parsed;
+    bool was_active = n == fj_keys_active_slot();
     if (fj_keys_erase(n)) {
-        if (n == fj_keys_active_slot()) {
+        if (was_active) {
             fj_state_lock();
             fj_msc_set_ready(false);
         }

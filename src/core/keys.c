@@ -233,11 +233,25 @@ bool fj_keys_provision(unsigned slot, const char *name, bool gen) {
      * gen=false; here we just mark it initialised. */
     s->initialized = true;
 
+    if (active_slot < 0 || active_slot >= FJ_NUM_SLOTS ||
+        !store.slots[active_slot].initialized)
+        active_slot = (int)slot;
+
     return write_store();
 }
 
 bool fj_keys_erase(unsigned slot) {
     if (slot >= FJ_NUM_SLOTS) return false;
     memset(&store.slots[slot], 0, sizeof(fj_slot_t));
+
+    if (active_slot == (int)slot) {
+        active_slot = 0;
+        for (unsigned i = 0; i < FJ_NUM_SLOTS; i++) {
+            if (store.slots[i].initialized) {
+                active_slot = (int)i;
+                break;
+            }
+        }
+    }
     return write_store();
 }

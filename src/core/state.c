@@ -73,7 +73,12 @@ bool fj_state_unlock(const char *pin) {
 
 void fj_state_set_timeout(uint32_t seconds) {
     timeout_sec = seconds;
-    have_unlock_time = false; /* reset the clock on a new timeout */
+    if (state == FJ_STATE_UNLOCKED && seconds > 0) {
+        unlock_since = get_absolute_time();
+        have_unlock_time = true;
+    } else {
+        have_unlock_time = false;
+    }
 }
 
 uint32_t fj_state_timeout(void) {
