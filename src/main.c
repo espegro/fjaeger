@@ -55,6 +55,7 @@ int main(void) {
         fj_console_task();
         fj_u2f_task();
         fj_ctap2_task();
+        fj_msc_task();
     }
 }
 

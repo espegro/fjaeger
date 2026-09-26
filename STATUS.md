@@ -1,6 +1,6 @@
 # Fjaeger — status og overlevering
 
-Oppdatert: 2026-09-26
+Oppdatert: 2026-09-26 (persistent MSC-disk implementert)
 
 ## Kort status
 
@@ -134,6 +134,39 @@ Verifisert testnøkkel hadde fingeravtrykk:
 SHA256:9/nEEvU6esvFLkLMgzOCgwF4HcjF0immAN8MU4s5qq0
 ```
 
+## Fysisk verifisert 2026-09-26 (neste runde)
+
+Følgende er nå også verifisert på den faktiske donglen:
+
+- **Reell SSH-innlogging.** `ecdsa-sk`-nøkkelen i `authorized_keys` logger inn
+  mot en lokal `sshd` på port 22022 (`SSH_LOGIN_OK`). Tidligere var bare
+  `ssh-keygen` enroll/sign/verify prøvd.
+- **Kaldstart og utholdenhet.** Etter ekte strømfrakobling starter enheten
+  **låst**, PIN `12345` overlever og låser opp, og credential i slot 0 overlever
+  og kan logge inn igjen via SSH. Gjaldt også over watchdog-`RESET`.
+- **Flere credentials.** Åtte distinkte `sk-ecdsa`-credentials ble opprettet;
+  hver autentiserer uavhengig mot `sshd`. Niende forsøk avvises
+  (`CTAP2_ERR_NOT_ALLOWED`, `ssh-keygen` melder `Key enrollment failed:
+  invalid format`, RC=255). Hele lageret overlever reset.
+- **Uavhengig FIDO2-klient.** `python3-fido2` (libfido2-uavhengig) enumererer,
+  henter `GetInfo` (FIDO_2_0), utfører `getAssertion`-signering mot en
+  eksisterende credential (gyldig DER-signatur, korrekt rpIdHash) og avviser
+  `makeCredential` med fullt lager. OpenSSH/libfido2 og python3-fido2 begge
+  fungerer.
+- **Konsollregresjon.** Hele kommandolisten kjørt igjen: 42/42 sjekker bestått,
+  inkludert feiltilfeller, grenselengder, slot 0–7, oversize-linje, lock-guard
+  på alle beskyttede kommandoer, og auto-lock som låser seg selv etter angitt
+  timeout.
+- **Separate lagre bekreftet.** Sletting av konsoll-slot 0 (som låser enheten)
+  påvirker ikke det separate CTAP2-credential-lageret; SSH-innlogging fungerer
+  fortsatt.
+
+Testartefakter og skript ligger i `/tmp/fjaeger-ssh-test/`:
+`fido2_client_test.py` (python3-fido2) og `console_regression.py` (42 sjekker).
+Donglen ble etterlatt **låst**, slot 0 provisionert, timeout 0, med åtte
+CTAP2-credentials og test-PIN `12345`. Testnøkler i
+`/tmp/fjaeger-ssh-test/id_ecdsa_sk_{working,2..8}`.
+
 ## Rask OpenSSH-regresjonstest
 
 Finn riktig HID-enhet; ikke anta at den alltid er `/dev/hidraw2`. Lås deretter
@@ -184,30 +217,54 @@ Kjør deretter `LOCK` og kontroller at en ny signering mislykkes. OpenSSH viser
 foreløpig en generell feil som `invalid format`; viktigste sikkerhetsegenskap er
 at ingen signatur returneres.
 
+## Vedvarende kryptert MSC-disk (implementert 2026-09-26)
+
+MSC-disken ble gjort til en **12 MiB vedvarende flash-partisjon** og frikoblet
+fra keyslots.
+
+- **Partisjon:** `0x10100000`–`0x10D00000` (12 MiB), som offset `0x00100000`
+  fra XIP. Firmware (~128 KB) ligger før dette; PIN/slots/CTAP2/disknøkkel
+  ligger i de siste 8 KiB. Ingen overlapp.
+- **Filsystem:** FAT16, 512-byte-sektorer, 1 sektor/cluster. Metadata (boot,
+  begge FAT-er, rotkatalog) initialiseres én gang ved første oppstart;
+  dataregionen skrives lazy. Erstatter den gamle 8 KiB RAM-disken.
+- **Kryptering:** AES-128-XTS, dedikert permanent disknøkkel lagret i lageret,
+  sektor-LBA som tweak. Disken er **uavhengig av keyslots** — `KEY SELECT`,
+  `KEY PROVISION` og `KEY ERASE` påvirker ikke diskdata.
+- **Låsing:** når enheten er låst, er disken utilgjengelig (NOT_READY).
+
+Fysisk verifisert:
+- Disken mountes som ~12 MiB vfat-volum når ulåst.
+- Filer skrevet og lest tilbake korrekt (1 MiB-binærfil + tekstfil).
+- **Data overlever watchdog-`RESET` og kaldstart.**
+- Slottbytte (slot 0 → 1) endrer **ikke** diskdata — disknøkkel er uavhengig.
+- Under feilsøking ble en adresse-bug rettet: `DISK_FLASH_START` må være en
+  XIP-offset, ikke absolutt adresse (feil ga hard fault på `0x20100000`).
+
+Kjent avveining: hver skriveoperasjon til en ny flash-blokk krever flash-erase
+av en 4 KiB-blokk, så store filer skrives tregt og sliter på flash. Filsystemet
+er FAT16 (maks ~2 GB med passende cluster), men partisjonen er 12 MiB.
+
 ## Dette bør testes videre
 
-Prioritert liste for neste utviklingsøkt:
+Prioritert liste for neste utviklingsøkt (punkter som nå er fullført og
+verifisert er fjernet — se «Fysisk verifisert 2026-09-26» over):
 
-1. **Reell SSH-innlogging.** `ssh-keygen` enroll/sign/verify virker, men faktisk
-   innlogging mot en `sshd` med nøkkelen i `authorized_keys` er ikke prøvd.
-2. **Kaldstart og utholdenhet.** Koble strømmen helt fra, start igjen, lås opp og
-   signer med eksisterende credential. Gjenta etter flere firmwareflasher.
-3. **Flere credentials.** Opprett, bruk og gjenfinn alle åtte CTAP2-plassene;
-   test fullt lager, duplikater og credentials for flere RP-ID-er.
-4. **Flere FIDO-klienter.** Prøv `fido2-token`, nettleser/WebAuthn og gjerne
-   både Linux og Windows/macOS. Test også flere tilkoblede FIDO-enheter.
-5. **Avbrudd og feiltrafikk.** Test CTAPHID CANCEL, kanal-lock, fragmenterte og
+1. **Flere FIDO-klienter / OS.** Prøv nettleser/WebAuthn og gjerne både Linux og
+   Windows/macOS. Test også flere tilkoblede FIDO-enheter samtidig.
+2. **Avbrudd og feiltrafikk.** Test CTAPHID CANCEL, kanal-lock, fragmenterte og
    maksimalt store meldinger, feil sekvensnummer og USB-frakobling midt i svar.
-6. **Langtidstest.** Kjør mange signeringer, lås/ulås-sykluser og auto-lock mens
+3. **Langtidstest.** Kjør mange signeringer, lås/ulås-sykluser og auto-lock mens
    HID og MSC brukes samtidig. Se etter USB-reset, heap-/stackproblemer og
    flashslitasje.
-7. **MSC-dataintegritet.** Skriv og les filer over mange lock/unlock-sykluser,
-   auto-lock under I/O og bytte av aktiv slot. RAM-disken skal miste innhold ved
-   reboot, men må aldri lekke klartekst mens den er låst.
-8. **LED-regresjon.** Bekreft visuelt rød/grønn/gul og at blå aktivitetspuls ikke
+4. **MSC-dataintegritet.** Skriv og les filer over mange lock/unlock-sykluser,
+   auto-lock under I/O og bytte av aktiv slot. Disken er nå en vedvarende
+   flash-partisjon (12 MiB) med dedikert disknøkkel; verifiser at innhold aldri
+   lekker klartekst mens den er låst, og at data overlever reboot.
+5. **LED-regresjon.** Bekreft visuelt rød/grønn/gul og at blå aktivitetspuls ikke
    skjuler låsestatus for lenge, særlig under kontinuerlig disk- eller HID-I/O.
-9. **Konsollregresjon etter siste FIDO-endringer.** Kjør hele kommandolisten én
-   gang til og verifiser feiltilfeller, grenselengder og slot 0–7.
+6. **Reell innlogging på ekstern vert.** Denne økten brukte en lokal `sshd`;
+   verifiser også mot en fjerntliggende/tjenestevert.
 
 ## Kjente begrensninger og sikkerhetsarbeid
 
@@ -223,7 +280,13 @@ Prioritert liste for neste utviklingsøkt:
   FIDO2-autentikator. Blant annet mangler credential management og CTAP reset.
 - Signaturtelleren er null fordi en flyktig teller ville gått bakover etter
   reboot. Persistent monotonteller er ikke implementert.
-- MSC er en **8 KiB RAM-disk**, ikke persistent lagring i flash.
+- MSC er nå en **12 MiB vedvarende FAT16-partisjon** i on-board-flash, AES-XTS-
+  kryptert i farten med en **dedikert disknøkkel** (uavhengig av keyslots).
+  Filsystemets metadata initialiseres én gang; dataregionen skrives lazy.
+  Skriving av store filer er treg og sliter på flash (hver sektoroppdatering
+  krever flash-erase av en 4 KiB-blokk). Flash-layout: firmware ~128 KB fra
+  `0x10000000`, disk-partisjon 12 MiB fra `0x10100000` (offset `0x00100000`),
+  lager i de siste 8 KiB.
 - AES-XTS gir konfidensialitet, men ikke autentisering eller integritetsvern.
 - Nøkler ligger i vanlig ekstern flash; secure boot, signert firmware,
   flashbeskyttelse og motstand mot fysisk uttrekk er ikke ferdigstilt.
@@ -232,13 +295,17 @@ Prioritert liste for neste utviklingsøkt:
 
 ## Anbefalt videre rekkefølge
 
-1. Kjør testpunktene 1–4 over og noter eksakte klient-/OS-resultater her.
+1. Testpunktene 1–4 over er kjørt og resultatene dokumentert i «Fysisk
+   verifisert 2026-09-26». Fortsett med de gjenværende punktene i «Dette bør
+   testes videre».
 2. Legg til automatiserte parser- og transporttester for CTAPHID/CBOR.
 3. Herd PIN-håndtering og legg til forsøksteller/ratebegrensning.
 4. Bestem om prosjektet skal ha fysisk bekreftelsesknapp for korrekt FIDO
    user-presence-semantikk.
-5. Design en eksplisitt, persistent og integritetsbeskyttet flashpartisjon for
-   diskdata dersom MSC skal være mer enn en prototype.
+5. **Vedvarende MSC-partisjon er implementert** (12 MiB, dedikert disknøkkel,
+   XTS). Gjenværende: optimaliser skriveytelse/slitasje (f.eks. skriv-innsamling
+   og lavere erase-frekvens), vurder FAT32 om kapasiteten økes, og vurder
+   integritetsbeskyttelse per sektor.
 6. Planlegg secure boot, signerte oppdateringer og nøkkelbeskyttelse før bruk med
    reelle hemmeligheter.
 

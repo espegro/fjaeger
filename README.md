@@ -6,7 +6,7 @@ Sikkerhetsnøkkel (USB-dongle) bygget på **RP2350** (16 MB flash). Prosjektet g
 
 - **CTAP2 (FIDO2) over HID** — `authenticatorGetInfo`, `makeCredential` og `getAssertion` med CBOR, for WebAuthn og OpenSSH `sk-ecdsa`-nøkler. Attestasjon bruker formatet `none`.
 - **Flere nøkkelprofiler ("slots")** — opptil 8 uavhengige profiler, hver med egen ECDSA-nøkkel og XTS-nøkkel. Velg aktiv profil over serial med `KEY SELECT <n>`.
-- **Kryptert USB-stasjon (MSC, prototype)** — XTS-krypterte sektorer. Enheten mountes bare når den er ulåst, men backing store er foreløpig kun 8 KiB RAM.
+- **Kryptert USB-stasjon (MSC)** — en **12 MiB vedvarende** FAT16-partisjon i on-board-flash, AES-XTS-kryptert med en **dedikert disknøkkel** som er uavhengig av keyslots. Mountes bare når enheten er ulåst. Data overlever reboot.
 - **Lås/ulås-modell** — når låst nektes signering, avkryptering og skriving. Ulåsing krever PIN over serial.
 - **Serial-konsoll (USB CDC)** — `LOCK`, `UNLOCK`, `RESET`, `TIMEOUT`, nøkkelhåndtering, m.m.
 
@@ -44,6 +44,7 @@ src/
 - Private nøkler lagres i RP2350-flash og brukes kun for signering i fastvaren; de eksporteres aldri over serial.
 - Når enheten er **låst**: ingen ECDSA-signering, og MSC-en er ikke klar, lesbar eller skrivbar.
 - Når **ulåst**: PIN er verifisert, MSC-en er mountet og dekrypterer sektorer i farten.
+- MSC-disken bruker en **dedikert permanent XTS-nøkkel** lagret i flash-lageret, uavhengig av keyslots. Bytte eller sletting av keyslots endrer ikke diskdata.
 - PIN-en lagres foreløpig som en SHA-256-hash og sammenlignes i konstant tid. Dette er ikke tilstrekkelig beskyttelse mot offline-angrep på en flashdump og skal erstattes med saltet, treg nøkkelavledning.
 
 > **Merk:** RP2350 har ingen ekte hardware secure element (som ATECC608B). Secure boot finnes, men beskyttelse mot en fysisk angriper med laboratorieutstyr er begrenset. Dette er en prototype/utviklingsplattform, ikke sertifisert produksjonssikkerhetsnøkkel.
@@ -105,7 +106,8 @@ CTAP2-credentials lagres i donglens flash (opptil 8). Attestasjonen er `none`, s
   - Kun **ECDSA P-256 / ES256** støttes (ingen EdDSA/ed25519-sk).
   - Enheten må være ulåst (PIN) for at `makeCredential`/`getAssertion` skal aksepteres.
   - Credentials er flash-persistente (opptil 8) i et kontrollsummert A/B-format, skrevet deferert fra main-loop.
-- MSC-disken er en liten RAM-disk (8 KB) som grunnlag; den er kryptert i farten, men ikke vedvarende i flash.
+- MSC-disken er en **12 MiB vedvarende FAT16-partisjon** i on-board-flash, AES-XTS-kryptert i farten med en **dedikert disknøkkel** (uavhengig av keyslots). Metadata (boot, FAT, rot) initialiseres én gang ved første oppstart; dataregionen skrives lazy. Data overlever reboot. Skriving av store filer er treg og sliter på flash fordi hver sektoroppdatering krever flash-erase.
+- **Flash-layout:** firmware ~128 KB fra `0x10000000`, disk-partisjon 12 MiB fra `0x10100000` (offset `0x00100000`), lager (PIN/slots/CTAP2/disknøkkel) i de siste 8 KiB.
 
 ## Lisens
 

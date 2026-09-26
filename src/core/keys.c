@@ -14,13 +14,20 @@
  * Each update erases and programs only the older copy. A generation number
  * and CRC select the newest complete record after a reset or power loss. */
 #define STORE_MAGIC   0x464A5345u /* "FJSE" */
-#define STORE_VERSION 2u
+#define STORE_VERSION 3u
 #define FLASH_OFFSET_BYTES (PICO_FLASH_SIZE_BYTES - (2 * FLASH_SECTOR_SIZE))
 
 typedef struct {
     uint8_t  pin_hash[32];
     fj_slot_t slots[FJ_NUM_SLOTS];
     fj_ctap2_cred_t ctap2[FJ_CTAP2_CREDS];
+} fj_store_v2_payload_t;
+
+typedef struct {
+    uint8_t  pin_hash[32];
+    fj_slot_t slots[FJ_NUM_SLOTS];
+    fj_ctap2_cred_t ctap2[FJ_CTAP2_CREDS];
+    uint8_t  disk_key[FJ_AES_KEY_BYTES];
 } fj_store_payload_t;
 
 typedef struct {
@@ -36,7 +43,7 @@ typedef struct {
 typedef struct {
     uint32_t magic;
     uint32_t version;
-    fj_store_payload_t payload;
+    fj_store_v2_payload_t payload;
 } fj_store_v1_t;
 
 #define PROGRAM_SIZE \
@@ -104,11 +111,17 @@ static void load_from_flash(void) {
         return;
     }
 
-    /* Migrate the original single-copy version if one was written. */
+    /* Migrate an older single-copy version if one was written. Version 2
+     * predates the dedicated MSC disk key; the key is left unset so it is
+     * generated on first disk init. */
     const fj_store_v1_t *legacy = (const fj_store_v1_t *)
         (XIP_BASE + FLASH_OFFSET_BYTES);
-    if (legacy->magic == STORE_MAGIC && legacy->version == 1) {
-        memcpy(&store, &legacy->payload, sizeof(store));
+    if (legacy->magic == STORE_MAGIC &&
+        (legacy->version == 1 || legacy->version == 2)) {
+        memcpy(&store.pin_hash, &legacy->payload.pin_hash, sizeof(store.pin_hash));
+        memcpy(&store.slots, &legacy->payload.slots, sizeof(store.slots));
+        memcpy(&store.ctap2, &legacy->payload.ctap2, sizeof(store.ctap2));
+        memset(store.disk_key, 0, sizeof(store.disk_key));
         active_copy = 0;
     } else {
         memset(&store, 0, sizeof(store));
@@ -175,6 +188,21 @@ bool fj_keys_get_pin_hash(uint8_t hash[32]) {
     if (acc == 0) return false;
     memcpy(hash, store.pin_hash, 32);
     return true;
+}
+
+bool fj_keys_get_disk_key(uint8_t key[FJ_AES_KEY_BYTES]) {
+    if (!store_loaded) return false;
+    uint8_t acc = 0;
+    for (size_t i = 0; i < FJ_AES_KEY_BYTES; i++) acc |= store.disk_key[i];
+    if (acc == 0) return false;
+    memcpy(key, store.disk_key, FJ_AES_KEY_BYTES);
+    return true;
+}
+
+bool fj_keys_set_disk_key(const uint8_t key[FJ_AES_KEY_BYTES]) {
+    if (!store_loaded) return false;
+    memcpy(store.disk_key, key, FJ_AES_KEY_BYTES);
+    return write_store();
 }
 
 unsigned fj_keys_count(void) {

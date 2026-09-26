@@ -81,6 +81,21 @@ static bool parse_uint(const char *s, unsigned long *value) {
 /* ------------------------------------------------------------------ */
 /* Command handlers                                                    */
 /* ------------------------------------------------------------------ */
+static void cmd_help(void) {
+    outln("Fjaeger commands (case-insensitive):");
+    outln("  HELP|?                     this help");
+    outln("  STATUS                     show state, active slot, slots, timeout");
+    outln("  LOCK                       lock the device immediately");
+    outln("  UNLOCK <pin>               unlock with PIN");
+    outln("  SETPIN <pin>               set/change PIN");
+    outln("  TIMEOUT <sec>              auto-relock after sec (0 = off)");
+    outln("  RESET                      reboot the device");
+    outln("  KEY LIST                   list all 8 slots");
+    outln("  KEY SELECT <n>             set active slot (0-7)");
+    outln("  KEY PROVISION <n> [name]   generate fresh key in slot n");
+    outln("  KEY ERASE <n>              erase slot n");
+}
+
 static void cmd_status(void) {
     char buf[96];
     snprintf(buf, sizeof(buf), "state: %s\r\n"
@@ -156,8 +171,6 @@ static void cmd_key_select(const char *arg) {
     }
     unsigned n = (unsigned)parsed;
     if (fj_keys_set_active_slot(n)) {
-        fj_msc_init();
-        fj_msc_set_ready(true);
         char buf[64];
         snprintf(buf, sizeof(buf), "OK active slot = %u", n);
         outln(buf);
@@ -181,10 +194,6 @@ static void cmd_key_provision(const char *arg, const char *name) {
     n = (unsigned)parsed;
 
     if (fj_keys_provision(n, name ? name : "key", true)) {
-        if (n == fj_keys_active_slot()) {
-            fj_msc_init();
-            fj_msc_set_ready(true);
-        }
         char buf[64];
         snprintf(buf, sizeof(buf), "OK provisioned slot %u", n);
         outln(buf);
@@ -256,8 +265,7 @@ static void dispatch(char *cmdline) {
     if (!tok) return;
 
     if (strcasecmp(tok, "help") == 0 || strcmp(tok, "?") == 0) {
-        outln("Fjaeger commands: HELP STATUS LOCK UNLOCK SETPIN "
-              "KEY LIST KEY SELECT KEY PROVISION KEY ERASE TIMEOUT RESET");
+        cmd_help();
     } else if (strcasecmp(tok, "status") == 0) {
         cmd_status();
     } else if (strcasecmp(tok, "lock") == 0) {

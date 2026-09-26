@@ -82,6 +82,13 @@ bool fj_keys_set_pin_hash(const uint8_t hash[32]);
 /* Load the stored PIN hash (if any). Returns false if none is stored. */
 bool fj_keys_get_pin_hash(uint8_t hash[32]);
 
+/* The MSC drive uses its own permanent XTS key, independent of the active
+ * slot. Returns true and fills 'key' (FJ_AES_KEY_BYTES) if one is stored. */
+bool fj_keys_get_disk_key(uint8_t key[FJ_AES_KEY_BYTES]);
+
+/* Persist the permanent MSC disk key to flash. */
+bool fj_keys_set_disk_key(const uint8_t key[FJ_AES_KEY_BYTES]);
+
 /* Load all persisted CTAP2 credentials into 'out' (FJ_CTAP2_CREDS
  * entries). Returns true on success. */
 void fj_keys_ctap2_load(fj_ctap2_cred_t *out);
