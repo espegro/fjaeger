@@ -231,19 +231,35 @@ fra keyslots.
 - **Kryptering:** AES-128-XTS, dedikert permanent disknøkkel lagret i lageret,
   sektor-LBA som tweak. Disken er **uavhengig av keyslots** — `KEY SELECT`,
   `KEY PROVISION` og `KEY ERASE` påvirker ikke diskdata.
+- **Deferred write-behind:** USB MSC-callbacker køer sektor-skriver i en
+  pending-kø; selve flash-erase/program skjer i `fj_msc_task()` (main-loop),
+  aldri inne i en USB-transaksjon. Data flusher ved `LOCK`/unmount
+  (`fj_msc_set_ready(false)`) og kontinuerlig i main-loop.
+- **Integritet:** en vedvarende CRC-32-tabell (én per 4 KiB-blokk, lagret i
+  klartekst i de siste 4 blokkene av partisjonen) verifiseres ved mount.
+  Korrupsjon fra strømbrudd eller tukling oppdages, og disken re-initialiseres
+  i stedet for å serve korrupte data.
 - **Låsing:** når enheten er låst, er disken utilgjengelig (NOT_READY).
 
 Fysisk verifisert:
 - Disken mountes som ~12 MiB vfat-volum når ulåst.
 - Filer skrevet og lest tilbake korrekt (1 MiB-binærfil + tekstfil).
-- **Data overlever watchdog-`RESET` og kaldstart.**
+- **Data overlever watchdog-`RESET` og kaldstart**, over flere skrive/reboot-
+  sykluser (deferred write + CRC-tabell oppdateres og verifiseres korrekt).
 - Slottbytte (slot 0 → 1) endrer **ikke** diskdata — disknøkkel er uavhengig.
+- **Integritetsdeteksjon:** ved å erase boot-blokken (0xFF) uten å oppdatere
+  CRC-tabellen, oppdaget enheten korrupsjonen og re-initialiserte filsystemet
+  (eksisterende filer borte) — korrupte data serveres ikke.
 - Under feilsøking ble en adresse-bug rettet: `DISK_FLASH_START` må være en
   XIP-offset, ikke absolutt adresse (feil ga hard fault på `0x20100000`).
+- En CRC-tabell-bug ble rettet: magic/header kolliderte med `CRC[0]` og ga
+  falsk mismatch ved mount (data "forsvant" ved reboot). Fikset ved å reservere
+  en header-offset (`CRC_HEADER_SIZE`) som ikke overlapper CRC-ene.
 
 Kjent avveining: hver skriveoperasjon til en ny flash-blokk krever flash-erase
 av en 4 KiB-blokk, så store filer skrives tregt og sliter på flash. Filsystemet
-er FAT16 (maks ~2 GB med passende cluster), men partisjonen er 12 MiB.
+er FAT16 (maks ~2 GB med passende cluster), men partisjonen er 12 MiB. Det er
+ingen wear-leveling; de mest skrevne sektorene (FAT, rotkatalog) slites fortere.
 
 ## Dette bør testes videre
 

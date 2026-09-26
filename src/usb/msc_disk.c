@@ -34,8 +34,16 @@
 #define DISK_FLASH_START       0x00100000u         /* absolute 0x10100000 */
 #define DISK_FLASH_SIZE        0x00C00000u         /* 12 MiB */
 
-#define DISK_TOTAL_SECTORS     (DISK_FLASH_SIZE / DISK_SECTOR_SIZE)  /* 24576 */
 #define DISK_TOTAL_BLOCKS      (DISK_FLASH_SIZE / DISK_BLOCK_SIZE)   /* 3072 */
+
+/* A persistent CRC-32 table protects every 4 KiB data block against
+ * corruption from power loss or tampering. The table is stored in clear
+ * text in the last few blocks of the partition. */
+#define CRC_TABLE_BLOCKS       4
+#define CRCS_PER_BLOCK         (DISK_BLOCK_SIZE / 4)                 /* 1024 */
+#define DISK_DATA_BLOCKS       (DISK_TOTAL_BLOCKS - CRC_TABLE_BLOCKS) /* 3068 */
+#define DISK_TOTAL_SECTORS     (DISK_DATA_BLOCKS * DISK_SECTORS_PER_BLOCK) /* 24544 */
+#define DISK_TABLE_START_BLOCK DISK_DATA_BLOCKS
 
 /* FAT16 geometry (computed at init). */
 static uint16_t fat_sectors;
@@ -49,12 +57,6 @@ static bool fs_initialised = false;
 /* Permanent disk key (two AES-128 keys for XTS). */
 static uint8_t disk_key[FJ_AES_KEY_BYTES];
 
-/* Deferred-write cache for one 4 KiB flash block. */
-static uint8_t block_cache[DISK_BLOCK_SIZE] __attribute__((aligned(4)));
-static uint32_t cache_block = 0xFFFFFFFFu;
-static bool cache_valid = false;
-static bool cache_dirty = false;
-
 static void make_tweak(uint32_t lba, uint8_t tweak[16]) {
     memset(tweak, 0, 16);
     tweak[0] = (uint8_t)(lba & 0xff);
@@ -67,52 +69,215 @@ static uint32_t block_index_for_lba(uint32_t lba) {
     return lba / DISK_SECTORS_PER_BLOCK;
 }
 
-void flush_disk_cache(void);
+/* Forward declarations (defined further below). */
+static bool read_block_apply(uint32_t idx, uint8_t clear[DISK_BLOCK_SIZE]);
+static void write_block(uint32_t idx, const uint8_t clear[DISK_BLOCK_SIZE]);
 
-/* Load a 4 KiB flash block into block_cache. */
-static void load_block(uint32_t idx) {
-    if (cache_valid && cache_block == idx) return;
-    if (cache_dirty) flush_disk_cache();
-    memcpy(block_cache, (const void *)(XIP_BASE + DISK_FLASH_START +
-                                       idx * DISK_BLOCK_SIZE),
+/* ------------------------------------------------------------------ */
+/* Integrity: a persistent CRC-32 per 4 KiB data block.               */
+/* The table lives in clear text in the last CRC_TABLE_BLOCKS blocks   */
+/* of the partition. A magic + count header marks a valid table.       */
+/* ------------------------------------------------------------------ */
+#define CRC_MAGIC 0x464A4352u /* "FJCR" */
+#define CRC_HEADER_SIZE 8      /* magic + count, before the CRC entries */
+
+static uint32_t block_crcs[DISK_DATA_BLOCKS];
+static bool crc_dirty = false;
+
+static uint32_t crc32_update(uint32_t crc, const uint8_t *data, size_t len) {
+    while (len--) {
+        crc ^= *data++;
+        for (unsigned bit = 0; bit < 8; bit++)
+            crc = (crc >> 1) ^ (0xedb88320u & (uint32_t)-(int32_t)(crc & 1));
+    }
+    return crc;
+}
+
+static uint32_t crc32_block(const uint8_t data[DISK_BLOCK_SIZE]) {
+    return crc32_update(0xffffffffu, data, DISK_BLOCK_SIZE) ^ 0xffffffffu;
+}
+
+/* Read a raw (clear-text) flash block without XTS. */
+static void read_raw_block(uint32_t idx, uint8_t out[DISK_BLOCK_SIZE]) {
+    memcpy(out, (const void *)(XIP_BASE + DISK_FLASH_START + idx * DISK_BLOCK_SIZE),
            DISK_BLOCK_SIZE);
-    cache_block = idx;
-    cache_valid = true;
-    cache_dirty = false;
 }
 
-/* Decrypt sector 'lba' (present in block_cache) into out[512]. */
-static bool decrypt_sector(uint32_t lba, uint8_t out[DISK_SECTOR_SIZE]) {
-    uint32_t off = (lba % DISK_SECTORS_PER_BLOCK) * DISK_SECTOR_SIZE;
-    uint8_t tweak[16];
-    make_tweak(lba, tweak);
-    memcpy(out, block_cache + off, DISK_SECTOR_SIZE);
-    return fj_xts_sector(disk_key, tweak, out, false);
+/* Write a raw (clear-text) flash block without XTS. */
+static void write_raw_block(uint32_t idx, const uint8_t data[DISK_BLOCK_SIZE]) {
+    uint32_t offset = DISK_FLASH_START + idx * DISK_BLOCK_SIZE;
+    uint32_t ints = save_and_disable_interrupts();
+    flash_range_erase(offset, DISK_BLOCK_SIZE);
+    flash_range_program(offset, data, DISK_BLOCK_SIZE);
+    restore_interrupts(ints);
 }
 
-/* Encrypt sector 'lba' from in[512] into the current position in block_cache
- * and mark the block dirty. */
-static bool encrypt_sector_into_cache(uint32_t lba, const uint8_t in[DISK_SECTOR_SIZE]) {
-    uint32_t off = (lba % DISK_SECTORS_PER_BLOCK) * DISK_SECTOR_SIZE;
-    uint8_t tmp[DISK_SECTOR_SIZE];
-    uint8_t tweak[16];
-    make_tweak(lba, tweak);
-    memcpy(tmp, in, DISK_SECTOR_SIZE);
-    if (!fj_xts_sector(disk_key, tweak, tmp, true)) return false;
-    memcpy(block_cache + off, tmp, DISK_SECTOR_SIZE);
-    cache_dirty = true;
+/* Persist the in-RAM CRC table to the reserved flash blocks. */
+static void crc_table_write(void) {
+    for (uint32_t tb = 0; tb < CRC_TABLE_BLOCKS; tb++) {
+        uint8_t buf[DISK_BLOCK_SIZE];
+        memset(buf, 0xff, sizeof(buf));
+        for (uint32_t i = 0; i < DISK_DATA_BLOCKS; i++) {
+            uint32_t g = CRC_HEADER_SIZE + i * 4;
+            if (g / DISK_BLOCK_SIZE == tb)
+                memcpy(buf + (g % DISK_BLOCK_SIZE), &block_crcs[i], 4);
+        }
+        if (tb == 0) {
+            uint32_t magic = CRC_MAGIC, count = DISK_DATA_BLOCKS;
+            memcpy(buf, &magic, 4);
+            memcpy(buf + 4, &count, 4);
+        }
+        write_raw_block(DISK_TABLE_START_BLOCK + tb, buf);
+    }
+    crc_dirty = false;
+}
+
+/* Load the CRC table from flash. Returns true if a valid table was found. */
+static bool crc_table_load(void) {
+    uint8_t buf[DISK_BLOCK_SIZE];
+    uint32_t cur_tb = 0;
+    read_raw_block(DISK_TABLE_START_BLOCK, buf);
+    uint32_t magic, count;
+    memcpy(&magic, buf, 4);
+    memcpy(&count, buf + 4, 4);
+    if (magic != CRC_MAGIC || count != DISK_DATA_BLOCKS) return false;
+    for (uint32_t i = 0; i < DISK_DATA_BLOCKS; i++) {
+        uint32_t g = CRC_HEADER_SIZE + i * 4;
+        uint32_t tb = g / DISK_BLOCK_SIZE;
+        if (tb != cur_tb) {
+            read_raw_block(DISK_TABLE_START_BLOCK + tb, buf);
+            cur_tb = tb;
+        }
+        memcpy(&block_crcs[i], buf + (g % DISK_BLOCK_SIZE), 4);
+    }
+    crc_dirty = false;
     return true;
 }
 
-/* Persist block_cache to flash if dirty. */
-void flush_disk_cache(void) {
-    if (!cache_valid || !cache_dirty) return;
-    uint32_t offset = DISK_FLASH_START + cache_block * DISK_BLOCK_SIZE;
+/* Build the CRC table by reading every data block from flash. */
+static void crc_table_build_from_disk(void) {
+    for (uint32_t i = 0; i < DISK_DATA_BLOCKS; i++) {
+        uint8_t clear[DISK_BLOCK_SIZE];
+        if (read_block_apply(i, clear)) {
+            block_crcs[i] = crc32_block(clear);
+        } else {
+            block_crcs[i] = 0;
+        }
+    }
+    crc_dirty = true;
+}
+
+/* ------------------------------------------------------------------ */
+/* Deferred write-behind queue.                                       */
+/*                                                                     */
+/* USB MSC callbacks only queue sector writes and never touch flash    */
+/* directly. fj_msc_task() (main loop) performs the actual flash       */
+/* erase/program, so long interrupt-disabled operations never happen   */
+/* inside a USB transaction.                                           */
+/* ------------------------------------------------------------------ */
+#define WRITE_QUEUE_SIZE 64
+
+typedef struct {
+    uint32_t lba;
+    uint8_t data[DISK_SECTOR_SIZE];
+    bool in_use;
+} pending_write_t;
+
+static pending_write_t wq[WRITE_QUEUE_SIZE];
+
+static bool wq_enqueue(uint32_t lba, const uint8_t data[DISK_SECTOR_SIZE]) {
+    for (unsigned i = 0; i < WRITE_QUEUE_SIZE; i++) {
+        if (!wq[i].in_use) {
+            wq[i].lba = lba;
+            memcpy(wq[i].data, data, DISK_SECTOR_SIZE);
+            wq[i].in_use = true;
+            return true;
+        }
+    }
+    return false; /* queue full */
+}
+
+static bool wq_empty(void) {
+    for (unsigned i = 0; i < WRITE_QUEUE_SIZE; i++) {
+        if (wq[i].in_use) return false;
+    }
+    return true;
+}
+
+static void wq_reset(void) {
+    for (unsigned i = 0; i < WRITE_QUEUE_SIZE; i++) wq[i].in_use = false;
+}
+
+/* Apply any pending writes that belong to flash block 'idx' onto the
+ * decrypted block 'clear' (8 sectors in clear text). */
+static void wq_apply_to_block(uint32_t idx, uint8_t clear[DISK_BLOCK_SIZE]) {
+    for (unsigned i = 0; i < WRITE_QUEUE_SIZE; i++) {
+        if (!wq[i].in_use) continue;
+        if (block_index_for_lba(wq[i].lba) != idx) continue;
+        uint32_t off = (wq[i].lba % DISK_SECTORS_PER_BLOCK) * DISK_SECTOR_SIZE;
+        memcpy(clear + off, wq[i].data, DISK_SECTOR_SIZE);
+    }
+}
+
+/* Read flash block 'idx' from XIP, decrypt all 8 sectors and apply any
+ * pending writes for that block. Result is 4 KiB of clear text. */
+static bool read_block_apply(uint32_t idx, uint8_t clear[DISK_BLOCK_SIZE]) {
+    const uint8_t *raw = (const uint8_t *)(XIP_BASE + DISK_FLASH_START +
+                                           idx * DISK_BLOCK_SIZE);
+    for (uint32_t s = 0; s < DISK_SECTORS_PER_BLOCK; s++) {
+        uint32_t lba = idx * DISK_SECTORS_PER_BLOCK + s;
+        uint8_t tweak[16];
+        make_tweak(lba, tweak);
+        memcpy(clear + s * DISK_SECTOR_SIZE, raw + s * DISK_SECTOR_SIZE,
+               DISK_SECTOR_SIZE);
+        if (!fj_xts_sector(disk_key, tweak, clear + s * DISK_SECTOR_SIZE, false))
+            return false;
+    }
+    wq_apply_to_block(idx, clear);
+    return true;
+}
+
+/* Encrypt and write one 4 KiB block from clear text, updating its CRC. */
+static void write_block(uint32_t idx, const uint8_t clear[DISK_BLOCK_SIZE]) {
+    uint8_t enc[DISK_BLOCK_SIZE];
+    for (uint32_t s = 0; s < DISK_SECTORS_PER_BLOCK; s++) {
+        uint32_t lba = idx * DISK_SECTORS_PER_BLOCK + s;
+        uint8_t tweak[16];
+        make_tweak(lba, tweak);
+        memcpy(enc + s * DISK_SECTOR_SIZE, clear + s * DISK_SECTOR_SIZE,
+               DISK_SECTOR_SIZE);
+        if (!fj_xts_sector(disk_key, tweak, enc + s * DISK_SECTOR_SIZE, true)) {
+            return; /* failed to encrypt; leave on-flash copy intact */
+        }
+    }
+    uint32_t offset = DISK_FLASH_START + idx * DISK_BLOCK_SIZE;
     uint32_t ints = save_and_disable_interrupts();
     flash_range_erase(offset, DISK_BLOCK_SIZE);
-    flash_range_program(offset, block_cache, DISK_BLOCK_SIZE);
+    flash_range_program(offset, enc, DISK_BLOCK_SIZE);
     restore_interrupts(ints);
-    cache_dirty = false;
+    block_crcs[idx] = crc32_block(clear);
+    crc_dirty = true;
+}
+
+/* Write all pending sectors to flash. Each touched 4 KiB block is written
+ * once (reads current on-flash block, applies pending writes, encrypts),
+ * then the CRC table is persisted if any block changed. */
+static void flush_pending_writes(void) {
+    if (wq_empty() && !crc_dirty) return;
+    for (unsigned i = 0; i < WRITE_QUEUE_SIZE; i++) {
+        if (!wq[i].in_use) continue;
+        uint32_t idx = block_index_for_lba(wq[i].lba);
+        uint8_t clear[DISK_BLOCK_SIZE];
+        if (read_block_apply(idx, clear)) {
+            write_block(idx, clear);
+        }
+        /* Drop every queued write belonging to this block. */
+        for (unsigned j = 0; j < WRITE_QUEUE_SIZE; j++) {
+            if (wq[j].in_use && block_index_for_lba(wq[j].lba) == idx)
+                wq[j].in_use = false;
+        }
+    }
+    if (crc_dirty) crc_table_write();
 }
 
 /* --- FAT16 image generation ------------------------------------------ */
@@ -163,36 +328,27 @@ static void build_clear_sector(uint32_t lba, uint8_t out[DISK_SECTOR_SIZE]) {
 /* Encrypt and write the filesystem metadata (boot sector, both FATs, root
  * directory) into the flash partition. The data region is left erased
  * (0xFF) and is written lazily on demand, so first-boot initialisation is
- * fast instead of erasing the whole 12 MiB. */
+ * fast instead of erasing the whole 12 MiB. Also builds and writes the
+ * integrity CRC table. */
 static void init_filesystem(void) {
     uint32_t metadata_end_block = (data_lba + DISK_SECTORS_PER_BLOCK - 1) /
                                   DISK_SECTORS_PER_BLOCK;
-    if (metadata_end_block > DISK_TOTAL_BLOCKS)
-        metadata_end_block = DISK_TOTAL_BLOCKS;
+    if (metadata_end_block > DISK_DATA_BLOCKS)
+        metadata_end_block = DISK_DATA_BLOCKS;
 
     for (uint32_t idx = 0; idx < metadata_end_block; idx++) {
-        uint32_t base_lba = idx * DISK_SECTORS_PER_BLOCK;
+        uint8_t clear[DISK_BLOCK_SIZE];
         for (uint32_t s = 0; s < DISK_SECTORS_PER_BLOCK; s++) {
-            uint32_t lba = base_lba + s;
+            uint32_t lba = idx * DISK_SECTORS_PER_BLOCK + s;
             if (lba >= DISK_TOTAL_SECTORS) break;
-            uint8_t clear[DISK_SECTOR_SIZE];
-            uint8_t tmp[DISK_SECTOR_SIZE];
-            uint8_t tweak[16];
-            build_clear_sector(lba, clear);
-            make_tweak(lba, tweak);
-            memcpy(tmp, clear, DISK_SECTOR_SIZE);
-            if (!fj_xts_sector(disk_key, tweak, tmp, true)) return;
-            memcpy(block_cache + s * DISK_SECTOR_SIZE, tmp, DISK_SECTOR_SIZE);
+            build_clear_sector(lba, clear + s * DISK_SECTOR_SIZE);
         }
-        uint32_t offset = DISK_FLASH_START + idx * DISK_BLOCK_SIZE;
-        uint32_t ints = save_and_disable_interrupts();
-        flash_range_erase(offset, DISK_BLOCK_SIZE);
-        flash_range_program(offset, block_cache, DISK_BLOCK_SIZE);
-        restore_interrupts(ints);
+        write_block(idx, clear);
     }
-    cache_block = 0xFFFFFFFFu;
-    cache_valid = false;
-    cache_dirty = false;
+    /* Build CRC for every data block (metadata above + erased data). */
+    crc_table_build_from_disk();
+    crc_table_write();
+    wq_reset();
 }
 
 /* Compute FAT16 geometry for the fixed partition size. */
@@ -216,22 +372,13 @@ static void compute_geometry(void) {
     total_clusters = DISK_TOTAL_SECTORS - data_lba;
 }
 
-/* Returns true if the partition appears uninitialised: the boot sector
- * block is still erased (all 0xFF). */
-static bool partition_is_empty(void) {
-    const uint8_t *p = (const uint8_t *)(XIP_BASE + DISK_FLASH_START);
-    for (uint32_t i = 0; i < DISK_BLOCK_SIZE; i++) {
-        if (p[i] != 0xFF) return false;
-    }
-    return true;
-}
-
-/* Decrypt the boot sector and check its 0x55 0xAA signature. */
+/* Decrypt the boot sector, check its 0x55 0xAA signature AND its CRC from
+ * the persistent integrity table. */
 static bool boot_sector_valid(void) {
-    load_block(0);
-    uint8_t boot[DISK_SECTOR_SIZE];
-    if (!decrypt_sector(0, boot)) return false;
-    return boot[510] == 0x55 && boot[511] == 0xAA;
+    uint8_t clear[DISK_BLOCK_SIZE];
+    if (!read_block_apply(0, clear)) return false;
+    if (!(clear[510] == 0x55 && clear[511] == 0xAA)) return false;
+    return crc32_block(clear) == block_crcs[0];
 }
 
 /* ------------------------------------------------------------------ */
@@ -245,6 +392,7 @@ void fj_msc_init(void) {
     }
 
     compute_geometry();
+    wq_reset();
     disk_ready = false;
 }
 
@@ -252,13 +400,18 @@ void fj_msc_task(void) {
     /* One-time filesystem initialisation, deferred out of startup so the
      * device always enumerates even if the partition needs (re)building. */
     if (!fs_initialised) {
-        if (partition_is_empty() || !boot_sector_valid()) {
+        if (!crc_table_load()) {
+            /* No valid integrity table: first boot, build the filesystem. */
+            init_filesystem();
+        } else if (!boot_sector_valid()) {
+            /* Table present but data corrupt (power loss / tampering):
+             * rebuild the filesystem. */
             init_filesystem();
         }
         fs_initialised = true;
         return;
     }
-    flush_disk_cache();
+    flush_pending_writes();
 }
 
 void tud_msc_inquiry_cb(uint8_t lun, uint8_t vendor_id[8],
@@ -309,10 +462,10 @@ int32_t tud_msc_read10_cb(uint8_t lun, uint32_t lba, uint32_t offset,
         bufsize > DISK_SECTOR_SIZE - offset) return -1;
 
     fj_led_activity();
-    load_block(block_index_for_lba(lba));
-    uint8_t sector[DISK_SECTOR_SIZE];
-    if (!decrypt_sector(lba, sector)) return -1;
-    memcpy(buffer, sector + offset, bufsize);
+    uint8_t clear[DISK_BLOCK_SIZE];
+    if (!read_block_apply(block_index_for_lba(lba), clear)) return -1;
+    uint32_t off = (lba % DISK_SECTORS_PER_BLOCK) * DISK_SECTOR_SIZE;
+    memcpy(buffer, clear + off + offset, bufsize);
     return (int32_t)bufsize;
 }
 
@@ -330,14 +483,25 @@ int32_t tud_msc_write10_cb(uint8_t lun, uint32_t lba, uint32_t offset,
         bufsize > DISK_SECTOR_SIZE - offset) return -1;
 
     fj_led_activity();
-    load_block(block_index_for_lba(lba));
-
-    /* Decrypt the target sector, patch, re-encrypt into the cache. */
     uint8_t sector[DISK_SECTOR_SIZE];
-    if (!decrypt_sector(lba, sector)) return -1;
-    memcpy(sector + offset, buffer, bufsize);
-    if (!encrypt_sector_into_cache(lba, sector)) return -1;
+    if (offset == 0 && bufsize == DISK_SECTOR_SIZE) {
+        /* Full-sector write: enqueue directly. */
+        memcpy(sector, buffer, DISK_SECTOR_SIZE);
+    } else {
+        /* Partial write: read the existing sector, patch, enqueue full sector. */
+        uint8_t clear[DISK_BLOCK_SIZE];
+        if (!read_block_apply(block_index_for_lba(lba), clear)) return -1;
+        uint32_t off = (lba % DISK_SECTORS_PER_BLOCK) * DISK_SECTOR_SIZE;
+        memcpy(sector, clear + off, DISK_SECTOR_SIZE);
+        memcpy(sector + offset, buffer, bufsize);
+    }
 
+    if (!wq_enqueue(lba, sector)) {
+        /* Queue full (should be rare because the main loop flushes). Fall
+         * back to flushing now to guarantee the write is not lost. */
+        flush_pending_writes();
+        if (!wq_enqueue(lba, sector)) return -1;
+    }
     return (int32_t)bufsize;
 }
 
@@ -352,6 +516,9 @@ int32_t tud_msc_scsi_cb(uint8_t lun, uint8_t const scsi_cmd[16],
 
 /* Exposed to the console to mount/unmount the volume on unlock/lock. */
 void fj_msc_set_ready(bool ready) {
+    /* On unmount/lock, flush any pending writes to flash first so no data
+     * is lost and the decrypted volume is never left exposed. */
+    if (!ready) flush_pending_writes();
     disk_ready = ready && fj_state_get() == FJ_STATE_UNLOCKED && fs_initialised;
 }
 

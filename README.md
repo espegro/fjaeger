@@ -106,7 +106,10 @@ CTAP2-credentials lagres i donglens flash (opptil 8). Attestasjonen er `none`, s
   - Kun **ECDSA P-256 / ES256** støttes (ingen EdDSA/ed25519-sk).
   - Enheten må være ulåst (PIN) for at `makeCredential`/`getAssertion` skal aksepteres.
   - Credentials er flash-persistente (opptil 8) i et kontrollsummert A/B-format, skrevet deferert fra main-loop.
-- MSC-disken er en **12 MiB vedvarende FAT16-partisjon** i on-board-flash, AES-XTS-kryptert i farten med en **dedikert disknøkkel** (uavhengig av keyslots). Metadata (boot, FAT, rot) initialiseres én gang ved første oppstart; dataregionen skrives lazy. Data overlever reboot. Skriving av store filer er treg og sliter på flash fordi hver sektoroppdatering krever flash-erase.
+- MSC-disken er en **12 MiB vedvarende FAT16-partisjon** i on-board-flash, AES-XTS-kryptert i farten med en **dedikert disknøkkel** (uavhengig av keyslots). Metadata (boot, FAT, rot) initialiseres én gang ved første oppstart; dataregionen skrives lazy. Data overlever reboot.
+  - **Deferred write-behind:** USB MSC-callbacker køer sektor-skriver; selve flash-erase/program gjøres i main-loop (`fj_msc_task`), aldri inne i en USB-transaksjon. Data flusher ved `LOCK`/unmount og kontinuerlig.
+  - **Integritet:** en vedvarende CRC-32-tabell (én per 4 KiB-blokk, lagret i klartekst i de siste blokkene av partisjonen) verifiseres ved mount. Korrupsjon fra strømbrudd eller tukling oppdages og disken re-initialiseres i stedet for å serve korrupte data.
+  - Skriving av store filer er treg og sliter på flash fordi hver sektoroppdatering krever flash-erase.
 - **Flash-layout:** firmware ~128 KB fra `0x10000000`, disk-partisjon 12 MiB fra `0x10100000` (offset `0x00100000`), lager (PIN/slots/CTAP2/disknøkkel) i de siste 8 KiB.
 
 ## Lisens
