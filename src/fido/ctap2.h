@@ -28,6 +28,10 @@ void fj_ctap2_init(void);
 /* Poll: flush deferred flash writes. Call from the main loop. */
 void fj_ctap2_task(void);
 
+/* Forget the in-RAM credential cache. Persistence is cleared by the caller's
+ * factory-reset transaction. */
+void fj_ctap2_forget_all(void);
+
 /* Process one complete CTAP2 message. 'msg' is the CBOR-message payload
  * as received on the U2FHID CBOR channel (first byte is the CTAP2 command
  * byte). Writes the CBOR response into 'out' (up to out_cap bytes) and

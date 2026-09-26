@@ -8,6 +8,7 @@ Sikkerhetsnøkkel (USB-dongle) bygget på **RP2350** (16 MB flash). Prosjektet g
 - **Flere nøkkelprofiler ("slots")** — opptil 8 uavhengige profiler, hver med egen ECDSA-nøkkel og XTS-nøkkel. Velg aktiv profil over serial med `KEY SELECT <n>`.
 - **Kryptert USB-stasjon (MSC)** — en **12 MiB vedvarende** FAT16-partisjon i on-board-flash, AES-XTS-kryptert med en **dedikert disknøkkel** som er uavhengig av keyslots. Mountes bare når enheten er ulåst. Data overlever reboot.
 - **Lås/ulås-modell** — når låst nektes signering, avkryptering og skriving. Ulåsing krever PIN over serial.
+- **Brute-force-beskyttelse** — enhets-PIN og disk-PIN sperres etter fem feil. En felles recovery-PUK kan fjerne sperren; fem feil PUK-forsøk utfører factory-wipe.
 - **Serial-konsoll (USB CDC)** — `LOCK`, `UNLOCK`, `RESET`, `TIMEOUT`, nøkkelhåndtering, m.m.
 
 ## Hardware
@@ -46,6 +47,7 @@ src/
 - **Disk-lås** (`DISK LOCK`/`DISK UNLOCK`): den krypterte MSC-en er kun mountet/lesbar/skrivbar når `DISK UNLOCK` er gitt. `DISK UNLOCK` krever at enheten er ulåst; `LOCK` og auto-relåsing lukker også disken.
 - MSC-disken bruker en **dedikert permanent XTS-nøkkel** lagret i flash-lageret, uavhengig av keyslots. Bytte eller sletting av keyslots endrer ikke diskdata.
 - PIN-en lagres foreløpig som en SHA-256-hash og sammenlignes i konstant tid. Dette er ikke tilstrekkelig beskyttelse mot offline-angrep på en flashdump og skal erstattes med saltet, treg nøkkelavledning.
+- Enhets-PIN og disk-PIN har separate, vedvarende feiltellere. PUK fjerner en disk-PIN-sperre, men erstatter ikke disk-PIN: disknøkkelen er fortsatt pakket med den riktige disk-PIN-en.
 
 > **Merk:** RP2350 har ingen ekte hardware secure element (som ATECC608B). Secure boot finnes, men beskyttelse mot en fysisk angriper med laboratorieutstyr er begrenset. Dette er en prototype/utviklingsplattform, ikke sertifisert produksjonssikkerhetsnøkkel.
 
@@ -78,17 +80,29 @@ Koble til konsollen (f.eks. `screen /dev/ttyACM0 115200`):
 | `LOCK` | Lås enheten (og lukk disken) |
 | `UNLOCK <pin>` | Lås opp **enheten** for nøkkeloperasjoner (ikke disken) |
 | `SETPIN <pin>` | Sett/endre PIN |
-| `DISK UNLOCK` | Lås opp/mount den krypterte disken (eget steg) |
+| `UNLOCKPUK <puk>` | Lås opp sperret enhets-PIN med recovery-PUK |
+| `PUK <code>` | Sett/endre recovery-PUK |
+| `DISK SETPIN <pin>` | Sett/endre disk-PIN |
+| `DISK UNLOCK <pin>` | Lås opp/mount den krypterte disken (eget steg) |
+| `DISK UNBLOCK <puk>` | Fjern disk-PIN-sperre; korrekt disk-PIN kreves etterpå |
 | `DISK LOCK` | Lås/unmount disken |
 | `DISK STATUS` | Vis disk-tilstand |
 | `KEY LIST` | Vis alle slots |
 | `KEY SELECT <n>` | Velg aktiv profil |
 | `KEY PROVISION <n> [name]` | Opprett ny nøkkel i slot `n` |
 | `KEY ERASE <n>` | Slett slot `n` |
-| `TIMEOUT <seconds>` | Sett auto-relåsing (0 = av) |
+| `TIMEOUT <seconds>` | Lagre auto-relåsing (standard 900 sekunder; 0 = av) |
 | `RESET` | Tilbakestill enheten |
 
 > **Uavhengig disk-lås:** `UNLOCK <pin>` låser bare opp **enheten** (for FIDO/SSH-signering). Den krypterte disken er et separat steg: `DISK UNLOCK`. `LOCK` og auto-relåsing lukker også disken, og `DISK UNLOCK` krever at enheten er ulåst.
+
+Auto-lock er 15 minutter som fabrikkstandard. `TIMEOUT`-verdien lagres i
+flashlageret og overlever både omstart og vanlig firmwareflash. `TIMEOUT 0`
+lagres som en eksplisitt deaktivering.
+
+Konsollen ekkoer ikke kommandoer. Slå også av lokal echo i terminalprogrammet;
+fastvaren nullstiller kommandobufferen etter hver kommando, men kan ikke slette
+tekst som terminalprogrammet selv har vist eller logget.
 
 ## SSH (sk-nøkler)
 
@@ -107,7 +121,7 @@ CTAP2-credentials lagres i donglens flash (opptil 8). Attestasjonen er `none`, s
 ## Status / kjent begrensning
 
 - **Legacy U2F/CTAP1 er deaktivert.** Enheten annonserer CTAPHID `NMSG` inntil CTAP1-koden eventuelt erstattes med en komplett implementasjon.
-- **CTAP2** har implementasjoner av `authenticatorGetInfo`, `makeCredential` og `getAssertion` med `none`-attestasjon. Parser og responsformat har hosttester, men fysisk end-to-end-test med OpenSSH gjenstår.
+- **CTAP2** har implementasjoner av `authenticatorGetInfo`, `makeCredential` og `getAssertion` med `none`-attestasjon. Parser og responsformat har hosttester; OpenSSH enrollment, signering, verifisering og reell SSH-innlogging er fysisk testet på RP2350-donglen.
   - Kun **ECDSA P-256 / ES256** støttes (ingen EdDSA/ed25519-sk).
   - Enheten må være ulåst (PIN) for at `makeCredential`/`getAssertion` skal aksepteres.
   - Credentials er flash-persistente (opptil 8) i et kontrollsummert A/B-format, skrevet deferert fra main-loop.

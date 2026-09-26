@@ -1,6 +1,6 @@
 # Fjaeger — status og overlevering
 
-Oppdatert: 2026-09-26 (persistent MSC-disk implementert)
+Oppdatert: 2026-09-27 (dedikert disk-PIN, PUK og brute-force-beskyttelse)
 
 ## Kort status
 
@@ -62,6 +62,19 @@ cc -std=c11 -Wall -Wextra -Werror \
 
 Forventet resultat: `ctap2 host tests: ok`.
 
+Sikkerhetstilstandstesten kjøres slik:
+
+```bash
+cc -std=c11 -Wall -Wextra -Werror \
+  -Itests/stubs -Isrc/core -Isrc/fido -Isrc/usb \
+  tests/test_security.c src/core/state.c \
+  -o /tmp/fjaeger-test-security
+/tmp/fjaeger-test-security
+```
+
+Forventet resultat: `security host tests: ok`. Den dekker PIN-sperring,
+PUK-gjenåpning, full live factory-wipe og at auto-lock også lukker disken.
+
 ## Fikset i denne runden
 
 ### Grunnleggende firmware og USB
@@ -80,6 +93,15 @@ Forventet resultat: `ctap2 host tests: ok`.
 - Flashprogrammering er justert til 256-byte-sider.
 - PIN, slots og CTAP2-credentials overlever reset og vanlig firmwareflash.
 - Auto-lock kobler også bort MSC-tilgang.
+- Auto-lock er 900 sekunder som standard. `TIMEOUT <sekunder>` lagres i
+  A/B-flashlageret og overlever omstart; `TIMEOUT 0` deaktiverer den vedvarende.
+- Enhets-PIN og disk-PIN sperres separat etter fem feilforsøk. Recovery-PUK
+  nullstiller sperren; fem feil PUK-forsøk låser alt, nullstiller live
+  nøkkelmateriale og sletter begge kopier av flashlageret.
+- `DISK UNBLOCK <puk>` fjerner bare disk-PIN-sperren. PUK kan ikke erstatte
+  disk-PIN eller dekryptere disknøkkelen.
+- Konsollen ekkoer ikke hemmeligheter og nullstiller kommandobufferen etter
+  behandling. Lokal echo/logging må deaktiveres i terminalprogrammet.
 
 ### FIDO/CTAP2 og OpenSSH
 
@@ -292,9 +314,12 @@ verifisert er fjernet — se «Fysisk verifisert 2026-09-26» over):
 
 ## Kjente begrensninger og sikkerhetsarbeid
 
-- PIN sendes og vises i klartekst på CDC-konsollen.
+- PIN og PUK sendes som kommandotekst over CDC. Fastvaren ekkoer ikke input og
+  nullstiller kommandobufferen etter bruk, men brukeren må slå av lokal echo og
+  eventuell logging i terminalprogrammet.
 - PIN lagres som usaltet SHA-256. Det må erstattes med saltet, treg
-  nøkkelavledning, og feilforsøk trenger ratebegrensning/forsinkelse.
+  nøkkelavledning. Enhets-PIN og disk-PIN sperres nå etter fem feil, og fem
+  feil PUK-forsøk sletter flashlageret, men det mangler fortsatt tidsforsinkelse.
 - Det finnes ingen egen fysisk touch-knapp. CTAP `up` representerer i praksis at
   enheten allerede er låst opp via PIN, ikke en ny fysisk bekreftelse per bruk.
 - Full U2F/CTAP1 er ikke implementert. Bare kompatibilitetsproben som OpenSSH/
@@ -323,7 +348,8 @@ verifisert er fjernet — se «Fysisk verifisert 2026-09-26» over):
    verifisert 2026-09-26». Fortsett med de gjenværende punktene i «Dette bør
    testes videre».
 2. Legg til automatiserte parser- og transporttester for CTAPHID/CBOR.
-3. Herd PIN-håndtering og legg til forsøksteller/ratebegrensning.
+3. Erstatt raske PIN-/PUK-hasher med en saltet, treg KDF og legg til
+   tidsforsinkelse i tillegg til de vedvarende forsøkstellerne.
 4. Bestem om prosjektet skal ha fysisk bekreftelsesknapp for korrekt FIDO
    user-presence-semantikk.
 5. **Vedvarende MSC-partisjon er implementert** (12 MiB, dedikert disknøkkel,

@@ -25,6 +25,13 @@ extern "C" {
 #define FJ_ECDSA_KEY_BYTES 32   /* private scalar for P-256 */
 #define FJ_AES_KEY_BYTES   32   /* two AES-128 keys for XTS */
 
+/* Brute-force protection: after FJ_MAX_PIN_FAILS wrong PIN attempts a PIN
+ * becomes BLOCKED and a PUK is required. After FJ_MAX_PUK_FAILS wrong PUK
+ * attempts the device wipes itself (all slots, the disk secret and the
+ * PIN) — a full factory reset. */
+#define FJ_MAX_PIN_FAILS  5
+#define FJ_MAX_PUK_FAILS  5
+
 /* CTAP2 credential store size. */
 #define FJ_CTAP2_CREDS     8
 #define FJ_CRED_ID_LEN     16
@@ -82,12 +89,41 @@ bool fj_keys_set_pin_hash(const uint8_t hash[32]);
 /* Load the stored PIN hash (if any). Returns false if none is stored. */
 bool fj_keys_get_pin_hash(uint8_t hash[32]);
 
-/* The MSC drive uses its own permanent XTS key, independent of the active
- * slot. Returns true and fills 'key' (FJ_AES_KEY_BYTES) if one is stored. */
-bool fj_keys_get_disk_key(uint8_t key[FJ_AES_KEY_BYTES]);
+/* The MSC drive's secret is wrapped by a dedicated disk PIN. These accessors
+ * read/write the stored (wrapped) secret, its KDF salt and the disk-PIN hash.
+ * See msc_disk.c for how the secret is wrapped/unwrapped. */
+bool fj_keys_disk_secret_set(void);
+void fj_keys_get_disk_secret(uint8_t enc[32], uint8_t salt[16], uint8_t hash[32]);
+bool fj_keys_set_disk_secret(const uint8_t enc[32], const uint8_t salt[16],
+                             const uint8_t hash[32]);
 
-/* Persist the permanent MSC disk key to flash. */
-bool fj_keys_set_disk_key(const uint8_t key[FJ_AES_KEY_BYTES]);
+/* Brute-force protection state for the device PIN, disk PIN and PUK. */
+typedef struct {
+    uint8_t pin_fail;     /* consecutive wrong device-PIN attempts */
+    uint8_t pin_blocked;  /* device PIN blocked, PUK required */
+    uint8_t disk_fail;    /* consecutive wrong disk-PIN attempts */
+    uint8_t disk_blocked; /* disk PIN blocked, PUK required */
+    uint8_t puk_fail;     /* consecutive wrong PUK attempts */
+} fj_security_t;
+
+/* Read/write the brute-force protection state in one flash write. */
+bool fj_keys_get_security(fj_security_t *sec);
+bool fj_keys_set_security(const fj_security_t *sec);
+
+/* The recovery PUK (a long code) stored as a SHA-256 hash. */
+bool fj_keys_puk_configured(void);
+bool fj_keys_set_puk_hash(const uint8_t hash[32]);
+bool fj_keys_get_puk_hash(uint8_t hash[32]);
+
+/* Persistent auto-lock override. Returns false when no explicit TIMEOUT has
+ * been stored, in which case the state layer uses its 15-minute default. */
+bool fj_keys_get_timeout(uint32_t *seconds);
+bool fj_keys_set_timeout(uint32_t seconds);
+
+/* Factory reset: erase every slot, the disk secret and the PIN. After this
+ * the device is fully unprovisioned. The (encrypted) disk data becomes
+ * unrecoverable because its wrapping key is destroyed. */
+void fj_keys_wipe(void);
 
 /* Load all persisted CTAP2 credentials into 'out' (FJ_CTAP2_CREDS
  * entries). Returns true on success. */

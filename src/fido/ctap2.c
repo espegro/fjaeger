@@ -100,6 +100,17 @@ void fj_ctap2_task(void) {
     }
 }
 
+void fj_ctap2_forget_all(void) {
+    memset(creds, 0, sizeof(creds));
+    memset(work_pub, 0, sizeof(work_pub));
+    memset(work_authdata, 0, sizeof(work_authdata));
+    memset(work_to_sign, 0, sizeof(work_to_sign));
+    memset(work_signature_raw, 0, sizeof(work_signature_raw));
+    memset(work_signature_der, 0, sizeof(work_signature_der));
+    sign_counter = 0;
+    ctap2_dirty = false;
+}
+
 static fj_ctap2_cred_t *find_cred_by_id(const uint8_t *id) {
     for (unsigned i = 0; i < FJ_CTAP2_CREDS; i++) {
         if (creds[i].in_use &&

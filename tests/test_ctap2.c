@@ -145,6 +145,12 @@ int main(void) {
     assert(response[2] == 0x01 && response[3] == 0xa2);
     assert(response[4] == 0x62 && response[5] == 'i' && response[6] == 'd');
 
+    /* Factory reset must invalidate the live credential cache immediately,
+     * without waiting for a reboot. */
+    fj_ctap2_forget_all();
+    len = fj_ctap2_dispatch(request, request_len, response, sizeof(response));
+    assert(len == 1 && response[0] != 0);
+
     puts("ctap2 host tests: ok");
     return 0;
 }

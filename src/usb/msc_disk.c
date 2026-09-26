@@ -52,6 +52,7 @@ static uint32_t total_clusters;
 
 static bool disk_ready = false;
 static bool fs_initialised = false;
+static bool disk_unlocked = false;   /* set once the disk PIN is verified */
 
 /* Permanent disk key (two AES-128 keys for XTS). */
 static uint8_t disk_key[FJ_AES_KEY_BYTES];
@@ -384,33 +385,149 @@ static bool boot_sector_valid(void) {
 /* Public API                                                          */
 /* ------------------------------------------------------------------ */
 void fj_msc_init(void) {
-    /* Ensure a permanent disk key exists (store write; safe in init). */
-    if (!fj_keys_get_disk_key(disk_key)) {
-        fj_random(disk_key, sizeof(disk_key));
-        fj_keys_set_disk_key(disk_key);
-    }
-
     compute_geometry();
     wq_reset();
     disk_ready = false;
+    disk_unlocked = false;
+    fs_initialised = false;
+}
+
+/* Derive a 32-byte wrap key from the disk PIN and salt via HKDF. */
+static bool disk_wrap_key(const char *pin, const uint8_t salt[16], uint8_t wrap[32]) {
+    uint8_t ikm[FJ_AES_KEY_LEN];
+    memset(ikm, 0, sizeof(ikm));
+    size_t n = strlen(pin);
+    if (n > sizeof(ikm)) n = sizeof(ikm);
+    memcpy(ikm, pin, n);
+    return fj_hkdf(ikm, "diskwrap", salt, 16, wrap);
+}
+
+/* Hash the disk PIN with its salt (SHA-256), matching the stored hash. */
+static void disk_pin_hash(const char *pin, const uint8_t salt[16], uint8_t out[32]) {
+    uint8_t buf[48];
+    size_t n = strlen(pin);
+    if (n > 32) n = 32;
+    memcpy(buf, pin, n);
+    memcpy(buf + n, salt, 16);
+    fj_sha256(buf, n + 16, out);
+}
+
+/* Verify the disk PIN (constant-time) and unwrap the disk key into disk_key. */
+static bool disk_unwrap(const char *pin) {
+    uint8_t enc[32], salt[16], hash[32];
+    fj_keys_get_disk_secret(enc, salt, hash);
+
+    uint8_t h[32];
+    disk_pin_hash(pin, salt, h);
+    uint8_t acc = 0;
+    for (int i = 0; i < 32; i++) acc |= h[i] ^ hash[i];
+    if (acc != 0) return false;
+
+    uint8_t wrap[32];
+    if (!disk_wrap_key(pin, salt, wrap)) return false;
+    for (int i = 0; i < 32; i++) disk_key[i] = enc[i] ^ wrap[i];
+    return true;
+}
+
+/* Build or verify the filesystem using the live (unwrapped) disk key. */
+static bool fj_msc_prepare(void) {
+    if (!crc_table_load()) {
+        init_filesystem();
+    } else if (!boot_sector_valid()) {
+        init_filesystem();
+    }
+    fs_initialised = true;
+    return true;
+}
+
+bool fj_msc_has_pin(void) {
+    return fj_keys_disk_secret_set();
+}
+
+/* Whether the disk PIN is currently blocked (needs a PUK). */
+bool fj_msc_pin_blocked(void) {
+    fj_security_t sec;
+    return fj_keys_get_security(&sec) && sec.disk_blocked;
+}
+
+bool fj_msc_unlock(const char *pin) {
+    if (!pin || !fj_keys_disk_secret_set()) return false;
+
+    /* Brute-force protection: a blocked disk PIN requires the PUK. */
+    fj_security_t sec;
+    if (!fj_keys_get_security(&sec)) return false;
+    if (sec.disk_blocked) return false;
+
+    if (!disk_unwrap(pin)) {
+        /* Wrong disk PIN: count it and block once the limit is reached. */
+        sec.disk_fail++;
+        if (sec.disk_fail >= FJ_MAX_PIN_FAILS) sec.disk_blocked = 1;
+        fj_keys_set_security(&sec);
+        return false;
+    }
+
+    /* Correct disk PIN resets the counter. */
+    if (sec.disk_fail != 0 || sec.disk_blocked) {
+        sec.disk_fail = 0;
+        sec.disk_blocked = 0;
+        fj_keys_set_security(&sec);
+    }
+
+    if (!fj_msc_prepare()) return false;
+    disk_unlocked = true;
+    disk_ready = true;
+    return true;
+}
+
+/* The disk key is wrapped only by the disk PIN. A PUK can safely clear the
+ * brute-force block, but cannot substitute for that PIN without weakening
+ * the at-rest encryption model. */
+fj_puk_result_t fj_msc_unblock_puk(const char *puk) {
+    fj_puk_result_t result = fj_state_verify_puk(puk);
+    if (result != FJ_PUK_OK) return result;
+
+    fj_security_t sec;
+    if (!fj_keys_get_security(&sec)) return FJ_PUK_WRONG;
+    sec.disk_fail = 0;
+    sec.disk_blocked = 0;
+    return fj_keys_set_security(&sec) ? FJ_PUK_OK : FJ_PUK_WRONG;
+}
+
+void fj_msc_lock(void) {
+    if (disk_ready) flush_pending_writes();
+    disk_ready = false;
+    disk_unlocked = false;
+    memset(disk_key, 0, sizeof(disk_key));
+}
+
+bool fj_msc_set_pin(const char *pin) {
+    size_t n = pin ? strlen(pin) : 0;
+    if (n < 4 || n > 32) return false;
+
+    uint8_t salt[16], enc[32], wrap[32], hash[32];
+    if (!fj_keys_disk_secret_set()) {
+        /* First-time: generate a fresh master secret for the drive. */
+        fj_random(salt, sizeof(salt));
+        fj_random(disk_key, sizeof(disk_key));
+    } else {
+        /* Change PIN: require the drive to be unlocked (holds the secret). */
+        if (!disk_unlocked) return false;
+        fj_random(salt, sizeof(salt));
+    }
+
+    if (!disk_wrap_key(pin, salt, wrap)) return false;
+    for (int i = 0; i < 32; i++) enc[i] = disk_key[i] ^ wrap[i];
+    disk_pin_hash(pin, salt, hash);
+
+    if (!fj_keys_set_disk_secret(enc, salt, hash)) return false;
+    if (!fj_msc_prepare()) return false;
+    disk_unlocked = true;
+    disk_ready = true;
+    return true;
 }
 
 void fj_msc_task(void) {
-    /* One-time filesystem initialisation, deferred out of startup so the
-     * device always enumerates even if the partition needs (re)building. */
-    if (!fs_initialised) {
-        if (!crc_table_load()) {
-            /* No valid integrity table: first boot, build the filesystem. */
-            init_filesystem();
-        } else if (!boot_sector_valid()) {
-            /* Table present but data corrupt (power loss / tampering):
-             * rebuild the filesystem. */
-            init_filesystem();
-        }
-        fs_initialised = true;
-        return;
-    }
-    flush_pending_writes();
+    if (disk_ready) flush_pending_writes();
 }
 
 void tud_msc_inquiry_cb(uint8_t lun, uint8_t vendor_id[8],
@@ -513,17 +630,16 @@ int32_t tud_msc_scsi_cb(uint8_t lun, uint8_t const scsi_cmd[16],
     return 0;
 }
 
-/* Exposed to the console to mount/unmount the volume independently of the
- * device lock state. */
+/* Set ready only when the drive has been unlocked with its PIN. */
 void fj_msc_set_ready(bool ready) {
     /* On unmount/lock, flush any pending writes to flash first so no data
      * is lost and the decrypted volume is never left exposed. */
     if (!ready) flush_pending_writes();
-    disk_ready = ready && fs_initialised;
+    disk_ready = ready && disk_unlocked && fs_initialised;
 }
 
 bool fj_msc_is_ready(void) {
-    return disk_ready && fs_initialised;
+    return disk_ready && disk_unlocked && fs_initialised;
 }
 
 #endif /* CFG_TUD_MSC */

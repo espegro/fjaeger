@@ -31,8 +31,12 @@
 
 #define LINE_MAX 96
 
+#define PROMPT "fjaeger> "
+
 static char line[LINE_MAX];
 static size_t line_len = 0;
+static bool was_connected = false;
+static bool last_was_cr = false;
 
 /* ------------------------------------------------------------------ */
 /* Line output (respects CDC back-pressure)                            */
@@ -53,6 +57,14 @@ static void out(const char *s) {
 static void outln(const char *s) {
     out(s);
     out("\r\n");
+}
+
+/* Prevent the compiler from retaining command arguments (including PINs and
+ * PUKs) in the reusable input buffer. The firmware never echoes input; users
+ * must also keep local echo disabled in their terminal program. */
+static void clear_line(void) {
+    volatile char *p = line;
+    for (size_t i = 0; i < sizeof(line); i++) p[i] = 0;
 }
 
 /* ------------------------------------------------------------------ */
@@ -88,10 +100,14 @@ static void cmd_help(void) {
     outln("  LOCK                       lock device (and close the disk)");
     outln("  UNLOCK <pin>               unlock device for key ops only");
     outln("  SETPIN <pin>               set/change PIN");
-    outln("  DISK UNLOCK                unlock/mount the encrypted drive");
-    outln("  DISK LOCK                  lock/unmount the drive");
+    outln("  UNLOCKPUK <puk>            unblock device with recovery PUK");
+    outln("  PUK <code>                 set/change the recovery PUK");
     outln("  DISK STATUS                show drive lock state");
-    outln("  TIMEOUT <sec>              auto-relock after sec (0 = off)");
+    outln("  DISK SETPIN <pin>          set/change the disk PIN");
+    outln("  DISK UNLOCK <pin>          unlock/mount the drive with disk PIN");
+    outln("  DISK UNBLOCK <puk>         clear disk-PIN block (PIN still required)");
+    outln("  DISK LOCK                  lock/unmount the drive");
+    outln("  TIMEOUT <sec>              save auto-lock delay (default 900; 0 = off)");
     outln("  RESET                      reboot the device");
     outln("  KEY LIST                   list all 8 slots");
     outln("  KEY SELECT <n>             set active slot (0-7)");
@@ -100,14 +116,25 @@ static void cmd_help(void) {
 }
 
 static void cmd_status(void) {
-    char buf[96];
+    char buf[192];
+    fj_security_t sec = {0};
+    bool have_sec = fj_keys_get_security(&sec);
     snprintf(buf, sizeof(buf), "state: %s\r\n"
              "disk: %s\r\n"
+             "pin_blocked: %s\r\n"
+             "pin_fail: %u\r\n"
+             "disk_blocked: %s\r\n"
+             "disk_fail: %u\r\n"
+             "puk: %s\r\n"
+             "puk_fail: %u\r\n"
              "active_slot: %u\r\n"
              "provisioned_slots: %u\r\n"
              "timeout: %lus",
              fj_state_get() == FJ_STATE_UNLOCKED ? "unlocked" : "locked",
              fj_msc_is_ready() ? "unlocked" : "locked",
+             (have_sec && sec.pin_blocked) ? "yes" : "no", (unsigned)sec.pin_fail,
+             (have_sec && sec.disk_blocked) ? "yes" : "no", (unsigned)sec.disk_fail,
+             fj_keys_puk_configured() ? "set" : "unset", (unsigned)sec.puk_fail,
              fj_keys_active_slot(), fj_keys_count(),
              (unsigned long)fj_state_timeout());
     outln(buf);
@@ -115,7 +142,6 @@ static void cmd_status(void) {
 
 static void cmd_lock(void) {
     fj_state_lock();
-    fj_msc_set_ready(false);
     outln("OK locked");
 }
 
@@ -124,34 +150,118 @@ static void cmd_unlock(const char *pin) {
         outln("ERR usage: UNLOCK <pin>");
         return;
     }
+    if (fj_state_pin_blocked()) {
+        outln("ERR PIN blocked, use UNLOCKPUK <puk>");
+        return;
+    }
     if (fj_state_unlock(pin)) {
         /* Only unlocks the device for key operations. The encrypted drive
          * is a separate step: DISK UNLOCK. */
         outln("OK unlocked");
     } else {
-        outln("ERR bad pin or no pin set");
+        fj_security_t sec = {0};
+        fj_keys_get_security(&sec);
+        if (sec.pin_blocked) {
+            char buf[64];
+            snprintf(buf, sizeof(buf),
+                     "ERR PIN blocked after %u fails, use UNLOCKPUK <puk>",
+                     (unsigned)FJ_MAX_PIN_FAILS);
+            outln(buf);
+        } else {
+            char buf[64];
+            snprintf(buf, sizeof(buf),
+                     "ERR bad pin (%u/%u left)", (unsigned)FJ_MAX_PIN_FAILS - sec.pin_fail,
+                     (unsigned)FJ_MAX_PIN_FAILS);
+            outln(buf);
+        }
+    }
+}
+
+static void cmd_unlock_puk(const char *puk) {
+    if (!puk) {
+        outln("ERR usage: UNLOCKPUK <puk>");
+        return;
+    }
+    switch (fj_state_unlock_puk(puk)) {
+        case FJ_PUK_OK:    outln("OK unlocked via PUK"); break;
+        case FJ_PUK_WRONG: outln("ERR wrong PUK"); break;
+        case FJ_PUK_UNSET: outln("ERR no PUK configured"); break;
+        case FJ_PUK_WIPED: outln("OK too many wrong PUKs, device wiped"); break;
     }
 }
 
 static bool require_unlocked(void);
 
-/* DISK UNLOCK / LOCK / STATUS — independent drive lock. */
-static void cmd_disk(const char *sub) {
+static void cmd_set_puk(const char *puk) {
+    if (!puk) {
+        outln("ERR usage: PUK <code>");
+        return;
+    }
+    if (!require_unlocked()) return;
+    if (fj_state_set_puk(puk)) outln("OK recovery PUK set");
+    else outln("ERR invalid PUK (8-64 chars) or device locked");
+}
+
+/* DISK UNLOCK <pin> / SETPIN <pin> / LOCK / STATUS — independent drive lock. */
+static void cmd_disk(const char *sub, char *rest) {
     if (!sub) {
-        outln("ERR DISK requires subcommand (UNLOCK|LOCK|STATUS)");
+        outln("ERR DISK requires subcommand (UNLOCK|UNBLOCK|LOCK|SETPIN|STATUS)");
         return;
     }
     if (strcasecmp(sub, "status") == 0) {
-        outln(fj_msc_is_ready() ? "disk: unlocked" : "disk: locked");
+        char buf[96];
+        fj_security_t sec = {0};
+        fj_keys_get_security(&sec);
+        snprintf(buf, sizeof(buf), "disk: %s%s\r\n"
+                 "disk_fail: %u",
+                 fj_msc_is_ready() ? "unlocked" : "locked",
+                 sec.disk_blocked ? " (PIN blocked, use DISK UNBLOCK)" : "",
+                 (unsigned)sec.disk_fail);
+        outln(buf);
     } else if (strcasecmp(sub, "unlock") == 0) {
         if (!require_unlocked()) return;
-        fj_msc_set_ready(true);
-        outln("OK disk unlocked");
+        const char *pin = next_token(&rest);
+        if (!pin) { outln("ERR usage: DISK UNLOCK <pin>"); return; }
+        if (fj_msc_pin_blocked()) {
+            outln("ERR disk PIN blocked, use DISK UNBLOCK <puk>");
+            return;
+        }
+        if (fj_msc_unlock(pin)) outln("OK disk unlocked");
+        else {
+            fj_security_t sec = {0};
+            fj_keys_get_security(&sec);
+            if (sec.disk_blocked) {
+                outln("ERR disk PIN blocked, use DISK UNBLOCK <puk>");
+            } else {
+                char buf[64];
+                snprintf(buf, sizeof(buf),
+                         "ERR bad disk pin (%u/%u left)",
+                         (unsigned)(FJ_MAX_PIN_FAILS - sec.disk_fail),
+                         (unsigned)FJ_MAX_PIN_FAILS);
+                outln(buf);
+            }
+        }
+    } else if (strcasecmp(sub, "unblock") == 0) {
+        if (!require_unlocked()) return;
+        const char *puk = next_token(&rest);
+        if (!puk) { outln("ERR usage: DISK UNBLOCK <puk>"); return; }
+        switch (fj_msc_unblock_puk(puk)) {
+            case FJ_PUK_OK:    outln("OK disk PIN unblocked; use DISK UNLOCK <pin>"); break;
+            case FJ_PUK_WRONG: outln("ERR wrong PUK"); break;
+            case FJ_PUK_UNSET: outln("ERR no PUK configured"); break;
+            case FJ_PUK_WIPED: outln("OK too many wrong PUKs, device wiped"); break;
+        }
     } else if (strcasecmp(sub, "lock") == 0) {
-        fj_msc_set_ready(false);
+        fj_msc_lock();
         outln("OK disk locked");
+    } else if (strcasecmp(sub, "setpin") == 0) {
+        if (!require_unlocked()) return;
+        const char *pin = next_token(&rest);
+        if (!pin) { outln("ERR usage: DISK SETPIN <pin>"); return; }
+        if (fj_msc_set_pin(pin)) outln("OK disk pin set");
+        else outln("ERR disk pin invalid or drive locked");
     } else {
-        outln("ERR unknown DISK subcommand (UNLOCK|LOCK|STATUS)");
+        outln("ERR unknown DISK subcommand (UNLOCK|UNBLOCK|LOCK|SETPIN|STATUS)");
     }
 }
 
@@ -245,7 +355,6 @@ static void cmd_key_erase(const char *arg) {
     if (fj_keys_erase(n)) {
         if (was_active) {
             fj_state_lock();
-            fj_msc_set_ready(false);
         }
         char buf[64];
         snprintf(buf, sizeof(buf), "OK erased slot %u", n);
@@ -267,7 +376,10 @@ static void cmd_timeout(const char *arg) {
         return;
     }
     uint32_t sec = (uint32_t)parsed;
-    fj_state_set_timeout(sec);
+    if (!fj_state_set_timeout(sec)) {
+        outln("ERR timeout could not be saved");
+        return;
+    }
     char buf[64];
     snprintf(buf, sizeof(buf), "OK timeout = %lus", (unsigned long)sec);
     outln(buf);
@@ -299,10 +411,14 @@ static void dispatch(char *cmdline) {
         cmd_lock();
     } else if (strcasecmp(tok, "unlock") == 0) {
         cmd_unlock(next_token(&p));
+    } else if (strcasecmp(tok, "unlockpuk") == 0) {
+        cmd_unlock_puk(next_token(&p));
+    } else if (strcasecmp(tok, "puk") == 0) {
+        cmd_set_puk(next_token(&p));
     } else if (strcasecmp(tok, "setpin") == 0) {
         cmd_setpin(next_token(&p));
     } else if (strcasecmp(tok, "disk") == 0) {
-        cmd_disk(next_token(&p));
+        cmd_disk(next_token(&p), p);
     } else if (strcasecmp(tok, "key") == 0) {
         char *sub = next_token(&p);
         if (!sub) { outln("ERR KEY requires subcommand"); return; }
@@ -331,25 +447,49 @@ void fj_console_init(void) {
      * runs before tud_init(), so any TinyUSB call before the stack is up would
      * crash. The banner is printed from the main loop once USB is ready. */
     line_len = 0;
+    last_was_cr = false;
+    clear_line();
 }
 
 void fj_console_task(void) {
-    if (!tud_cdc_connected()) return;
+    if (tud_cdc_connected()) {
+        if (!was_connected) {
+            /* First connect: print the banner and a prompt. */
+            outln("Fjaeger serial console");
+            outln("Type HELP for commands.");
+            out(PROMPT);
+            was_connected = true;
+        }
+    } else {
+        was_connected = false;
+        return;
+    }
 
     while (tud_cdc_available()) {
         char c;
         tud_cdc_read(&c, 1);
 
+        if (c == '\n' && last_was_cr) {
+            last_was_cr = false;
+            continue;
+        }
         if (c == '\n' || c == '\r') {
+            last_was_cr = c == '\r';
             if (line_len > 0) {
                 line[line_len] = '\0';
                 dispatch(line);
                 line_len = 0;
+                clear_line();
             }
+            /* Always present a fresh prompt after a command line. */
+            out(PROMPT);
         } else if (line_len < LINE_MAX - 1) {
+            last_was_cr = false;
             line[line_len++] = c;
         } else {
             line_len = 0; /* line too long, discard */
+            clear_line();
+            out(PROMPT);
         }
     }
 }
