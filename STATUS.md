@@ -111,7 +111,14 @@ src/
 
 - Fastvaren bygger grønt (`EXIT=0`), `build/fjaeger.uf2` produseres.
 - USB enummererer: `2e8a:4007 Fjaeger Fjaeger Security Key` (`/dev/ttyACM0`).
-- Konsollen svarer på `HELP`.
+- Konsollen er fysisk testet med `HELP`, `STATUS`, `LOCK`, riktig og feil
+  `UNLOCK`, `SETPIN`, `KEY LIST`, `KEY SELECT`, `KEY PROVISION`, `KEY ERASE`,
+  `TIMEOUT`, ugyldige argumenter og `RESET`.
+- Auto-lock er fysisk verifisert med to sekunders timeout.
+- PIN og slotdata overlever firmwareflash og watchdog-reset.
+- MSC-prototypen enumererer og mountes som et 8 KiB FAT-volum når ulåst, og
+  mountpunktet forsvinner ved låsing.
+- Hosttesten dekker CTAP2 `GetInfo` → `MakeCredential` → `GetAssertion`.
 
 ## Kjente problemer / åpne punkter
 
