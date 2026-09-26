@@ -14,7 +14,7 @@ Sikkerhetsnøkkel (USB-dongle) bygget på **RP2350** (16 MB flash). Prosjektet g
 
 - Raspberry Pi RP2350 (16 MB flash, `waveshare_rp2350_plus_16mb`-brettprofil)
 - Integrert USB-A-plugg
-- Adressebar RGB-LED på GPIO22: rød = låst, grønn = ulåst, blå = suspendert, gul = ikke enumerert
+- Adressebar RGB-LED på GPIO22: rød = låst, grønn = ulåst, gul = ikke enumerert, blå puls = USB-aktivitet
 
 ## Arkitektur
 

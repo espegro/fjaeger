@@ -84,6 +84,7 @@ void tud_hid_set_report_cb(uint8_t instance, uint8_t report_id,
     (void)report_id;
     (void)report_type;
 
+    fj_led_activity();
     fj_u2f_hid_rx(buffer, bufsize);
 }
 

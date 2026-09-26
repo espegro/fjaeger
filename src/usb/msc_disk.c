@@ -12,6 +12,7 @@
 #include "keys.h"
 #include "crypto.h"
 #include "state.h"
+#include "rgb_led.h"
 
 #if CFG_TUD_MSC
 
@@ -123,6 +124,7 @@ int32_t tud_msc_read10_cb(uint8_t lun, uint32_t lba, uint32_t offset,
 
     const fj_slot_t *slot = fj_keys_get(fj_keys_active_slot());
     if (!slot) return -1;
+    fj_led_activity();
 
     uint8_t sector[DISK_BLOCK_SIZE];
     memcpy(sector, msc_disk[lba], DISK_BLOCK_SIZE);
@@ -151,6 +153,7 @@ int32_t tud_msc_write10_cb(uint8_t lun, uint32_t lba, uint32_t offset,
 
     const fj_slot_t *slot = fj_keys_get(fj_keys_active_slot());
     if (!slot) return -1;
+    fj_led_activity();
 
     /* Rebuild the sector: decrypt, patch, re-encrypt. */
     uint8_t sector[DISK_BLOCK_SIZE];

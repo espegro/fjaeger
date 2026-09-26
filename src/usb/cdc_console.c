@@ -27,6 +27,7 @@
 #include "state.h"
 #include "keys.h"
 #include "msc_disk.h"
+#include "rgb_led.h"
 
 #define LINE_MAX 96
 
@@ -248,6 +249,7 @@ static void cmd_reset(void) {
 /* Command dispatch                                                    */
 /* ------------------------------------------------------------------ */
 static void dispatch(char *cmdline) {
+    fj_led_activity();
     char *p = cmdline;
     char *tok = next_token(&p);
     if (!tok) return;

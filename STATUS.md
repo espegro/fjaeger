@@ -13,7 +13,8 @@ stabiliseringscommit retter følgende:
 - CTAPHID INIT, kommandoverdier og asynkron utsending av flerpakke-svar.
 - Sentrale CTAP2/CBOR-feil, DER-signatur og riktig signaturgrunnlag.
 - MSC-tilgang stenges nå også ved auto-lock; FAT12-grunnbildet er reparert.
-- WS2812/SK6812-kompatibel RGB-status-LED på GPIO22 via PIO.
+- WS2812/SK6812-kompatibel RGB-status-LED på GPIO22 via PIO, med blått
+  aktivitetspuls for konsoll, FIDO og disk-I/O.
 - Hosttest for `GetInfo` → `MakeCredential` → `GetAssertion`.
 
 Legacy U2F/CTAP1 annonseres ikke lenger; den gamle MSG-koden er deaktivert. Fysisk
