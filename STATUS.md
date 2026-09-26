@@ -2,6 +2,23 @@
 
 Oppdatert: 2026-09-26
 
+## Audit og reparasjon påbegynt
+
+Et lokalt Git-repository ble opprettet med baseline-commit `3c2ad51`. Første
+stabiliseringscommit retter følgende:
+
+- Konsolltokenisering for kommandoer med argumenter.
+- ECDSA-signering med gyldig blinding-RNG og validerte P-256-privatnøkler.
+- Kontrollsummert A/B-nøkkellager med 256-byte-justerte flashskrivinger.
+- CTAPHID INIT, kommandoverdier og asynkron utsending av flerpakke-svar.
+- Sentrale CTAP2/CBOR-feil, DER-signatur og riktig signaturgrunnlag.
+- MSC-tilgang stenges nå også ved auto-lock; FAT12-grunnbildet er reparert.
+- WS2812/SK6812-kompatibel RGB-status-LED på GPIO22 via PIO.
+- Hosttest for `GetInfo` → `MakeCredential` → `GetAssertion`.
+
+Legacy U2F/CTAP1 annonseres ikke lenger; den gamle MSG-koden er deaktivert. Fysisk
+test med `libfido2` og OpenSSH gjenstår før CTAP2 kan regnes som verifisert.
+
 ## Overblikk
 
 Fjaeger er en USB-sikkerhetsnøkkel (dongle) bygget på RP2350. Prosjektet kombinerer en
@@ -39,11 +56,11 @@ Resultat: `build/fjaeger.uf2` (flash via bootrom BOOTSEL).
 
 - **CTAP2 (FIDO2) over HID** — `authenticatorGetInfo` (0x04), `makeCredential` (0x01),
   `getAssertion` (0x02), `authenticatorCancel` (0x06). Attestasjon-format **`none`**.
-- **U2F (CTAP1) over HID** — U2FHID-transport, `U2F_AUTHENTICATE`, `U2F_REGISTER`
-  (uten X.509-attestasjon).
-- **Nøkkelprofiler ("slots")** — opptil 8, hver med ECDSA P-256 + AES-256-nøkkel,
+- **U2F (CTAP1)** — deaktivert inntil den kan implementeres protokollkorrekt.
+- **Nøkkelprofiler ("slots")** — opptil 8, hver med ECDSA P-256 + XTS-nøkkel,
   persistente i flash.
-- **Kryptert USB-stasjon (MSC)** — AES-256-XTS, mountes kun når ulåst.
+- **Kryptert USB-stasjon (MSC-prototype)** — AES-XTS, mountes kun når ulåst;
+  backing store er ennå bare 8 KiB RAM.
 - **Lås/ulås-modell** — PIN over serial, auto-relåsing.
 - **Seriell-konsoll (USB CDC)** — kommandoer for tilstand og nøkkelhåndtering.
 
@@ -58,10 +75,12 @@ src/
 │   ├── crypto.h/.c         mbedTLS-innpakninger: ECDSA, SHA-256, HKDF, AES-XTS
 │   └── ms_time.c           mbedTLS 3.x tidssource (mbedtls_ms_time)
 ├── fido/
-│   ├── u2f.h/.c            U2FHID-transport + U2F_AUTHENTICATE/REGISTER
+│   ├── u2f.h/.c            CTAPHID-transport; legacy MSG er deaktivert
 │   ├── ctap2.h/.c          CTAP2-kommandoer (CBOR)
-│   ├── cbor.h/.c           Minimal CBOR-encoder/decoder
-│   └── attestation.h/.c    UTDATERINGSTREVET: fjernet fra bygget (ubrukt)
+│   └── cbor.h/.c           Minimal CBOR-encoder/decoder
+├── led/
+│   ├── rgb_led.h/.c        RGB-status-LED på GPIO22
+│   └── rgb_led.pio         WS2812/SK6812-driver
 ├── usb/
 │   ├── tusb_config.h       TinyUSB-konfig (CDC + HID + MSC)
 │   ├── usb_descriptors.c   Composite-descriptorer
@@ -95,21 +114,22 @@ src/
 
 ## Kjente problemer / åpne punkter
 
-1. **`SETPIN` og `UNLOCK` virker ikke** — `SETPIN 1234` gir `ERR unknown command`.
-   - Mistenkt: `cdc_console.c` bruker `strcasecmp()` uten `#include <strings.h>`.
-   - Status: ikke fikset ennå.
+1. **`SETPIN` og `UNLOCK` må testes på fysisk enhet.** Parserfeilen er rettet og
+   `<strings.h>` er inkludert.
 2. **PIN vises i klartekst** når den settes/låses opp via konsoll (`SETPIN <pin>`, `UNLOCK <pin>`).
    - Status: ikke adressert.
-3. **`attestation.c/.h` er foreldet** — ligger igjen i `src/fido/`, men er fjernet fra bygget.
-   Bør slettes.
+3. **Foreldet attestasjonskode er slettet.** CTAP2 bruker `none`.
 4. **SSH / `ssh-keygen -t ecdsa-sk`** er ikke testet end-to-end ennå.
    - Enheten må være ulåst (PIN) før `makeCredential`/`getAssertion` aksepteres.
    - Kun ECDSA P-256 / ES256 støttes (ingen ed25519-sk).
-5. MSC er en RAM-disk (8 KB), ikke vedvarende i flash.
+5. MSC er fortsatt en RAM-disk (8 KB), ikke vedvarende i flash. XTS gir heller
+   ikke autentisering/integritetsbeskyttelse.
 
 ## Anbefalte neste steg
 
-1. Fikse `SETPIN`/`UNLOCK` (legge til `#include <strings.h>`), bygge, flashe og teste.
-2. Vurdere sikkerere PIN-inntasting (skjule ekko / unngå klartekst i kommandolinje).
-3. Slette foreldede `attestation.c/.h`.
-4. Verifisere `ssh-keygen -t ecdsa-sk` end-to-end.
+1. Flashe og teste konsoll, LED og låsing på fysisk dongle.
+2. Verifisere CTAPHID med `fido2-token` og deretter `ssh-keygen -t ecdsa-sk`.
+3. Erstatte rå SHA-256 av PIN med saltet, treg nøkkelavledning og legge inn
+   forsinkelse etter feil PIN.
+4. Lage en eksplisitt flashpartisjon og persistent backing store for MSC.
+5. Lage sikker PIN-inntasting uten synlig PIN i kommandolinjen.

@@ -18,6 +18,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 
 #include "tusb.h"
 #include "pico/time.h"
@@ -56,18 +57,24 @@ static void outln(const char *s) {
 /* ------------------------------------------------------------------ */
 /* Token helpers                                                       */
 /* ------------------------------------------------------------------ */
-static const char *next_token(const char **cursor) {
-    const char *p = *cursor;
+static char *next_token(char **cursor) {
+    char *p = *cursor;
     while (*p && isspace((unsigned char)*p)) p++;
     if (!*p) { *cursor = p; return NULL; }
-    const char *start = p;
+    char *start = p;
     while (*p && !isspace((unsigned char)*p)) p++;
+    if (*p) *p++ = '\0';
     *cursor = p;
     return start;
 }
 
-static unsigned long parse_uint(const char *s) {
-    return strtoul(s, NULL, 10);
+static bool parse_uint(const char *s, unsigned long *value) {
+    char *end = NULL;
+    if (!s || !*s) return false;
+    unsigned long parsed = strtoul(s, &end, 10);
+    if (end == s || *end != '\0') return false;
+    *value = parsed;
+    return true;
 }
 
 /* ------------------------------------------------------------------ */
@@ -113,8 +120,14 @@ static void cmd_setpin(const char *pin) {
     if (fj_state_set_pin(pin)) {
         outln("OK pin set");
     } else {
-        outln("ERR invalid pin");
+        outln("ERR invalid pin or device locked");
     }
+}
+
+static bool require_unlocked(void) {
+    if (fj_state_get() == FJ_STATE_UNLOCKED) return true;
+    outln("ERR device locked");
+    return false;
 }
 
 static void cmd_key_list(void) {
@@ -130,12 +143,20 @@ static void cmd_key_list(void) {
 }
 
 static void cmd_key_select(const char *arg) {
+    if (!require_unlocked()) return;
     if (!arg) {
         outln("ERR usage: KEY SELECT <n>");
         return;
     }
-    unsigned n = (unsigned)parse_uint(arg);
+    unsigned long parsed;
+    if (!parse_uint(arg, &parsed) || parsed >= FJ_NUM_SLOTS) {
+        outln("ERR invalid slot");
+        return;
+    }
+    unsigned n = (unsigned)parsed;
     if (fj_keys_set_active_slot(n)) {
+        fj_msc_init();
+        fj_msc_set_ready(true);
         char buf[64];
         snprintf(buf, sizeof(buf), "OK active slot = %u", n);
         outln(buf);
@@ -144,18 +165,25 @@ static void cmd_key_select(const char *arg) {
     }
 }
 
-static void cmd_key_provision(const char *arg) {
-    const char *name = NULL;
+static void cmd_key_provision(const char *arg, const char *name) {
+    if (!require_unlocked()) return;
     unsigned n;
     if (!arg) {
         outln("ERR usage: KEY PROVISION <n> [name]");
         return;
     }
-    n = (unsigned)parse_uint(arg);
-    name = next_token(&arg);
-    if (name && !*name) name = NULL;
+    unsigned long parsed;
+    if (!parse_uint(arg, &parsed) || parsed >= FJ_NUM_SLOTS) {
+        outln("ERR invalid slot");
+        return;
+    }
+    n = (unsigned)parsed;
 
     if (fj_keys_provision(n, name ? name : "key", true)) {
+        if (n == fj_keys_active_slot()) {
+            fj_msc_init();
+            fj_msc_set_ready(true);
+        }
         char buf[64];
         snprintf(buf, sizeof(buf), "OK provisioned slot %u", n);
         outln(buf);
@@ -165,12 +193,22 @@ static void cmd_key_provision(const char *arg) {
 }
 
 static void cmd_key_erase(const char *arg) {
+    if (!require_unlocked()) return;
     if (!arg) {
         outln("ERR usage: KEY ERASE <n>");
         return;
     }
-    unsigned n = (unsigned)parse_uint(arg);
+    unsigned long parsed;
+    if (!parse_uint(arg, &parsed) || parsed >= FJ_NUM_SLOTS) {
+        outln("ERR invalid slot");
+        return;
+    }
+    unsigned n = (unsigned)parsed;
     if (fj_keys_erase(n)) {
+        if (n == fj_keys_active_slot()) {
+            fj_state_lock();
+            fj_msc_set_ready(false);
+        }
         char buf[64];
         snprintf(buf, sizeof(buf), "OK erased slot %u", n);
         outln(buf);
@@ -180,11 +218,17 @@ static void cmd_key_erase(const char *arg) {
 }
 
 static void cmd_timeout(const char *arg) {
+    if (!require_unlocked()) return;
     if (!arg) {
         outln("ERR usage: TIMEOUT <seconds>");
         return;
     }
-    uint32_t sec = (uint32_t)parse_uint(arg);
+    unsigned long parsed;
+    if (!parse_uint(arg, &parsed) || parsed > UINT32_MAX) {
+        outln("ERR invalid timeout");
+        return;
+    }
+    uint32_t sec = (uint32_t)parsed;
     fj_state_set_timeout(sec);
     char buf[64];
     snprintf(buf, sizeof(buf), "OK timeout = %lus", (unsigned long)sec);
@@ -203,9 +247,9 @@ static void cmd_reset(void) {
 /* ------------------------------------------------------------------ */
 /* Command dispatch                                                    */
 /* ------------------------------------------------------------------ */
-static void dispatch(const char *cmdline) {
-    const char *p = cmdline;
-    const char *tok = next_token(&p);
+static void dispatch(char *cmdline) {
+    char *p = cmdline;
+    char *tok = next_token(&p);
     if (!tok) return;
 
     if (strcasecmp(tok, "help") == 0 || strcmp(tok, "?") == 0) {
@@ -220,11 +264,14 @@ static void dispatch(const char *cmdline) {
     } else if (strcasecmp(tok, "setpin") == 0) {
         cmd_setpin(next_token(&p));
     } else if (strcasecmp(tok, "key") == 0) {
-        const char *sub = next_token(&p);
+        char *sub = next_token(&p);
         if (!sub) { outln("ERR KEY requires subcommand"); return; }
         if (strcasecmp(sub, "list") == 0) cmd_key_list();
         else if (strcasecmp(sub, "select") == 0) cmd_key_select(next_token(&p));
-        else if (strcasecmp(sub, "provision") == 0) cmd_key_provision(next_token(&p));
+        else if (strcasecmp(sub, "provision") == 0) {
+            char *slot = next_token(&p);
+            cmd_key_provision(slot, next_token(&p));
+        }
         else if (strcasecmp(sub, "erase") == 0) cmd_key_erase(next_token(&p));
         else outln("ERR unknown KEY subcommand");
     } else if (strcasecmp(tok, "timeout") == 0) {

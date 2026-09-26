@@ -27,6 +27,9 @@ void fj_state_init(void);
 /* Current lock state. */
 fj_state_t fj_state_get(void);
 
+/* Whether a PIN has been provisioned. */
+bool fj_state_pin_configured(void);
+
 /* Lock immediately (manual lock or auto-relock timeout). */
 void fj_state_lock(void);
 

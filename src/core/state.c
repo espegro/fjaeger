@@ -8,6 +8,7 @@
 #include "keys.h"
 #include "pico/time.h"
 
+#define PIN_MIN_LEN 4
 #define PIN_MAX_LEN 32
 
 /* SHA-256 of the PIN, loaded from / persisted to the flash store. */
@@ -29,9 +30,16 @@ fj_state_t fj_state_get(void) {
     return state;
 }
 
+bool fj_state_pin_configured(void) {
+    return pin_configured;
+}
+
 bool fj_state_set_pin(const char *pin) {
     size_t len = strlen(pin);
-    if (len == 0 || len > PIN_MAX_LEN) return false;
+    if (len < PIN_MIN_LEN || len > PIN_MAX_LEN) return false;
+    /* The initial PIN can be set on an unconfigured device. Changing an
+     * existing PIN requires the old PIN to have unlocked the device first. */
+    if (pin_configured && state != FJ_STATE_UNLOCKED) return false;
 
     fj_sha256((const uint8_t *)pin, len, pin_hash);
     if (!fj_keys_set_pin_hash(pin_hash)) return false;

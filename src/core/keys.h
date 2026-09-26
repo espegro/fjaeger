@@ -4,7 +4,7 @@
  * The device stores multiple independent key "profiles". Each profile
  * has:
  *   - an ECDSA P-256 (secp256r1) keypair used for U2F/SSH signing
- *   - an AES-256 key used to encrypt/decrypt the MSC (drive) blocks
+ *   - two AES-128 keys used for XTS encryption of MSC blocks
  *
  * Only the active slot is used for signing and for MSC encryption.
  * Slots are selected over the serial console with "KEY SELECT <n>".
@@ -23,7 +23,7 @@ extern "C" {
 #define FJ_NUM_SLOTS       8
 #define FJ_SLOT_NAME_MAX   32
 #define FJ_ECDSA_KEY_BYTES 32   /* private scalar for P-256 */
-#define FJ_AES_KEY_BYTES   32   /* AES-256 */
+#define FJ_AES_KEY_BYTES   32   /* two AES-128 keys for XTS */
 
 /* CTAP2 credential store size. */
 #define FJ_CTAP2_CREDS     8
@@ -42,7 +42,7 @@ typedef struct {
 
 typedef struct {
     uint8_t  private_key[FJ_ECDSA_KEY_BYTES]; /* raw P-256 scalar */
-    uint8_t  aes_key[FJ_AES_KEY_BYTES];       /* AES-256 key for MSC  */
+    uint8_t  aes_key[FJ_AES_KEY_BYTES];       /* two AES-128 XTS keys */
     char     name[FJ_SLOT_NAME_MAX];
     bool     initialized;                     /* slot has been provisioned */
 } fj_slot_t;

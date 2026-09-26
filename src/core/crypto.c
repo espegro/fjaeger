@@ -7,12 +7,19 @@
 #include "keys.h"
 
 #include "mbedtls/aes.h"
+#include "mbedtls/asn1write.h"
 #include "mbedtls/bignum.h"
 #include "mbedtls/ecdsa.h"
 #include "mbedtls/ecp.h"
 #include "mbedtls/hkdf.h"
 #include "mbedtls/md.h"
 #include "mbedtls/sha256.h"
+
+static int crypto_rng(void *ctx, unsigned char *out, size_t len) {
+    (void)ctx;
+    fj_random(out, len);
+    return 0;
+}
 
 void fj_sha256(const uint8_t *data, size_t len, uint8_t out[FJ_HASH_LEN]) {
     mbedtls_sha256(data, len, out, 0);
@@ -46,7 +53,7 @@ bool fj_ecdsa_sign(const uint8_t private_key[32],
     if ((ret = mbedtls_ecdsa_sign_det_ext(&grp, &r, &s, &d,
                                           digest, FJ_HASH_LEN,
                                           MBEDTLS_MD_SHA256,
-                                          NULL, NULL)) != 0)
+                                          crypto_rng, NULL)) != 0)
         goto fail;
 
     /* Export r and s as fixed 32-byte big-endian values. */
@@ -66,6 +73,71 @@ fail:
     mbedtls_ecp_group_free(&grp);
     (void)ret;
     return false;
+}
+
+bool fj_ecdsa_generate_private(uint8_t private_key[32]) {
+    mbedtls_ecp_group grp;
+    mbedtls_mpi d;
+    int ret = -1;
+
+    mbedtls_ecp_group_init(&grp);
+    mbedtls_mpi_init(&d);
+
+    if (mbedtls_ecp_group_load(&grp, MBEDTLS_ECP_DP_SECP256R1) != 0)
+        goto done;
+
+    /* A uniformly random 256-bit value is invalid only with negligible
+     * probability, but validate it rather than ever storing a bad scalar. */
+    for (unsigned attempt = 0; attempt < 16; attempt++) {
+        fj_random(private_key, 32);
+        if (mbedtls_mpi_read_binary(&d, private_key, 32) != 0)
+            goto done;
+        ret = mbedtls_ecp_check_privkey(&grp, &d);
+        if (ret == 0) break;
+    }
+
+done:
+    mbedtls_mpi_free(&d);
+    mbedtls_ecp_group_free(&grp);
+    return ret == 0;
+}
+
+bool fj_ecdsa_signature_der(const uint8_t signature[64], uint8_t *out,
+                            size_t out_cap, size_t *out_len) {
+    unsigned char encoded[MBEDTLS_ECDSA_MAX_LEN];
+    unsigned char *p = encoded + sizeof(encoded);
+    mbedtls_mpi r, s;
+    size_t len = 0;
+    int ret;
+
+    mbedtls_mpi_init(&r);
+    mbedtls_mpi_init(&s);
+
+    if ((ret = mbedtls_mpi_read_binary(&r, signature, 32)) != 0) goto done;
+    if ((ret = mbedtls_mpi_read_binary(&s, signature + 32, 32)) != 0) goto done;
+    if ((ret = mbedtls_asn1_write_mpi(&p, encoded, &s)) < 0) goto done;
+    len += (size_t)ret;
+    if ((ret = mbedtls_asn1_write_mpi(&p, encoded, &r)) < 0) goto done;
+    len += (size_t)ret;
+    if ((ret = mbedtls_asn1_write_len(&p, encoded, len)) < 0) goto done;
+    len += (size_t)ret;
+    if ((ret = mbedtls_asn1_write_tag(&p, encoded,
+                                      MBEDTLS_ASN1_CONSTRUCTED |
+                                      MBEDTLS_ASN1_SEQUENCE)) < 0) goto done;
+    len += (size_t)ret;
+
+    if (len > out_cap) {
+        ret = -1;
+        goto done;
+    }
+    memcpy(out, p, len);
+    if (out_len) *out_len = len;
+    ret = 0;
+
+done:
+    mbedtls_mpi_free(&s);
+    mbedtls_mpi_free(&r);
+    return ret == 0;
 }
 
 bool fj_ecdsa_pubkey(const uint8_t private_key[32], uint8_t pub[65]) {

@@ -9,6 +9,7 @@
 #include "crypto.h"
 #include "keys.h"
 #include "state.h"
+#include "tusb.h"
 
 #include "mbedtls/ecp.h"
 #include "mbedtls/bignum.h"
@@ -26,14 +27,15 @@
 #define TYPE_INIT  0x80
 #define TYPE_CONT  0x00
 
-#define U2FHID_PING  0x81
-#define U2FHID_MSG   0x83
-#define U2FHID_LOCK  0x84
-#define U2FHID_INIT  0x86
-#define U2FHID_WINK  0x88
-#define U2FHID_SYNC  0xBC
+/* Command numbers without the initial-frame bit. */
+#define U2FHID_PING  0x01
+#define U2FHID_MSG   0x03
+#define U2FHID_LOCK  0x04
+#define U2FHID_INIT  0x06
+#define U2FHID_WINK  0x08
 #define U2FHID_CBOR  0x10
-#define U2FHID_ERROR 0xBF
+#define U2FHID_SYNC  0x3C
+#define U2FHID_ERROR 0x3F
 
 #define ERR_NONE            0x00
 #define ERR_INVALID_CMD     0x01
@@ -75,7 +77,7 @@ typedef struct {
     uint16_t len;
     uint16_t seq;      /* next expected continuation sequence number */
     uint16_t pos;      /* bytes received so far */
-    uint8_t  buf[U2FHID_INIT_DATA + 4 * U2FHID_CONT_DATA];
+    uint8_t  buf[1200];
 } rx_t;
 
 static rx_t rx;
@@ -87,7 +89,7 @@ typedef struct {
     uint16_t frame_len;
 } out_frame_t;
 
-#define OUT_QUEUE 8
+#define OUT_QUEUE 32
 static out_frame_t out_q[OUT_QUEUE];
 static uint8_t out_head = 0, out_tail = 0;
 static bool out_pending = false;
@@ -385,36 +387,37 @@ static void handle_apdu(uint32_t cid, const uint8_t *p, uint16_t len) {
 }
 
 /* Handle a U2FHID MSG by routing to APDU handling. */
-static void handle_msg(uint32_t cid, const uint8_t *payload, uint16_t len) {
+static void __attribute__((unused)) handle_msg(uint32_t cid,
+                                                const uint8_t *payload,
+                                                uint16_t len) {
     handle_apdu(cid, payload, len);
 }
 
 static void handle_init(uint32_t cid) {
-    uint8_t resp[64];
+    uint8_t resp[17];
     uint32_t new_cid = cid;
 
-    /* Non-broadcast channel gets a fresh channel id. */
-    if (cid != 0xffffffffu) {
-        new_cid = (uint32_t)(u2f_counter ^ 0x5A5A5A5Au) | 0x80000000u;
-        u2f_counter++;
+    if (rx.len != 8) {
+        send_error(cid, ERR_INVALID_LEN);
+        return;
     }
 
-    memset(resp, 0, sizeof(resp));
-    resp[0] = (uint8_t)(new_cid >> 24);
-    resp[1] = (uint8_t)(new_cid >> 16);
-    resp[2] = (uint8_t)(new_cid >> 8);
-    resp[3] = (uint8_t)(new_cid);
-    /* protocol version 2, version major/minor/build, cap flags */
-    resp[4] = 2;
-    resp[5] = 1;  /* major */
-    resp[6] = 0;  /* minor */
-    resp[7] = 0;  /* build */
-    resp[8] = 0x04;  /* capabilities: CBOR (CTAP2) supported */
-    /* nonce echoed */
-    if (rx.len >= 8) memcpy(resp + 9, rx.buf, 8);
+    /* A broadcast INIT allocates a channel. INIT on an allocated channel is
+     * a resynchronisation request and keeps that channel. */
+    if (cid == 0xffffffffu) {
+        do {
+            fj_random(&new_cid, sizeof(new_cid));
+        } while (new_cid == 0 || new_cid == 0xffffffffu);
+    }
 
-    /* Whole INIT response must be 17 bytes: 4 + 1 + 4 + 8 */
-    send_hid(new_cid, U2FHID_INIT, resp, 17);
+    memcpy(resp, rx.buf, 8);       /* nonce */
+    be32(resp + 8, new_cid);       /* allocated channel */
+    resp[12] = 2;                  /* CTAPHID protocol version */
+    resp[13] = 1;                  /* device major */
+    resp[14] = 0;                  /* device minor */
+    resp[15] = 0;                  /* device build */
+    resp[16] = 0x0c;               /* CBOR + no legacy MSG support */
+    send_hid(cid, U2FHID_INIT, resp, sizeof(resp));
 }
 
 static void handle_ping(uint32_t cid, const uint8_t *payload, uint16_t len) {
@@ -441,7 +444,7 @@ static void process_rx(void) {
     switch (cmd) {
         case U2FHID_INIT: handle_init(cid); break;
         case U2FHID_PING: handle_ping(cid, rx.buf, len); break;
-        case U2FHID_MSG:  handle_msg(cid, rx.buf, len); break;
+        case U2FHID_MSG:  send_error(cid, ERR_INVALID_CMD); break;
         case U2FHID_CBOR: handle_cbor(cid, rx.buf, len); break;
         case U2FHID_SYNC:
             send_error(cid, ERR_NONE);
@@ -511,5 +514,9 @@ void fj_u2f_hid_rx(const uint8_t *report, size_t len) {
 }
 
 void fj_u2f_task(void) {
-    /* Outbound reports are drained by the HID callback via pop_report. */
+    if (!out_pending || !tud_hid_ready()) return;
+
+    uint8_t report[U2FHID_FRAME_LEN];
+    if (fj_u2f_pop_report(report))
+        (void)tud_hid_n_report(0, 0, report, sizeof(report));
 }

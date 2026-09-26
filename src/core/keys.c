@@ -10,56 +10,111 @@
 #include "hardware/sync.h"
 #include "pico/rand.h"
 
-/* ------------------------------------------------------------------ */
-/* Flash layout: reserve two 4KB sectors near the end of flash for the
- * persistent key store. Layout:
- *
- *   [0]  uint32 magic
- *   [4]  uint32 version
- *   [8]  uint8  pin_hash[32]   (SHA-256, or all-zero if unset)
- *   [40] fj_slot_t slots[FJ_NUM_SLOTS]
- *
- * One flash sector is erased at a time so a power-loss mid-write cannot
- * corrupt an already-programmed copy. The active copy is tracked with
- * a monotonically increasing generation counter in the magic field's
- * upper bits.
- */
-/* ------------------------------------------------------------------ */
-
-#define MAGIC 0x464A5345u /* "FJSE" */
-
+/* Two independent 4 KiB sectors at the end of flash form an A/B store.
+ * Each update erases and programs only the older copy. A generation number
+ * and CRC select the newest complete record after a reset or power loss. */
+#define STORE_MAGIC   0x464A5345u /* "FJSE" */
+#define STORE_VERSION 2u
 #define FLASH_OFFSET_BYTES (PICO_FLASH_SIZE_BYTES - (2 * FLASH_SECTOR_SIZE))
 
 typedef struct {
-    uint32_t magic;              /* MAGIC | (gen << 8) */
-    uint32_t version;
     uint8_t  pin_hash[32];
     fj_slot_t slots[FJ_NUM_SLOTS];
     fj_ctap2_cred_t ctap2[FJ_CTAP2_CREDS];
-} fj_store_t;
+} fj_store_payload_t;
 
-static fj_store_t store;
+typedef struct {
+    uint32_t magic;
+    uint32_t version;
+    uint32_t generation;
+    uint32_t payload_size;
+    fj_store_payload_t payload;
+    uint32_t crc32;
+} fj_store_record_t;
+
+/* Original on-flash format, accepted once for a non-destructive migration. */
+typedef struct {
+    uint32_t magic;
+    uint32_t version;
+    fj_store_payload_t payload;
+} fj_store_v1_t;
+
+#define PROGRAM_SIZE \
+    (((sizeof(fj_store_record_t) + FLASH_PAGE_SIZE - 1) / FLASH_PAGE_SIZE) * \
+     FLASH_PAGE_SIZE)
+
+_Static_assert(PROGRAM_SIZE <= FLASH_SECTOR_SIZE,
+               "key store must fit in one flash sector");
+
+static fj_store_payload_t store;
 static bool store_loaded = false;
+static int active_copy = -1;
+static uint32_t active_generation = 0;
+static uint8_t program_buf[PROGRAM_SIZE] __attribute__((aligned(4)));
 
 /* In-RAM shadow of the active slot. */
 static int active_slot = 0;
 
-static const fj_store_t *flash_ptr(void) {
-    return (const fj_store_t *)(XIP_BASE + FLASH_OFFSET_BYTES);
+static const fj_store_record_t *flash_record(unsigned copy) {
+    return (const fj_store_record_t *)(XIP_BASE + FLASH_OFFSET_BYTES +
+                                       copy * FLASH_SECTOR_SIZE);
+}
+
+static uint32_t crc32_update(uint32_t crc, const uint8_t *data, size_t len) {
+    while (len--) {
+        crc ^= *data++;
+        for (unsigned bit = 0; bit < 8; bit++)
+            crc = (crc >> 1) ^ (0xedb88320u & (uint32_t)-(int32_t)(crc & 1));
+    }
+    return crc;
+}
+
+static uint32_t record_crc(const fj_store_record_t *record) {
+    const uint8_t *begin = (const uint8_t *)&record->version;
+    const uint8_t *end = (const uint8_t *)&record->crc32;
+    return crc32_update(0xffffffffu, begin, (size_t)(end - begin)) ^ 0xffffffffu;
+}
+
+static bool record_valid(const fj_store_record_t *record) {
+    return record->magic == STORE_MAGIC &&
+           record->version == STORE_VERSION &&
+           record->payload_size == sizeof(record->payload) &&
+           record->crc32 == record_crc(record);
+}
+
+static bool generation_newer(uint32_t a, uint32_t b) {
+    return (int32_t)(a - b) > 0;
 }
 
 static void load_from_flash(void) {
-    const fj_store_t *p = flash_ptr();
+    const fj_store_record_t *a = flash_record(0);
+    const fj_store_record_t *b = flash_record(1);
+    bool a_valid = record_valid(a);
+    bool b_valid = record_valid(b);
 
-    if (p->magic == MAGIC && p->version == 1) {
-        memcpy(&store, p, sizeof(store));
+    if (a_valid || b_valid) {
+        unsigned selected = a_valid && (!b_valid || generation_newer(a->generation,
+                                                                      b->generation))
+                                ? 0u : 1u;
+        const fj_store_record_t *record = flash_record(selected);
+        memcpy(&store, &record->payload, sizeof(store));
+        active_copy = (int)selected;
+        active_generation = record->generation;
         store_loaded = true;
         return;
     }
-    /* No valid store yet: initialise empty. */
-    memset(&store, 0, sizeof(store));
-    store.magic = MAGIC;
-    store.version = 1;
+
+    /* Migrate the original single-copy version if one was written. */
+    const fj_store_v1_t *legacy = (const fj_store_v1_t *)
+        (XIP_BASE + FLASH_OFFSET_BYTES);
+    if (legacy->magic == STORE_MAGIC && legacy->version == 1) {
+        memcpy(&store, &legacy->payload, sizeof(store));
+        active_copy = 0;
+    } else {
+        memset(&store, 0, sizeof(store));
+        active_copy = -1;
+    }
+    active_generation = 0;
     store_loaded = true;
 }
 
@@ -71,11 +126,26 @@ void fj_keys_init(void) {
 static bool write_store(void) {
     if (!store_loaded) return false;
 
-    /* Erase both sectors then program the first copy. */
+    unsigned target = active_copy == 0 ? 1u : 0u;
+    uint32_t generation = active_generation + 1;
+    memset(program_buf, 0xff, sizeof(program_buf));
+
+    fj_store_record_t *record = (fj_store_record_t *)program_buf;
+    record->magic = STORE_MAGIC;
+    record->version = STORE_VERSION;
+    record->generation = generation;
+    record->payload_size = sizeof(record->payload);
+    memcpy(&record->payload, &store, sizeof(store));
+    record->crc32 = record_crc(record);
+
+    uint32_t offset = FLASH_OFFSET_BYTES + target * FLASH_SECTOR_SIZE;
     uint32_t ints = save_and_disable_interrupts();
-    flash_range_erase(FLASH_OFFSET_BYTES, 2 * FLASH_SECTOR_SIZE);
-    flash_range_program(FLASH_OFFSET_BYTES, (const uint8_t *)&store, sizeof(store));
+    flash_range_erase(offset, FLASH_SECTOR_SIZE);
+    flash_range_program(offset, program_buf, sizeof(program_buf));
     restore_interrupts(ints);
+
+    active_copy = (int)target;
+    active_generation = generation;
     return true;
 }
 
@@ -154,8 +224,8 @@ bool fj_keys_provision(unsigned slot, const char *name, bool gen) {
     }
 
     if (gen) {
-        /* Fresh random 32-byte private scalar + AES-256 key. */
-        fj_random(s->private_key, FJ_ECDSA_KEY_BYTES);
+        /* Fresh P-256 scalar + two AES-128 keys for XTS. */
+        if (!fj_ecdsa_generate_private(s->private_key)) return false;
         fj_random(s->aes_key, FJ_AES_KEY_BYTES);
         s->initialized = true;
     }

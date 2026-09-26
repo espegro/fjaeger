@@ -1,21 +1,20 @@
 # Fjaeger
 
-Sikkerhetsnøkkel (USB-dongle) bygget på **RP2350** (16 MB flash). Prosjektet gir en kombinasjon av en FIDO/U2F-autentikator for SSH, og en liten kryptert USB-stasjon, styrt over et serial-kommandogrensesnitt.
+Sikkerhetsnøkkel (USB-dongle) bygget på **RP2350** (16 MB flash). Prosjektet gir en kombinasjon av en FIDO2-autentikator for SSH, og en liten kryptert USB-stasjon, styrt over et serial-kommandogrensesnitt.
 
 ## Funksjoner
 
-- **FIDO U2F (CTAP1) over HID** — ECDSA P-256-signering for SSH/2FA-autentisering.
 - **CTAP2 (FIDO2) over HID** — `authenticatorGetInfo`, `makeCredential` og `getAssertion` med CBOR, for WebAuthn og OpenSSH `sk-ecdsa`-nøkler. Attestasjon bruker formatet `none`.
-- **Flere nøkkelprofiler ("slots")** — opptil 8 uavhengige profiler, hver med egen ECDSA-nøkkel og AES-256-nøkkel. Velg aktiv profil over serial med `KEY SELECT <n>`.
-- **Kryptert USB-stasjon (MSC)** — AES-256-XTS-krypterte sektorer. Enheten mountes bare når den er ulåst.
+- **Flere nøkkelprofiler ("slots")** — opptil 8 uavhengige profiler, hver med egen ECDSA-nøkkel og XTS-nøkkel. Velg aktiv profil over serial med `KEY SELECT <n>`.
+- **Kryptert USB-stasjon (MSC, prototype)** — XTS-krypterte sektorer. Enheten mountes bare når den er ulåst, men backing store er foreløpig kun 8 KiB RAM.
 - **Lås/ulås-modell** — når låst nektes signering, avkryptering og skriving. Ulåsing krever PIN over serial.
 - **Serial-konsoll (USB CDC)** — `LOCK`, `UNLOCK`, `RESET`, `TIMEOUT`, nøkkelhåndtering, m.m.
 
 ## Hardware
 
-- Raspberry Pi RP2350 (16 MB flash, `pico2`-brettprofil)
-- USB-C (dongle-oppsett)
-- LED indikerer tilstand (blinker = låst, fast lys = ulåst)
+- Raspberry Pi RP2350 (16 MB flash, `waveshare_rp2350_plus_16mb`-brettprofil)
+- Integrert USB-A-plugg
+- Adressebar RGB-LED på GPIO22: rød = låst, grønn = ulåst, blå = suspendert, gul = ikke enumerert
 
 ## Arkitektur
 
@@ -27,10 +26,12 @@ src/
 │   ├── keys.h/.c           Nøkkelprofiler/slots i flash, aktiv slot
 │   └── crypto.h/.c         mbedTLS-innpakninger: ECDSA, SHA-256, HKDF, AES-XTS
 ├── fido/
-│   ├── u2f.h/.c            U2FHID-transport + U2F_AUTHENTICATE/REGISTER
+│   ├── u2f.h/.c            CTAPHID-transport (legacy CTAP1/MSG deaktivert)
 │   ├── ctap2.h/.c          CTAP2-kommandoer (makeCredential/getAssertion/GetInfo)
-│   ├── cbor.h/.c           Minimal CBOR-encoder/decoder
-│   └── attestation.h/.c    Self-signed X.509-attestasjon (U2F)
+│   └── cbor.h/.c           Minimal CBOR-encoder/decoder
+├── led/
+│   ├── rgb_led.c/.h        Tilstands-LED på GPIO22
+│   └── rgb_led.pio         WS2812/SK6812 PIO-program
 └── usb/
     ├── tusb_config.h       TinyUSB-konfig (CDC + HID + MSC)
     ├── usb_descriptors.c   Composite-descriptorer
@@ -41,9 +42,9 @@ src/
 ### Sikkerhetsmodell
 
 - Private nøkler lagres i RP2350-flash og brukes kun for signering i fastvaren; de eksporteres aldri over serial.
-- Når enheten er **låst**: ingen ECDSA-signering (U2F returnerer "conditions not satisfied"), MSC-en er ikke klar og ikke skrivbar.
+- Når enheten er **låst**: ingen ECDSA-signering, og MSC-en er ikke klar, lesbar eller skrivbar.
 - Når **ulåst**: PIN er verifisert, MSC-en er mountet og dekrypterer sektorer i farten.
-- PIN-en lagres som en SHA-256-hash (sammenlignes i konstant tid).
+- PIN-en lagres foreløpig som en SHA-256-hash og sammenlignes i konstant tid. Dette er ikke tilstrekkelig beskyttelse mot offline-angrep på en flashdump og skal erstattes med saltet, treg nøkkelavledning.
 
 > **Merk:** RP2350 har ingen ekte hardware secure element (som ATECC608B). Secure boot finnes, men beskyttelse mot en fysisk angriper med laboratorieutstyr er begrenset. Dette er en prototype/utviklingsplattform, ikke sertifisert produksjonssikkerhetsnøkkel.
 
@@ -99,12 +100,11 @@ CTAP2-credentials lagres i donglens flash (opptil 8). Attestasjonen er `none`, s
 
 ## Status / kjent begrensning
 
-- **U2F_AUTHENTICATE** er implementert (signering med aktiv slot-nøkkel).
-- **U2F_REGISTER** er implementert — genererer en ny credential i en ledig slot og returnerer offentlig nøkkel + key handle. X.509-attestasjonen er fjernet (attestation-format `none` brukes), så eksterne FIDO-tjenester som krever ekte attestasjonssertifikater vil avvise dette; SSH/WebAuthn bruker uansett CTAP2.
-- **CTAP2** er implementert: `authenticatorGetInfo`, `makeCredential` og `getAssertion` med `none`-attestasjon. Dette er det OpenSSH `sk-ecdsa` og de fleste WebAuthn-tjenester faktisk bruker.
+- **Legacy U2F/CTAP1 er deaktivert.** Enheten annonserer CTAPHID `NMSG` inntil CTAP1-koden eventuelt erstattes med en komplett implementasjon.
+- **CTAP2** har implementasjoner av `authenticatorGetInfo`, `makeCredential` og `getAssertion` med `none`-attestasjon. Parser og responsformat har hosttester, men fysisk end-to-end-test med OpenSSH gjenstår.
   - Kun **ECDSA P-256 / ES256** støttes (ingen EdDSA/ed25519-sk).
   - Enheten må være ulåst (PIN) for at `makeCredential`/`getAssertion` skal aksepteres.
-  - Credentials er flash-persistente (opptil 8), skrevet deferert fra main-loop.
+  - Credentials er flash-persistente (opptil 8) i et kontrollsummert A/B-format, skrevet deferert fra main-loop.
 - MSC-disken er en liten RAM-disk (8 KB) som grunnlag; den er kryptert i farten, men ikke vedvarende i flash.
 
 ## Lisens

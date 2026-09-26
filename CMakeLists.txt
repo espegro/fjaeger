@@ -34,6 +34,7 @@ add_executable(fjaeger
   src/core/keys.c
   src/core/crypto.c
   src/core/ms_time.c
+  src/led/rgb_led.c
   src/fido/u2f.c
   src/fido/ctap2.c
   src/fido/cbor.c
@@ -44,6 +45,7 @@ target_include_directories(fjaeger PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}/src/usb
   ${CMAKE_CURRENT_SOURCE_DIR}/src/core
   ${CMAKE_CURRENT_SOURCE_DIR}/src/fido
+  ${CMAKE_CURRENT_SOURCE_DIR}/src/led
   ${CMAKE_CURRENT_SOURCE_DIR}/src/mbedtls_config
 )
 
@@ -64,6 +66,7 @@ target_link_libraries(fjaeger PRIVATE
   pico_mbedtls_crypto
   hardware_flash
   hardware_timer
+  hardware_pio
   hardware_watchdog
   pico_bootrom
   pico_binary_info
@@ -76,6 +79,10 @@ target_link_libraries(fjaeger PRIVATE
   pico_util
   tinyusb_board
   tinyusb_device
+)
+
+pico_generate_pio_header(fjaeger
+  ${CMAKE_CURRENT_SOURCE_DIR}/src/led/rgb_led.pio
 )
 
 # I/O: UART for debug, USB for the app console

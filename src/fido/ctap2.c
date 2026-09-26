@@ -27,6 +27,7 @@
 #define ERR_OPERATION_DENIED  0x11
 #define ERR_NOT_ALLOWED       0x20
 #define ERR_PIN_REQUIRED      0x23
+#define ERR_UNSUPPORTED_OPTION 0x2b
 
 /* CTAP2 request / response map keys */
 #define K_CLIENT_DATA_HASH 0x01
@@ -59,11 +60,28 @@ static fj_ctap2_cred_t creds[FJ_CTAP2_CREDS];
 static uint32_t sign_counter = 0;
 static bool ctap2_dirty = false;
 
+static size_t ctap_error(uint8_t *out, size_t cap, uint8_t error) {
+    if (cap < 1) return 0;
+    out[0] = error;
+    return 1;
+}
+
+static bool read_text(fj_cbor_reader *r, fj_cbor_item *item,
+                      char *out, size_t cap) {
+    size_t len = 0;
+    if (cap == 0 || item->type != FJ_CBOR_TSTR ||
+        !fj_cbor_read_bytes(r, item, (uint8_t *)out, cap - 1, &len))
+        return false;
+    out[len] = '\0';
+    return true;
+}
+
 void fj_ctap2_init(void) {
     fj_keys_ctap2_load(creds);
     ctap2_dirty = false;
-    /* Seed the sign counter from the hardware RNG. */
-    fj_random(&sign_counter, sizeof(sign_counter));
+    /* Zero means counters are not supported. A volatile random counter would
+     * move backwards across boots and cause false authenticator-clone alarms. */
+    sign_counter = 0;
 }
 
 /* Called from the main loop: flush any pending flash writes. Flash
@@ -101,12 +119,12 @@ static size_t encode_cose_key(uint8_t *out, size_t cap,
     fj_cbor_writer w;
     fj_cbor_writer_init(&w, out, cap);
 
-    fj_cbor_map(&w, 6);
+    fj_cbor_map(&w, 5);
     fj_cbor_uint(&w, 1);  fj_cbor_uint(&w, 2);       /* kty: EC2 */
     fj_cbor_uint(&w, 3);  fj_cbor_neg(&w, 6);        /* alg: -7 ES256 */
-    fj_cbor_uint(&w, -1); fj_cbor_uint(&w, 1);       /* crv: P-256 */
-    fj_cbor_uint(&w, -2); fj_cbor_bstr(&w, pub + 1, 32);        /* x */
-    fj_cbor_uint(&w, -3); fj_cbor_bstr(&w, pub + 33, 32);       /* y */
+    fj_cbor_neg(&w, 0);   fj_cbor_uint(&w, 1);       /* -1 crv: P-256 */
+    fj_cbor_neg(&w, 1);   fj_cbor_bstr(&w, pub + 1, 32);  /* -2 x */
+    fj_cbor_neg(&w, 2);   fj_cbor_bstr(&w, pub + 33, 32); /* -3 y */
 
     if (!fj_cbor_ok(&w)) return 0;
     return w.len;
@@ -149,13 +167,12 @@ static size_t build_mc_authdata(uint8_t *out, size_t cap,
 
 /* Build the getAssertion authData. */
 static size_t build_ga_authdata(uint8_t *out, size_t cap,
-                                const uint8_t rp_id_hash[FJ_HASH_LEN],
-                                bool with_user) {
+                                const uint8_t rp_id_hash[FJ_HASH_LEN]) {
     if (cap < 37) return 0;
     uint8_t *p = out;
     size_t pos = 0;
     memcpy(p + pos, rp_id_hash, 32); pos += 32;
-    p[pos++] = (uint8_t)(0x01 | (with_user ? 0x80 : 0x00)); /* UP | ED */
+    p[pos++] = 0x01; /* UP */
     p[pos++] = (uint8_t)(sign_counter >> 24);
     p[pos++] = (uint8_t)(sign_counter >> 16);
     p[pos++] = (uint8_t)(sign_counter >> 8);
@@ -167,15 +184,16 @@ static size_t build_ga_authdata(uint8_t *out, size_t cap,
 /* GetInfo (0x04)                                                      */
 /* ------------------------------------------------------------------ */
 static size_t build_get_info(uint8_t *out, size_t cap) {
+    if (cap < 2) return 0;
+    out[0] = 0;
     fj_cbor_writer w;
-    fj_cbor_writer_init(&w, out, cap);
+    fj_cbor_writer_init(&w, out + 1, cap - 1);
 
-    fj_cbor_map(&w, 3);
+    fj_cbor_map(&w, 5);
 
     /* versions */
     fj_cbor_uint(&w, 0x01);
-    fj_cbor_array(&w, 2);
-    fj_cbor_tstr(&w, "U2F_V2");
+    fj_cbor_array(&w, 1);
     fj_cbor_tstr(&w, "FIDO_2_0");
 
     /* extensions: empty */
@@ -188,10 +206,10 @@ static size_t build_get_info(uint8_t *out, size_t cap) {
     memset(aaguid, 0, sizeof(aaguid));
     fj_cbor_bstr(&w, aaguid, sizeof(aaguid));
 
-    /* options: rk=true (resident), up=true, clientPin=false, uv=false */
+    /* This first implementation supports server-side credentials only. */
     fj_cbor_uint(&w, 0x04);
     fj_cbor_map(&w, 4);
-    fj_cbor_tstr(&w, "rk");   fj_cbor_bool(&w, true);
+    fj_cbor_tstr(&w, "rk");   fj_cbor_bool(&w, false);
     fj_cbor_tstr(&w, "up");   fj_cbor_bool(&w, true);
     fj_cbor_tstr(&w, "clientPin"); fj_cbor_bool(&w, false);
     fj_cbor_tstr(&w, "uv");   fj_cbor_bool(&w, false);
@@ -200,15 +218,8 @@ static size_t build_get_info(uint8_t *out, size_t cap) {
     fj_cbor_uint(&w, 0x05);
     fj_cbor_uint(&w, 1200);
 
-    /* algorithms: ES256 */
-    fj_cbor_uint(&w, 0x06);
-    fj_cbor_array(&w, 1);
-    fj_cbor_map(&w, 2);
-    fj_cbor_uint(&w, COSE_ALG_KEY);
-    fj_cbor_neg(&w, 6);   /* -7 */
-
     if (!fj_cbor_ok(&w)) return 0;
-    return w.len;
+    return w.len + 1;
 }
 
 /* ------------------------------------------------------------------ */
@@ -251,8 +262,11 @@ static size_t make_credential(const uint8_t *req, size_t len,
                 for (size_t j = 0; j < rp_pairs; j++) {
                     fj_cbor_item k2, v2;
                     if (!fj_cbor_next(&r, &k2)) goto bad_param;
+                    char key_name[16];
+                    if (!read_text(&r, &k2, key_name, sizeof(key_name)))
+                        goto bad_param;
                     if (!fj_cbor_next(&r, &v2)) goto bad_param;
-                    if (k2.type == FJ_CBOR_UINT && k2.val == 0x01) {
+                    if (strcmp(key_name, "id") == 0) {
                         size_t n = 0;
                         if (v2.type != FJ_CBOR_TSTR ||
                             !fj_cbor_read_bytes(&r, &v2, rp_id, sizeof(rp_id), &n))
@@ -284,8 +298,11 @@ static size_t make_credential(const uint8_t *req, size_t len,
                     for (size_t k = 0; k < pp; k++) {
                         fj_cbor_item pk, pv;
                         if (!fj_cbor_next(&r, &pk)) goto bad_param;
+                        char key_name[16];
+                        if (!read_text(&r, &pk, key_name, sizeof(key_name)))
+                            goto bad_param;
                         if (!fj_cbor_next(&r, &pv)) goto bad_param;
-                        if (pk.type == FJ_CBOR_UINT && pk.val == 0x03 &&
+                        if (strcmp(key_name, "alg") == 0 &&
                             pv.type == FJ_CBOR_NEG && pv.val == 6)
                             alg = 1; /* ES256 supported */
                         if (!fj_cbor_skip(&r, &pv)) goto bad_param;
@@ -304,13 +321,11 @@ static size_t make_credential(const uint8_t *req, size_t len,
                 for (size_t j = 0; j < op; j++) {
                     fj_cbor_item ok, ov;
                     if (!fj_cbor_next(&r, &ok)) goto bad_param;
+                    char name[16];
+                    if (!read_text(&r, &ok, name, sizeof(name))) goto bad_param;
                     if (!fj_cbor_next(&r, &ov)) goto bad_param;
-                    if (ok.type == FJ_CBOR_TSTR) {
-                        size_t n = 0; char name[8] = {0};
-                        if (fj_cbor_read_bytes(&r, &ok, (uint8_t *)name, sizeof(name)-1, &n) &&
-                            n == 2 && name[0] == 'r' && name[1] == 'k')
-                            resident = (ov.type == FJ_CBOR_BOOL && ov.val != 0);
-                    }
+                    if (strcmp(name, "rk") == 0)
+                        resident = (ov.type == FJ_CBOR_BOOL && ov.val != 0);
                     if (!fj_cbor_skip(&r, &ov)) goto bad_param;
                 }
                 break;
@@ -322,29 +337,17 @@ static size_t make_credential(const uint8_t *req, size_t len,
     }
 
     if (!have_client_hash || !have_rp || rp_id_len == 0) goto missing;
-    if (alg == 0) { /* only ES256 offered; if none matched, unsupported */
-        /* Accept if the parameter list simply wasn't parsed to an alg. */
-    }
+    if (alg == 0) return ctap_error(out, cap, ERR_UNSUPPORTED_ALG);
+    if (resident) return ctap_error(out, cap, ERR_UNSUPPORTED_OPTION);
 
     if (fj_state_get() != FJ_STATE_UNLOCKED) {
         /* CTAP2_ERR_OPERATION_DENIED (device locked). */
-        fj_cbor_writer w;
-        fj_cbor_writer_init(&w, out, cap);
-        fj_cbor_uint(&w, ERR_OPERATION_DENIED);
-        return w.len;
+        return ctap_error(out, cap, ERR_OPERATION_DENIED);
     }
 
     /* rpIdHash = SHA-256(rpId). */
     uint8_t rp_id_hash[FJ_HASH_LEN];
     fj_sha256(rp_id, rp_id_len, rp_id_hash);
-
-    /* Refuse if a credential for this rp already exists (exclude). */
-    if (find_cred_by_rp(rp_id_hash)) {
-        fj_cbor_writer w;
-        fj_cbor_writer_init(&w, out, cap);
-        fj_cbor_uint(&w, ERR_CREDENTIAL_EXCLUDED);
-        return w.len;
-    }
 
     /* Allocate a credential slot. */
     fj_ctap2_cred_t *cr = NULL;
@@ -352,15 +355,15 @@ static size_t make_credential(const uint8_t *req, size_t len,
         if (!creds[i].in_use) { cr = &creds[i]; break; }
     }
     if (!cr) {
-        fj_cbor_writer w;
-        fj_cbor_writer_init(&w, out, cap);
-        fj_cbor_uint(&w, ERR_NOT_ALLOWED);
-        return w.len;
+        return ctap_error(out, cap, ERR_NOT_ALLOWED);
     }
 
     memset(cr, 0, sizeof(*cr));
     fj_random(cr->credential_id, FJ_CRED_ID_LEN);
-    fj_random(cr->private_key, FJ_ECDSA_KEY_BYTES);
+    if (!fj_ecdsa_generate_private(cr->private_key)) {
+        cr->in_use = false;
+        return ctap_error(out, cap, ERR_INVALID_PARAMETER);
+    }
     memcpy(cr->rp_id_hash, rp_id_hash, FJ_HASH_LEN);
     cr->in_use = true;
     (void)resident;
@@ -369,10 +372,7 @@ static size_t make_credential(const uint8_t *req, size_t len,
     uint8_t pub[65];
     if (!fj_ecdsa_pubkey(cr->private_key, pub)) {
         cr->in_use = false;
-        fj_cbor_writer w;
-        fj_cbor_writer_init(&w, out, cap);
-        fj_cbor_uint(&w, ERR_INVALID_PARAMETER);
-        return w.len;
+        return ctap_error(out, cap, ERR_INVALID_PARAMETER);
     }
 
     uint8_t authdata[FJ_AUTH_DATA_MAX];
@@ -380,18 +380,17 @@ static size_t make_credential(const uint8_t *req, size_t len,
                                       rp_id_hash, pub, cr->credential_id);
     if (ad_len == 0) {
         cr->in_use = false;
-        fj_cbor_writer w;
-        fj_cbor_writer_init(&w, out, cap);
-        fj_cbor_uint(&w, ERR_INVALID_LENGTH);
-        return w.len;
+        return ctap_error(out, cap, ERR_INVALID_LENGTH);
     }
 
     /* Credential committed; mark for deferred flash persist. */
     ctap2_dirty = true;
 
     /* Response map. */
+    if (cap < 2) return 0;
+    out[0] = 0;
     fj_cbor_writer w;
-    fj_cbor_writer_init(&w, out, cap);
+    fj_cbor_writer_init(&w, out + 1, cap - 1);
     fj_cbor_map(&w, 3);
     fj_cbor_uint(&w, 0x01); fj_cbor_tstr(&w, "none");           /* fmt */
     fj_cbor_uint(&w, 0x02); fj_cbor_bstr(&w, authdata, ad_len); /* authData */
@@ -401,22 +400,12 @@ static size_t make_credential(const uint8_t *req, size_t len,
         cr->in_use = false;
         return 0;
     }
-    return w.len;
+    return w.len + 1;
 
 missing:
-    {
-        fj_cbor_writer w;
-        fj_cbor_writer_init(&w, out, cap);
-        fj_cbor_uint(&w, ERR_MISSING_PARAMETER);
-        return w.len;
-    }
+    return ctap_error(out, cap, ERR_MISSING_PARAMETER);
 bad_param:
-    {
-        fj_cbor_writer w;
-        fj_cbor_writer_init(&w, out, cap);
-        fj_cbor_uint(&w, ERR_INVALID_PARAMETER);
-        return w.len;
-    }
+    return ctap_error(out, cap, ERR_INVALID_PARAMETER);
 }
 
 /* ------------------------------------------------------------------ */
@@ -472,8 +461,11 @@ static size_t get_assertion(const uint8_t *req, size_t len,
                     for (size_t k = 0; k < ep; k++) {
                         fj_cbor_item ek, ev;
                         if (!fj_cbor_next(&r, &ek)) goto bad_param;
+                        char key_name[16];
+                        if (!read_text(&r, &ek, key_name, sizeof(key_name)))
+                            goto bad_param;
                         if (!fj_cbor_next(&r, &ev)) goto bad_param;
-                        if (ek.type == FJ_CBOR_UINT && ek.val == 0x02 &&
+                        if (strcmp(key_name, "id") == 0 &&
                             ev.type == FJ_CBOR_BSTR) {
                             size_t n2 = 0;
                             if (fj_cbor_read_bytes(&r, &ev, allow_id,
@@ -496,10 +488,7 @@ static size_t get_assertion(const uint8_t *req, size_t len,
     if (!have_client_hash || !have_rp || rp_id_len == 0) goto missing;
 
     if (fj_state_get() != FJ_STATE_UNLOCKED) {
-        fj_cbor_writer w;
-        fj_cbor_writer_init(&w, out, cap);
-        fj_cbor_uint(&w, ERR_OPERATION_DENIED);
-        return w.len;
+        return ctap_error(out, cap, ERR_OPERATION_DENIED);
     }
 
     uint8_t rp_id_hash[FJ_HASH_LEN];
@@ -507,78 +496,67 @@ static size_t get_assertion(const uint8_t *req, size_t len,
 
     /* Resolve the credential: by allowList id, else by rpIdHash. */
     fj_ctap2_cred_t *cr = NULL;
-    if (have_allow) cr = find_cred_by_id(allow_id);
-    if (!cr) cr = find_cred_by_rp(rp_id_hash);
+    if (have_allow)
+        cr = find_cred_by_id(allow_id);
+    else
+        cr = find_cred_by_rp(rp_id_hash);
     if (!cr) {
-        fj_cbor_writer w;
-        fj_cbor_writer_init(&w, out, cap);
-        fj_cbor_uint(&w, ERR_NOT_ALLOWED);
-        return w.len;
+        return ctap_error(out, cap, ERR_NOT_ALLOWED);
     }
     if (memcmp(cr->rp_id_hash, rp_id_hash, FJ_HASH_LEN) != 0) {
-        fj_cbor_writer w;
-        fj_cbor_writer_init(&w, out, cap);
-        fj_cbor_uint(&w, ERR_NOT_ALLOWED);
-        return w.len;
+        return ctap_error(out, cap, ERR_NOT_ALLOWED);
     }
 
     /* authData. */
     bool with_user = (cr->user_id_len > 0);
     uint8_t authdata[FJ_AUTH_DATA_MAX];
-    size_t ad_len = build_ga_authdata(authdata, sizeof(authdata),
-                                      rp_id_hash, with_user);
+    size_t ad_len = build_ga_authdata(authdata, sizeof(authdata), rp_id_hash);
     if (ad_len == 0) goto bad_param;
-    sign_counter++;
 
-    /* Signed data: authData || SHA-256(clientDataHash). */
-    uint8_t digest[FJ_HASH_LEN];
-    fj_sha256(client_data_hash, FJ_HASH_LEN, digest);
+    /* Signed data: authData || clientDataHash. */
     uint8_t to_sign[FJ_AUTH_DATA_MAX + FJ_HASH_LEN];
     memcpy(to_sign, authdata, ad_len);
-    memcpy(to_sign + ad_len, digest, FJ_HASH_LEN);
+    memcpy(to_sign + ad_len, client_data_hash, FJ_HASH_LEN);
     uint8_t sig_digest[FJ_HASH_LEN];
     fj_sha256(to_sign, ad_len + FJ_HASH_LEN, sig_digest);
 
-    uint8_t signature[64];
-    if (!fj_ecdsa_sign(cr->private_key, sig_digest, signature)) goto bad_param;
+    uint8_t signature_raw[64];
+    uint8_t signature_der[80];
+    size_t signature_len = 0;
+    if (!fj_ecdsa_sign(cr->private_key, sig_digest, signature_raw) ||
+        !fj_ecdsa_signature_der(signature_raw, signature_der,
+                                sizeof(signature_der), &signature_len))
+        goto bad_param;
 
-    /* Response: array(1){ map(credential, authData, signature, [user]) }. */
+    /* Response is a map containing credential, authData and signature. */
+    if (cap < 2) return 0;
+    out[0] = 0;
     fj_cbor_writer w;
-    fj_cbor_writer_init(&w, out, cap);
+    fj_cbor_writer_init(&w, out + 1, cap - 1);
 
-    fj_cbor_array(&w, 1);
     fj_cbor_map(&w, with_user ? 4 : 3);
 
     /* credential: {type: "public-key", id: bstr} */
     fj_cbor_uint(&w, K_CREDENTIAL);
     fj_cbor_map(&w, 2);
-    fj_cbor_uint(&w, 0x01); fj_cbor_tstr(&w, "public-key");
-    fj_cbor_uint(&w, 0x02); fj_cbor_bstr(&w, cr->credential_id, FJ_CRED_ID_LEN);
+    fj_cbor_tstr(&w, "type"); fj_cbor_tstr(&w, "public-key");
+    fj_cbor_tstr(&w, "id"); fj_cbor_bstr(&w, cr->credential_id, FJ_CRED_ID_LEN);
 
     fj_cbor_uint(&w, K_AUTH_DATA); fj_cbor_bstr(&w, authdata, ad_len);
-    fj_cbor_uint(&w, K_SIGNATURE); fj_cbor_bstr(&w, signature, 64);
+    fj_cbor_uint(&w, K_SIGNATURE);
+    fj_cbor_bstr(&w, signature_der, signature_len);
     if (with_user) {
         fj_cbor_uint(&w, K_USER_HANDLE);
         fj_cbor_bstr(&w, cr->user_id, cr->user_id_len);
     }
 
     if (!fj_cbor_ok(&w)) return 0;
-    return w.len;
+    return w.len + 1;
 
 missing:
-    {
-        fj_cbor_writer w;
-        fj_cbor_writer_init(&w, out, cap);
-        fj_cbor_uint(&w, ERR_MISSING_PARAMETER);
-        return w.len;
-    }
+    return ctap_error(out, cap, ERR_MISSING_PARAMETER);
 bad_param:
-    {
-        fj_cbor_writer w;
-        fj_cbor_writer_init(&w, out, cap);
-        fj_cbor_uint(&w, ERR_INVALID_PARAMETER);
-        return w.len;
-    }
+    return ctap_error(out, cap, ERR_INVALID_PARAMETER);
 }
 
 /* ------------------------------------------------------------------ */
@@ -587,10 +565,7 @@ bad_param:
 size_t fj_ctap2_dispatch(const uint8_t *msg, size_t len,
                          uint8_t *out, size_t out_cap) {
     if (len == 0) {
-        fj_cbor_writer w;
-        fj_cbor_writer_init(&w, out, out_cap);
-        fj_cbor_uint(&w, ERR_INVALID_LENGTH);
-        return w.len;
+        return ctap_error(out, out_cap, ERR_INVALID_LENGTH);
     }
 
     uint8_t cmd = msg[0];
@@ -605,17 +580,10 @@ size_t fj_ctap2_dispatch(const uint8_t *msg, size_t len,
         case CMD_GET_ASSERTION:
             return get_assertion(payload, plen, out, out_cap);
         case CMD_CANCEL: {
-            /* Acknowledge with an empty CBOR map. */
-            fj_cbor_writer w;
-            fj_cbor_writer_init(&w, out, out_cap);
-            fj_cbor_map(&w, 0);
-            return w.len;
+            return ctap_error(out, out_cap, 0);
         }
         default: {
-            fj_cbor_writer w;
-            fj_cbor_writer_init(&w, out, out_cap);
-            fj_cbor_uint(&w, ERR_INVALID_COMMAND);
-            return w.len;
+            return ctap_error(out, out_cap, ERR_INVALID_COMMAND);
         }
     }
 }

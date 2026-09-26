@@ -4,7 +4,7 @@
  * Provides the small set of cryptographic operations the device needs:
  *   - ECDSA P-256 signing (U2F / SSH)
  *   - SHA-256 hashing
- *   - AES-256-XTS block encryption/decryption for the MSC drive
+ *   - AES-128-XTS block encryption/decryption for the MSC drive
  *   - HKDF key derivation
  */
 #ifndef FJAEGER_CRYPTO_H
@@ -31,19 +31,26 @@ bool fj_ecdsa_sign(const uint8_t private_key[32],
                    const uint8_t digest[FJ_HASH_LEN],
                    uint8_t signature[64]);
 
+/* Generate a valid, non-zero P-256 private scalar. */
+bool fj_ecdsa_generate_private(uint8_t private_key[32]);
+
+/* Convert a fixed-width P-256 r||s signature to ASN.1 DER. */
+bool fj_ecdsa_signature_der(const uint8_t signature[64], uint8_t *out,
+                            size_t out_cap, size_t *out_len);
+
 /* Derive the uncompressed 65-byte P-256 public key
  * (0x04 || X || Y) from a 32-byte private scalar. Returns true on
  * success. */
 bool fj_ecdsa_pubkey(const uint8_t private_key[32], uint8_t pub[65]);
 
-/* Derive 32 bytes of key material for 'slot' from the AES-256 master key
+/* Derive 32 bytes of key material from the XTS key
  * and a label, using HKDF-SHA256. Used to derive per-block tweak/sector
  * keys for the MSC. */
 bool fj_hkdf(const uint8_t ikm[FJ_AES_KEY_LEN], const char *label,
              const uint8_t *salt, size_t salt_len, uint8_t out[32]);
 
-/* Encrypt/decrypt one 512-byte MSC sector using AES-256-XTS.
- * data_key   : 32-byte data key
+/* Encrypt/decrypt one 512-byte MSC sector using AES-128-XTS.
+ * data_key   : two 128-bit keys
  * tweak      : 16-byte tweak value (sector number based)
  * buf        : 512-byte block, encrypted in place
  * encrypt    : true to encrypt, false to decrypt */
