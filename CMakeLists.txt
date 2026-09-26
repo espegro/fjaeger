@@ -53,6 +53,9 @@ target_include_directories(fjaeger PRIVATE
 target_compile_definitions(fjaeger PRIVATE
   CFG_TUSB_CONFIG_FILE="tusb_config.h"
   PICO_FLASH_SIZE_BYTES=0x1000000
+  # mbedTLS P-256 signing plus CTAP2 request/response buffers exceed the
+  # Pico SDK's 2 KiB default stack and otherwise wedge USB in getAssertion.
+  PICO_STACK_SIZE=0x1000
 )
 
 # --- Hardware / SDK libs ---

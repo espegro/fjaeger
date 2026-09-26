@@ -69,7 +69,7 @@ bool fj_ecdsa_signature_der(const uint8_t signature[64], uint8_t *out,
 
 static size_t make_request(uint8_t *buf, size_t cap) {
     uint8_t hash[32] = {0};
-    uint8_t user_id[4] = {1, 2, 3, 4};
+    uint8_t user_id[32] = {0};
     fj_cbor_writer w;
     fj_cbor_writer_init(&w, buf + 1, cap - 1);
     buf[0] = 0x01;
@@ -77,11 +77,13 @@ static size_t make_request(uint8_t *buf, size_t cap) {
     fj_cbor_uint(&w, 1); fj_cbor_bstr(&w, hash, sizeof(hash));
     fj_cbor_uint(&w, 2); fj_cbor_map(&w, 1);
     fj_cbor_tstr(&w, "id"); fj_cbor_tstr(&w, "ssh:");
-    fj_cbor_uint(&w, 3); fj_cbor_map(&w, 1);
+    fj_cbor_uint(&w, 3); fj_cbor_map(&w, 3);
     fj_cbor_tstr(&w, "id"); fj_cbor_bstr(&w, user_id, sizeof(user_id));
+    fj_cbor_tstr(&w, "name"); fj_cbor_tstr(&w, "openssh");
+    fj_cbor_tstr(&w, "displayName"); fj_cbor_tstr(&w, "openssh");
     fj_cbor_uint(&w, 4); fj_cbor_array(&w, 1); fj_cbor_map(&w, 2);
-    fj_cbor_tstr(&w, "type"); fj_cbor_tstr(&w, "public-key");
     fj_cbor_tstr(&w, "alg"); fj_cbor_neg(&w, 6);
+    fj_cbor_tstr(&w, "type"); fj_cbor_tstr(&w, "public-key");
     assert(fj_cbor_ok(&w));
     return w.len + 1;
 }
@@ -137,6 +139,11 @@ int main(void) {
     request_len = assertion_request(request, sizeof(request));
     len = fj_ctap2_dispatch(request, request_len, response, sizeof(response));
     assert_response_map(response, len, 3);
+    /* The credential descriptor must use deterministic CBOR key ordering:
+     * the two-byte "id" key precedes the four-byte "type" key. */
+    assert(len > 7);
+    assert(response[2] == 0x01 && response[3] == 0xa2);
+    assert(response[4] == 0x62 && response[5] == 'i' && response[6] == 'd');
 
     puts("ctap2 host tests: ok");
     return 0;

@@ -49,11 +49,17 @@ bool fj_ecdsa_sign(const uint8_t private_key[32],
     if ((ret = mbedtls_mpi_read_binary(&d, private_key, 32)) != 0)
         goto fail;
 
-    /* Deterministic RFC 6979 signing over SHA-256. */
-    if ((ret = mbedtls_ecdsa_sign_det_ext(&grp, &r, &s, &d,
-                                          digest, FJ_HASH_LEN,
-                                          MBEDTLS_MD_SHA256,
-                                          crypto_rng, NULL)) != 0)
+    /* Reject corrupt persisted credentials before entering the ECDSA path. */
+    if ((ret = mbedtls_ecp_check_privkey(&grp, &d)) != 0)
+        goto fail;
+
+    /* Use the RP2350 hardware RNG for both the ephemeral scalar and
+     * side-channel blinding.  The deterministic mbedTLS API uses HMAC-DRBG;
+     * that needs several interleaved SHA-256 contexts, while the Pico SDK's
+     * SHA-256 accelerator exposes one globally locked hardware context. */
+    if ((ret = mbedtls_ecdsa_sign(&grp, &r, &s, &d,
+                                  digest, FJ_HASH_LEN,
+                                  crypto_rng, NULL)) != 0)
         goto fail;
 
     /* Export r and s as fixed 32-byte big-endian values. */
@@ -154,7 +160,8 @@ bool fj_ecdsa_pubkey(const uint8_t private_key[32], uint8_t pub[65]) {
         goto fail;
     if ((ret = mbedtls_mpi_read_binary(&d, private_key, 32)) != 0)
         goto fail;
-    if ((ret = mbedtls_ecp_mul(&grp, &q, &d, &grp.G, NULL, NULL)) != 0)
+    if ((ret = mbedtls_ecp_mul(&grp, &q, &d, &grp.G,
+                               crypto_rng, NULL)) != 0)
         goto fail;
 
     size_t olen = 0;

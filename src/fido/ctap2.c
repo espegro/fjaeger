@@ -60,6 +60,14 @@ static fj_ctap2_cred_t creds[FJ_CTAP2_CREDS];
 static uint32_t sign_counter = 0;
 static bool ctap2_dirty = false;
 
+/* Shared synchronous crypto workspace.  Keeping these buffers out of the
+ * 4 KiB RP2350 stack leaves room for mbedTLS's bignum/ECDSA call chain. */
+static uint8_t work_pub[65];
+static uint8_t work_authdata[FJ_AUTH_DATA_MAX];
+static uint8_t work_to_sign[FJ_AUTH_DATA_MAX + FJ_HASH_LEN];
+static uint8_t work_signature_raw[64];
+static uint8_t work_signature_der[80];
+
 static size_t ctap_error(uint8_t *out, size_t cap, uint8_t error) {
     if (cap < 1) return 0;
     out[0] = error;
@@ -211,8 +219,8 @@ static size_t build_get_info(uint8_t *out, size_t cap) {
     fj_cbor_map(&w, 4);
     fj_cbor_tstr(&w, "rk");   fj_cbor_bool(&w, false);
     fj_cbor_tstr(&w, "up");   fj_cbor_bool(&w, true);
-    fj_cbor_tstr(&w, "clientPin"); fj_cbor_bool(&w, false);
     fj_cbor_tstr(&w, "uv");   fj_cbor_bool(&w, false);
+    fj_cbor_tstr(&w, "clientPin"); fj_cbor_bool(&w, false);
 
     /* maxMsgSize */
     fj_cbor_uint(&w, 0x05);
@@ -369,15 +377,13 @@ static size_t make_credential(const uint8_t *req, size_t len,
     (void)resident;
 
     /* Public key + authData. */
-    uint8_t pub[65];
-    if (!fj_ecdsa_pubkey(cr->private_key, pub)) {
+    if (!fj_ecdsa_pubkey(cr->private_key, work_pub)) {
         cr->in_use = false;
         return ctap_error(out, cap, ERR_INVALID_PARAMETER);
     }
 
-    uint8_t authdata[FJ_AUTH_DATA_MAX];
-    size_t ad_len = build_mc_authdata(authdata, sizeof(authdata),
-                                      rp_id_hash, pub, cr->credential_id);
+    size_t ad_len = build_mc_authdata(work_authdata, sizeof(work_authdata),
+                                      rp_id_hash, work_pub, cr->credential_id);
     if (ad_len == 0) {
         cr->in_use = false;
         return ctap_error(out, cap, ERR_INVALID_LENGTH);
@@ -393,7 +399,7 @@ static size_t make_credential(const uint8_t *req, size_t len,
     fj_cbor_writer_init(&w, out + 1, cap - 1);
     fj_cbor_map(&w, 3);
     fj_cbor_uint(&w, 0x01); fj_cbor_tstr(&w, "none");           /* fmt */
-    fj_cbor_uint(&w, 0x02); fj_cbor_bstr(&w, authdata, ad_len); /* authData */
+    fj_cbor_uint(&w, 0x02); fj_cbor_bstr(&w, work_authdata, ad_len); /* authData */
     fj_cbor_uint(&w, 0x03); fj_cbor_map(&w, 0);                 /* attStmt */
 
     if (!fj_cbor_ok(&w)) {
@@ -509,23 +515,20 @@ static size_t get_assertion(const uint8_t *req, size_t len,
 
     /* authData. */
     bool with_user = (cr->user_id_len > 0);
-    uint8_t authdata[FJ_AUTH_DATA_MAX];
-    size_t ad_len = build_ga_authdata(authdata, sizeof(authdata), rp_id_hash);
+    size_t ad_len = build_ga_authdata(work_authdata, sizeof(work_authdata),
+                                      rp_id_hash);
     if (ad_len == 0) goto bad_param;
 
     /* Signed data: authData || clientDataHash. */
-    uint8_t to_sign[FJ_AUTH_DATA_MAX + FJ_HASH_LEN];
-    memcpy(to_sign, authdata, ad_len);
-    memcpy(to_sign + ad_len, client_data_hash, FJ_HASH_LEN);
+    memcpy(work_to_sign, work_authdata, ad_len);
+    memcpy(work_to_sign + ad_len, client_data_hash, FJ_HASH_LEN);
     uint8_t sig_digest[FJ_HASH_LEN];
-    fj_sha256(to_sign, ad_len + FJ_HASH_LEN, sig_digest);
+    fj_sha256(work_to_sign, ad_len + FJ_HASH_LEN, sig_digest);
 
-    uint8_t signature_raw[64];
-    uint8_t signature_der[80];
     size_t signature_len = 0;
-    if (!fj_ecdsa_sign(cr->private_key, sig_digest, signature_raw) ||
-        !fj_ecdsa_signature_der(signature_raw, signature_der,
-                                sizeof(signature_der), &signature_len))
+    if (!fj_ecdsa_sign(cr->private_key, sig_digest, work_signature_raw) ||
+        !fj_ecdsa_signature_der(work_signature_raw, work_signature_der,
+                                sizeof(work_signature_der), &signature_len))
         goto bad_param;
 
     /* Response is a map containing credential, authData and signature. */
@@ -536,15 +539,16 @@ static size_t get_assertion(const uint8_t *req, size_t len,
 
     fj_cbor_map(&w, with_user ? 4 : 3);
 
-    /* credential: {type: "public-key", id: bstr} */
+    /* credential: {id: bstr, type: "public-key"}.  CTAP2 requires
+     * deterministic CBOR ordering, so the shorter text key comes first. */
     fj_cbor_uint(&w, K_CREDENTIAL);
     fj_cbor_map(&w, 2);
-    fj_cbor_tstr(&w, "type"); fj_cbor_tstr(&w, "public-key");
     fj_cbor_tstr(&w, "id"); fj_cbor_bstr(&w, cr->credential_id, FJ_CRED_ID_LEN);
+    fj_cbor_tstr(&w, "type"); fj_cbor_tstr(&w, "public-key");
 
-    fj_cbor_uint(&w, K_AUTH_DATA); fj_cbor_bstr(&w, authdata, ad_len);
+    fj_cbor_uint(&w, K_AUTH_DATA); fj_cbor_bstr(&w, work_authdata, ad_len);
     fj_cbor_uint(&w, K_SIGNATURE);
-    fj_cbor_bstr(&w, signature_der, signature_len);
+    fj_cbor_bstr(&w, work_signature_der, signature_len);
     if (with_user) {
         fj_cbor_uint(&w, K_USER_HANDLE);
         fj_cbor_bstr(&w, cr->user_id, cr->user_id_len);

@@ -2,18 +2,11 @@
  * Fjaeger - U2F (CTAP1) authenticator over HID.
  */
 #include <string.h>
-#include <stdio.h>
-
 #include "u2f.h"
 #include "ctap2.h"
-#include "crypto.h"
 #include "keys.h"
 #include "state.h"
 #include "tusb.h"
-
-#include "mbedtls/ecp.h"
-#include "mbedtls/bignum.h"
-#include "mbedtls/pk.h"
 
 /* ------------------------------------------------------------------ */
 /* U2FHID frame / command constants                                    */
@@ -59,15 +52,6 @@
 #define SW_INS_NOT_SUPPORTED    0x6D00
 #define SW_CONDITIONS_NOT_SAT   0x6985
 
-/* U2F AUTHENTICATE controls */
-#define U2F_AUTH_CHECK_ONLY    0x07
-#define U2F_AUTH_ENFORCE_UP    0x03
-#define U2F_AUTH_DONT_ENFORCE  0x08
-
-/* Counter persisted in a reserved byte of each slot key material; for this
- * prototype we keep a simple volatile counter seeded at boot. */
-static uint32_t u2f_counter = 0;
-
 /* ------------------------------------------------------------------ */
 /* Inbound message assembly                                            */
 /* ------------------------------------------------------------------ */
@@ -93,6 +77,10 @@ typedef struct {
 static out_frame_t out_q[OUT_QUEUE];
 static uint8_t out_head = 0, out_tail = 0;
 static bool out_pending = false;
+
+/* CTAP2 crypto is stack-intensive on the RP2350.  Keep the transport reply
+ * workspace in BSS; dispatch is synchronous, so it is never re-entered. */
+static uint8_t cbor_response[512];
 
 /* ------------------------------------------------------------------ */
 /* Small helpers                                                       */
@@ -199,198 +187,57 @@ bool fj_u2f_pop_report(uint8_t out[64]) {
 }
 
 /* ------------------------------------------------------------------ */
-/* U2F operation handling                                              */
+/* CTAP1 compatibility probe                                           */
 /* ------------------------------------------------------------------ */
 
-/* Build and sign the U2F_AUTHENTICATE signature over
- *   user_presence(1) || counter(4) || challenge(32) || app(32)
- * with the active slot key. */
-static bool auth_sign(const uint8_t app[32], const uint8_t challenge[32],
-                      const uint8_t *priv, uint8_t sig[64]) {
-    uint8_t data[1 + 4 + 32 + 32];
-    uint8_t digest[FJ_HASH_LEN];
-
-    data[0] = 0x01;               /* user presence */
-    be32(data + 1, u2f_counter);  /* counter */
-    memcpy(data + 5, challenge, 32);
-    memcpy(data + 37, app, 32);
-
-    fj_sha256(data, sizeof(data), digest);
-    return fj_ecdsa_sign(priv, digest, sig);
+static void send_apdu_status(uint32_t cid, uint16_t status) {
+    uint8_t resp[2] = {
+        (uint8_t)(status >> 8),
+        (uint8_t)status,
+    };
+    send_hid(cid, U2FHID_MSG, resp, sizeof(resp));
 }
 
-/* Derive the uncompressed 65-byte P-256 public key (0x04 || X || Y)
- * from a 32-byte private scalar. */
-static bool derive_pubkey(const uint8_t priv[32], uint8_t pub[65]) {
-    mbedtls_ecp_group grp;
-    mbedtls_mpi d;
-    mbedtls_ecp_point q;
-    int ret;
-
-    mbedtls_ecp_group_init(&grp);
-    mbedtls_mpi_init(&d);
-    mbedtls_ecp_point_init(&q);
-
-    if ((ret = mbedtls_ecp_group_load(&grp, MBEDTLS_ECP_DP_SECP256R1)) != 0) goto fail;
-    if ((ret = mbedtls_mpi_read_binary(&d, priv, 32)) != 0) goto fail;
-    if ((ret = mbedtls_ecp_mul(&grp, &q, &d, &grp.G, NULL, NULL)) != 0) goto fail;
-
-    size_t olen = 0;
-    if ((ret = mbedtls_ecp_point_write_binary(&grp, &q, MBEDTLS_ECP_PF_UNCOMPRESSED,
-                                              &olen, pub, 65)) != 0) goto fail;
-
-    mbedtls_ecp_point_free(&q);
-    mbedtls_mpi_free(&d);
-    mbedtls_ecp_group_free(&grp);
-    return olen == 65;
-
-fail:
-    mbedtls_ecp_point_free(&q);
-    mbedtls_mpi_free(&d);
-    mbedtls_ecp_group_free(&grp);
-    (void)ret;
-    return false;
-}
-
-/* Handle a U2F APDU carried inside a U2FHID MSG. */
-static void handle_apdu(uint32_t cid, const uint8_t *p, uint16_t len) {
-    uint8_t resp[300];
-    uint16_t rlen = 0;
-
-    if (len < 4) { send_error(cid, ERR_INVALID_LEN); return; }
-    if (p[0] != U2F_CLA) { send_error(cid, ERR_INVALID_PAR); return; }
-
-    uint8_t ins = p[1];
-    uint16_t data_len = ((uint16_t)p[4] << 8) | p[5];
-    const uint8_t *data = p + 7;
-
-    if (len < (uint16_t)(7 + data_len)) { send_error(cid, ERR_INVALID_LEN); return; }
-
-    switch (ins) {
-        case U2F_VERSION: {
-            const char *ver = "U2F_V2";
-            resp[rlen++] = (uint8_t)strlen(ver);
-            memcpy(resp + rlen, ver, strlen(ver));
-            rlen += (uint16_t)strlen(ver);
-            resp[rlen++] = (uint8_t)(SW_NO_ERROR >> 8);
-            resp[rlen++] = (uint8_t)(SW_NO_ERROR);
-            break;
-        }
-
-        case U2F_AUTHENTICATE: {
-            uint8_t control = data[0];
-            const uint8_t *app = data + 1;
-            const uint8_t *challenge = data + 33;
-            uint8_t kh_len = data[65];
-            const uint8_t *kh = data + 66;
-
-            (void)kh_len; (void)kh;
-
-            const fj_slot_t *slot = fj_keys_get(fj_keys_active_slot());
-            if (!slot) {
-                resp[rlen++] = (uint8_t)(SW_WRONG_DATA >> 8);
-                resp[rlen++] = (uint8_t)(SW_WRONG_DATA);
-                break;
-            }
-            if (fj_state_get() != FJ_STATE_UNLOCKED) {
-                /* User presence not satisfied -> require unlock first. */
-                resp[rlen++] = (uint8_t)(SW_CONDITIONS_NOT_SAT >> 8);
-                resp[rlen++] = (uint8_t)(SW_CONDITIONS_NOT_SAT);
-                break;
-            }
-
-            /* check-only: no signature, just user-presence result. */
-            if (control == U2F_AUTH_CHECK_ONLY) {
-                resp[rlen++] = 0x01; /* user presence confirmed */
-                resp[rlen++] = (uint8_t)(SW_NO_ERROR >> 8);
-                resp[rlen++] = (uint8_t)(SW_NO_ERROR);
-                break;
-            }
-
-            uint8_t sig[64];
-            if (!auth_sign(app, challenge, slot->private_key, sig)) {
-                send_error(cid, ERR_INVALID_PAR);
-                return;
-            }
-
-            /* user presence(1) || counter(4) || signature(64) */
-            resp[rlen++] = 0x01;
-            be32(resp + rlen, u2f_counter);
-            rlen += 4;
-            memcpy(resp + rlen, sig, 64);
-            rlen += 64;
-            u2f_counter++;
-            resp[rlen++] = (uint8_t)(SW_NO_ERROR >> 8);
-            resp[rlen++] = (uint8_t)(SW_NO_ERROR);
-            break;
-        }
-
-        case U2F_REGISTER: {
-            /* Find a free slot for the new credential. */
-            unsigned new_slot = FJ_NUM_SLOTS;
-            for (unsigned i = 0; i < FJ_NUM_SLOTS; i++) {
-                if (fj_keys_get(i) == NULL) { new_slot = i; break; }
-            }
-            if (new_slot >= FJ_NUM_SLOTS || fj_state_get() != FJ_STATE_UNLOCKED) {
-                resp[rlen++] = (uint8_t)(SW_CONDITIONS_NOT_SAT >> 8);
-                resp[rlen++] = (uint8_t)(SW_CONDITIONS_NOT_SAT);
-                break;
-            }
-
-            /* Register payload: challenge(32) || app(32). */
-            (void)data;
-
-            char name[16];
-            snprintf(name, sizeof(name), "cred%u", new_slot);
-            if (!fj_keys_provision(new_slot, name, true)) {
-                resp[rlen++] = (uint8_t)(SW_WRONG_DATA >> 8);
-                resp[rlen++] = (uint8_t)(SW_WRONG_DATA);
-                break;
-            }
-
-            const fj_slot_t *slot = fj_keys_get(new_slot);
-            if (!slot) {
-                resp[rlen++] = (uint8_t)(SW_WRONG_DATA >> 8);
-                resp[rlen++] = (uint8_t)(SW_WRONG_DATA);
-                break;
-            }
-
-            /* Derive the public key. */
-            uint8_t pub[65];
-            if (!derive_pubkey(slot->private_key, pub)) {
-                resp[rlen++] = (uint8_t)(SW_WRONG_DATA >> 8);
-                resp[rlen++] = (uint8_t)(SW_WRONG_DATA);
-                break;
-            }
-
-            /* key handle = slot index (1 byte) + slot name. */
-            uint8_t key_handle[FJ_SLOT_NAME_MAX + 1];
-            key_handle[0] = (uint8_t)new_slot;
-            memcpy(key_handle + 1, slot->name, strlen(slot->name));
-            uint8_t kh_len = (uint8_t)(1 + strlen(slot->name));
-
-            /* Build response (attestation removed: no X.509 cert / sig):
-             * reserved(1) || pubkey(65) || kh_len(1) || key_handle */
-            resp[rlen++] = 0x05;                        /* reserved */
-            memcpy(resp + rlen, pub, 65); rlen += 65;
-            resp[rlen++] = kh_len;
-            memcpy(resp + rlen, key_handle, kh_len); rlen += kh_len;
-            resp[rlen++] = (uint8_t)(SW_NO_ERROR >> 8);
-            resp[rlen++] = (uint8_t)(SW_NO_ERROR);
-            break;
-        }
-
-        default:
+/* OpenSSH/libfido2 uses a CTAP1 REGISTER APDU only to select a token by
+ * user presence before reopening it for the actual CTAP2 operation.  Fjaeger
+ * treats an unlocked device as user presence and returns only the APDU status
+ * word expected by that probe.  No credential is created here: full CTAP1
+ * registration/authentication remains intentionally unsupported. */
+static void handle_msg(uint32_t cid, const uint8_t *p, uint16_t len) {
+    if (len < 4 || p[0] != U2F_CLA) {
+        send_apdu_status(cid, SW_WRONG_DATA);
+        return;
     }
 
-    send_hid(cid, U2FHID_MSG, resp, rlen);
-}
+    if (p[1] == U2F_VERSION) {
+        static const uint8_t response[] = {
+            'U', '2', 'F', '_', 'V', '2',
+            (uint8_t)(SW_NO_ERROR >> 8), (uint8_t)SW_NO_ERROR,
+        };
+        send_hid(cid, U2FHID_MSG, response, sizeof(response));
+        return;
+    }
 
-/* Handle a U2FHID MSG by routing to APDU handling. */
-static void __attribute__((unused)) handle_msg(uint32_t cid,
-                                                const uint8_t *payload,
-                                                uint16_t len) {
-    handle_apdu(cid, payload, len);
+    if (p[1] != U2F_REGISTER) {
+        send_apdu_status(cid, SW_INS_NOT_SUPPORTED);
+        return;
+    }
+
+    /* libfido2 sends an extended-length APDU:
+     * CLA INS P1 P2 00 LcHi LcLo challenge[32] application[32] LeHi LeLo */
+    if (len < 7 || p[4] != 0) {
+        send_apdu_status(cid, SW_WRONG_DATA);
+        return;
+    }
+    uint16_t data_len = ((uint16_t)p[5] << 8) | p[6];
+    if (data_len != 64 || len < (uint16_t)(7 + data_len)) {
+        send_apdu_status(cid, SW_WRONG_DATA);
+        return;
+    }
+
+    send_apdu_status(cid, fj_state_get() == FJ_STATE_UNLOCKED
+                              ? SW_NO_ERROR
+                              : SW_CONDITIONS_NOT_SAT);
 }
 
 static void handle_init(uint32_t cid) {
@@ -416,7 +263,7 @@ static void handle_init(uint32_t cid) {
     resp[13] = 1;                  /* device major */
     resp[14] = 0;                  /* device minor */
     resp[15] = 0;                  /* device build */
-    resp[16] = 0x0c;               /* CBOR + no legacy MSG support */
+    resp[16] = 0x04;               /* CBOR; MSG accepted for touch probe */
     send_hid(cid, U2FHID_INIT, resp, sizeof(resp));
 }
 
@@ -426,13 +273,13 @@ static void handle_ping(uint32_t cid, const uint8_t *payload, uint16_t len) {
 
 /* Handle a CTAP2 CBOR message carried in a U2FHID CBOR (0x10) message. */
 static void handle_cbor(uint32_t cid, const uint8_t *payload, uint16_t len) {
-    uint8_t resp[512];
-    size_t rlen = fj_ctap2_dispatch(payload, len, resp, sizeof(resp));
+    size_t rlen = fj_ctap2_dispatch(payload, len, cbor_response,
+                                    sizeof(cbor_response));
     if (rlen == 0) {
         send_error(cid, ERR_INVALID_PAR);
         return;
     }
-    send_hid(cid, U2FHID_CBOR, resp, (uint16_t)rlen);
+    send_hid(cid, U2FHID_CBOR, cbor_response, (uint16_t)rlen);
 }
 
 /* Process a complete assembled inbound message. */
@@ -444,7 +291,7 @@ static void process_rx(void) {
     switch (cmd) {
         case U2FHID_INIT: handle_init(cid); break;
         case U2FHID_PING: handle_ping(cid, rx.buf, len); break;
-        case U2FHID_MSG:  send_error(cid, ERR_INVALID_CMD); break;
+        case U2FHID_MSG:  handle_msg(cid, rx.buf, len); break;
         case U2FHID_CBOR: handle_cbor(cid, rx.buf, len); break;
         case U2FHID_SYNC:
             send_error(cid, ERR_NONE);
