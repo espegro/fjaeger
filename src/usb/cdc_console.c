@@ -84,10 +84,13 @@ static bool parse_uint(const char *s, unsigned long *value) {
 static void cmd_help(void) {
     outln("Fjaeger commands (case-insensitive):");
     outln("  HELP|?                     this help");
-    outln("  STATUS                     show state, active slot, slots, timeout");
-    outln("  LOCK                       lock the device immediately");
-    outln("  UNLOCK <pin>               unlock with PIN");
+    outln("  STATUS                     show device & disk state, slot, timeout");
+    outln("  LOCK                       lock device (and close the disk)");
+    outln("  UNLOCK <pin>               unlock device for key ops only");
     outln("  SETPIN <pin>               set/change PIN");
+    outln("  DISK UNLOCK                unlock/mount the encrypted drive");
+    outln("  DISK LOCK                  lock/unmount the drive");
+    outln("  DISK STATUS                show drive lock state");
     outln("  TIMEOUT <sec>              auto-relock after sec (0 = off)");
     outln("  RESET                      reboot the device");
     outln("  KEY LIST                   list all 8 slots");
@@ -99,10 +102,12 @@ static void cmd_help(void) {
 static void cmd_status(void) {
     char buf[96];
     snprintf(buf, sizeof(buf), "state: %s\r\n"
+             "disk: %s\r\n"
              "active_slot: %u\r\n"
              "provisioned_slots: %u\r\n"
              "timeout: %lus",
              fj_state_get() == FJ_STATE_UNLOCKED ? "unlocked" : "locked",
+             fj_msc_is_ready() ? "unlocked" : "locked",
              fj_keys_active_slot(), fj_keys_count(),
              (unsigned long)fj_state_timeout());
     outln(buf);
@@ -120,11 +125,33 @@ static void cmd_unlock(const char *pin) {
         return;
     }
     if (fj_state_unlock(pin)) {
-        /* Re-mount the decrypted drive with the active slot. */
-        fj_msc_set_ready(true);
+        /* Only unlocks the device for key operations. The encrypted drive
+         * is a separate step: DISK UNLOCK. */
         outln("OK unlocked");
     } else {
         outln("ERR bad pin or no pin set");
+    }
+}
+
+static bool require_unlocked(void);
+
+/* DISK UNLOCK / LOCK / STATUS — independent drive lock. */
+static void cmd_disk(const char *sub) {
+    if (!sub) {
+        outln("ERR DISK requires subcommand (UNLOCK|LOCK|STATUS)");
+        return;
+    }
+    if (strcasecmp(sub, "status") == 0) {
+        outln(fj_msc_is_ready() ? "disk: unlocked" : "disk: locked");
+    } else if (strcasecmp(sub, "unlock") == 0) {
+        if (!require_unlocked()) return;
+        fj_msc_set_ready(true);
+        outln("OK disk unlocked");
+    } else if (strcasecmp(sub, "lock") == 0) {
+        fj_msc_set_ready(false);
+        outln("OK disk locked");
+    } else {
+        outln("ERR unknown DISK subcommand (UNLOCK|LOCK|STATUS)");
     }
 }
 
@@ -274,6 +301,8 @@ static void dispatch(char *cmdline) {
         cmd_unlock(next_token(&p));
     } else if (strcasecmp(tok, "setpin") == 0) {
         cmd_setpin(next_token(&p));
+    } else if (strcasecmp(tok, "disk") == 0) {
+        cmd_disk(next_token(&p));
     } else if (strcasecmp(tok, "key") == 0) {
         char *sub = next_token(&p);
         if (!sub) { outln("ERR KEY requires subcommand"); return; }

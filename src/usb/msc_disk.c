@@ -15,7 +15,6 @@
 #include "msc_disk.h"
 #include "keys.h"
 #include "crypto.h"
-#include "state.h"
 #include "rgb_led.h"
 
 #include "hardware/flash.h"
@@ -427,8 +426,8 @@ void tud_msc_inquiry_cb(uint8_t lun, uint8_t vendor_id[8],
 
 bool tud_msc_test_unit_ready_cb(uint8_t lun) {
     (void)lun;
-    if (!disk_ready || fj_state_get() != FJ_STATE_UNLOCKED || !fs_initialised) {
-        /* Report "media not present" until the device is unlocked. */
+    if (!disk_ready || !fs_initialised) {
+        /* Report "media not present" until the drive is explicitly unlocked. */
         tud_msc_set_sense(lun, SCSI_SENSE_NOT_READY, 0x3a, 0x00);
         return false;
     }
@@ -457,7 +456,7 @@ bool tud_msc_start_stop_cb(uint8_t lun, uint8_t power_condition,
 int32_t tud_msc_read10_cb(uint8_t lun, uint32_t lba, uint32_t offset,
                           void *buffer, uint32_t bufsize) {
     (void)lun;
-    if (!disk_ready || fj_state_get() != FJ_STATE_UNLOCKED) return -1;
+    if (!disk_ready) return -1;
     if (lba >= DISK_TOTAL_SECTORS || offset > DISK_SECTOR_SIZE ||
         bufsize > DISK_SECTOR_SIZE - offset) return -1;
 
@@ -471,14 +470,14 @@ int32_t tud_msc_read10_cb(uint8_t lun, uint32_t lba, uint32_t offset,
 
 bool tud_msc_is_writable_cb(uint8_t lun) {
     (void)lun;
-    /* Writes only allowed while unlocked. */
-    return fj_state_get() == FJ_STATE_UNLOCKED;
+    /* Writes only allowed while the drive is unlocked. */
+    return disk_ready;
 }
 
 int32_t tud_msc_write10_cb(uint8_t lun, uint32_t lba, uint32_t offset,
                            uint8_t *buffer, uint32_t bufsize) {
     (void)lun;
-    if (!disk_ready || fj_state_get() != FJ_STATE_UNLOCKED) return -1;
+    if (!disk_ready) return -1;
     if (lba >= DISK_TOTAL_SECTORS || offset > DISK_SECTOR_SIZE ||
         bufsize > DISK_SECTOR_SIZE - offset) return -1;
 
@@ -514,12 +513,17 @@ int32_t tud_msc_scsi_cb(uint8_t lun, uint8_t const scsi_cmd[16],
     return 0;
 }
 
-/* Exposed to the console to mount/unmount the volume on unlock/lock. */
+/* Exposed to the console to mount/unmount the volume independently of the
+ * device lock state. */
 void fj_msc_set_ready(bool ready) {
     /* On unmount/lock, flush any pending writes to flash first so no data
      * is lost and the decrypted volume is never left exposed. */
     if (!ready) flush_pending_writes();
-    disk_ready = ready && fj_state_get() == FJ_STATE_UNLOCKED && fs_initialised;
+    disk_ready = ready && fs_initialised;
+}
+
+bool fj_msc_is_ready(void) {
+    return disk_ready && fs_initialised;
 }
 
 #endif /* CFG_TUD_MSC */

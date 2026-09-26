@@ -42,8 +42,8 @@ src/
 ### Sikkerhetsmodell
 
 - Private nøkler lagres i RP2350-flash og brukes kun for signering i fastvaren; de eksporteres aldri over serial.
-- Når enheten er **låst**: ingen ECDSA-signering, og MSC-en er ikke klar, lesbar eller skrivbar.
-- Når **ulåst**: PIN er verifisert, MSC-en er mountet og dekrypterer sektorer i farten.
+- **Enhetslås** (`LOCK`/`UNLOCK`): når låst er det ingen ECDSA-signering. Låses opp med PIN over serial.
+- **Disk-lås** (`DISK LOCK`/`DISK UNLOCK`): den krypterte MSC-en er kun mountet/lesbar/skrivbar når `DISK UNLOCK` er gitt. `DISK UNLOCK` krever at enheten er ulåst; `LOCK` og auto-relåsing lukker også disken.
 - MSC-disken bruker en **dedikert permanent XTS-nøkkel** lagret i flash-lageret, uavhengig av keyslots. Bytte eller sletting av keyslots endrer ikke diskdata.
 - PIN-en lagres foreløpig som en SHA-256-hash og sammenlignes i konstant tid. Dette er ikke tilstrekkelig beskyttelse mot offline-angrep på en flashdump og skal erstattes med saltet, treg nøkkelavledning.
 
@@ -74,16 +74,21 @@ Koble til konsollen (f.eks. `screen /dev/ttyACM0 115200`):
 | Kommando | Beskrivelse |
 |----------|-------------|
 | `HELP` | Liste kommandoer |
-| `STATUS` | Vis tilstand, aktiv slot, antall slots, timeout |
-| `LOCK` | Lås enheten umiddelbart |
-| `UNLOCK <pin>` | Lås opp med PIN |
+| `STATUS` | Vis enhet + disk-tilstand, aktiv slot, slots, timeout |
+| `LOCK` | Lås enheten (og lukk disken) |
+| `UNLOCK <pin>` | Lås opp **enheten** for nøkkeloperasjoner (ikke disken) |
 | `SETPIN <pin>` | Sett/endre PIN |
+| `DISK UNLOCK` | Lås opp/mount den krypterte disken (eget steg) |
+| `DISK LOCK` | Lås/unmount disken |
+| `DISK STATUS` | Vis disk-tilstand |
 | `KEY LIST` | Vis alle slots |
 | `KEY SELECT <n>` | Velg aktiv profil |
 | `KEY PROVISION <n> [name]` | Opprett ny nøkkel i slot `n` |
 | `KEY ERASE <n>` | Slett slot `n` |
 | `TIMEOUT <seconds>` | Sett auto-relåsing (0 = av) |
 | `RESET` | Tilbakestill enheten |
+
+> **Uavhengig disk-lås:** `UNLOCK <pin>` låser bare opp **enheten** (for FIDO/SSH-signering). Den krypterte disken er et separat steg: `DISK UNLOCK`. `LOCK` og auto-relåsing lukker også disken, og `DISK UNLOCK` krever at enheten er ulåst.
 
 ## SSH (sk-nøkler)
 

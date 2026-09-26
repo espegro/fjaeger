@@ -239,7 +239,11 @@ fra keyslots.
   klartekst i de siste 4 blokkene av partisjonen) verifiseres ved mount.
   Korrupsjon fra strømbrudd eller tukling oppdages, og disken re-initialiseres
   i stedet for å serve korrupte data.
-- **Låsing:** når enheten er låst, er disken utilgjengelig (NOT_READY).
+- **Uavhengig disk-lås:** `UNLOCK <pin>` låser bare opp **enheten** (nøkler);
+  den krypterte disken er et separat steg via `DISK UNLOCK`/`DISK LOCK`/
+  `DISK STATUS`. `LOCK` og auto-relåsing lukker også disken; `DISK UNLOCK`
+  krever at enheten er ulåst. Når disken er låst er den utilgjengelig
+  (NOT_READY).
 
 Fysisk verifisert:
 - Disken mountes som ~12 MiB vfat-volum når ulåst.
@@ -247,6 +251,10 @@ Fysisk verifisert:
 - **Data overlever watchdog-`RESET` og kaldstart**, over flere skrive/reboot-
   sykluser (deferred write + CRC-tabell oppdateres og verifiseres korrekt).
 - Slottbytte (slot 0 → 1) endrer **ikke** diskdata — disknøkkel er uavhengig.
+- **Uavhengig tilstand:** `UNLOCK` gir `state: unlocked` mens `disk: locked`
+  (disken ikke mountet); `DISK UNLOCK` mountet den som eget steg; `DISK LOCK`
+  unmountet disken mens enheten forble ulåst; `LOCK` lukket både enhet og disk;
+  `DISK UNLOCK` med enheten låst ga `ERR device locked`.
 - **Integritetsdeteksjon:** ved å erase boot-blokken (0xFF) uten å oppdatere
   CRC-tabellen, oppdaget enheten korrupsjonen og re-initialiserte filsystemet
   (eksisterende filer borte) — korrupte data serveres ikke.

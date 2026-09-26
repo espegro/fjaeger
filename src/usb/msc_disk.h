@@ -18,6 +18,9 @@ void fj_msc_init(void);
 /* Mount (true) or unmount (false) the volume to the host. */
 void fj_msc_set_ready(bool ready);
 
+/* Whether the MSC volume is currently mounted/ready. */
+bool fj_msc_is_ready(void);
+
 /* Poll: flush any deferred flash writes. Call from the main loop. */
 void fj_msc_task(void);
 
