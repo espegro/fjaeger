@@ -1,48 +1,40 @@
-# Fjaeger — Prosjektstatus
+# Fjaeger — status og overlevering
 
 Oppdatert: 2026-09-26
 
-## Audit og reparasjon påbegynt
+## Kort status
 
-Et lokalt Git-repository ble opprettet med baseline-commit `3c2ad51`. Første
-stabiliseringscommit retter følgende:
+Fjaeger kjører nå som en sammensatt USB-enhet på en **TENSTAR RP2350-USB med
+16 MB flash**:
 
-- Konsolltokenisering for kommandoer med argumenter.
-- ECDSA-signering med gyldig blinding-RNG og validerte P-256-privatnøkler.
-- Kontrollsummert A/B-nøkkellager med 256-byte-justerte flashskrivinger.
-- CTAPHID INIT, kommandoverdier og asynkron utsending av flerpakke-svar.
-- Sentrale CTAP2/CBOR-feil, DER-signatur og riktig signaturgrunnlag.
-- MSC-tilgang stenges nå også ved auto-lock; FAT12-grunnbildet er reparert.
-- WS2812/SK6812-kompatibel RGB-status-LED på GPIO22 via PIO, med blått
-  aktivitetspuls for konsoll, FIDO og disk-I/O.
-- Hosttest for `GetInfo` → `MakeCredential` → `GetAssertion`.
+- USB CDC-konsoll for PIN, låsing og nøkkelprofiler.
+- CTAP2/FIDO2 over HID for OpenSSH `sk-ecdsa`.
+- Kryptert MSC-prototype som bare er tilgjengelig når enheten er ulåst.
+- Adressebar RGB-status-LED på GPIO22.
 
-Legacy U2F/CTAP1 annonseres ikke lenger; den gamle MSG-koden er deaktivert. Fysisk
-test med `libfido2` og OpenSSH gjenstår før CTAP2 kan regnes som verifisert.
+OpenSSH-registrering, signering og lokal signaturverifisering er fysisk testet
+og virker. En låst dongle nekter signering. Siste verifiserte commit er
+`5f1ac23` (`Fix CTAP2 OpenSSH enrollment and signing`).
 
-## Overblikk
+Donglen ble etter siste test etterlatt **låst**. Test-PIN er **`12345`**. Dette
+er bare et utviklingsoppsett og må endres før reell bruk.
 
-Fjaeger er en USB-sikkerhetsnøkkel (dongle) bygget på RP2350. Prosjektet kombinerer en
-FIDO/CTAP2-autentikator (for SSH / WebAuthn) med en liten kryptert USB-stasjon (MSC),
-styrt over et seriell-kommandogrensesnitt (USB CDC).
-
-Donglen er en **TENSTAR RP2350-USB 16 MB**.
-
-## Verktøy / SDK
+## Byggemiljø
 
 | Komponent | Verdi |
-|-----------|-------|
-| Pico SDK | **2.2.0** (`/home/espegro/programming/pico-sdk`) |
-| Board-profil | **`waveshare_rp2350_plus_16mb`** (elektrisk kompatibel med TENSTAR RP2350-USB 16MB) |
+|---|---|
+| Pico SDK | 2.2.0 (`/home/espegro/programming/pico-sdk`) |
+| Board | `waveshare_rp2350_plus_16mb` |
 | Toolchain | ARM-none-EABI GCC 14.2.1 |
-| mbedTLS | 3.x (via SDK 2.2.0) |
-| TinyUSB | via SDK 2.2.0 (RP2350-USB-støtte) |
+| mbedTLS | 3.x fra Pico SDK |
+| USB | TinyUSB fra Pico SDK 2.2.0 |
 | Flash | 16 MB |
 
-> Viktig: Dette bygget krever Pico SDK ≥ 2.1.0 (helst 2.2.0) med `waveshare_rp2350_plus_16mb`-board.
-> Tidligere brukt Pico SDK 2.0.0 + `pico2`-profilen ga ingen USB-enumerering (TinyUSB 0.16.0 manglet RP2350-støtte).
+`waveshare_rp2350_plus_16mb` brukes fordi den er elektrisk kompatibel med
+TENSTAR-kortet. Pico SDK 2.0.0 med `pico2` ga tidligere ingen fungerende
+USB-enumerering.
 
-## Bygge
+Bygg:
 
 ```bash
 cmake -S . -B build \
@@ -51,93 +43,209 @@ cmake -S . -B build \
 cmake --build build -j$(nproc)
 ```
 
-Resultat: `build/fjaeger.uf2` (flash via bootrom BOOTSEL).
+UF2-filen blir `build/fjaeger.uf2` og flashes i BOOTSEL-modus, for eksempel:
 
-## Funksjoner
-
-- **CTAP2 (FIDO2) over HID** — `authenticatorGetInfo` (0x04), `makeCredential` (0x01),
-  `getAssertion` (0x02), `authenticatorCancel` (0x06). Attestasjon-format **`none`**.
-- **U2F (CTAP1)** — deaktivert inntil den kan implementeres protokollkorrekt.
-- **Nøkkelprofiler ("slots")** — opptil 8, hver med ECDSA P-256 + XTS-nøkkel,
-  persistente i flash.
-- **Kryptert USB-stasjon (MSC-prototype)** — AES-XTS, mountes kun når ulåst;
-  backing store er ennå bare 8 KiB RAM.
-- **Lås/ulås-modell** — PIN over serial, auto-relåsing.
-- **Seriell-konsoll (USB CDC)** — kommandoer for tilstand og nøkkelhåndtering.
-
-## Arkitektur
-
-```
-src/
-├── main.c                  Inngangspunkt, init, main-loop
-├── core/
-│   ├── state.h/.c          Tilstandsmaskin (LOCKED/UNLOCKED), PIN, auto-relock
-│   ├── keys.h/.c           Nøkkelprofiler/slots + CTAP2-creds i flash, aktiv slot
-│   ├── crypto.h/.c         mbedTLS-innpakninger: ECDSA, SHA-256, HKDF, AES-XTS
-│   └── ms_time.c           mbedTLS 3.x tidssource (mbedtls_ms_time)
-├── fido/
-│   ├── u2f.h/.c            CTAPHID-transport; legacy MSG er deaktivert
-│   ├── ctap2.h/.c          CTAP2-kommandoer (CBOR)
-│   └── cbor.h/.c           Minimal CBOR-encoder/decoder
-├── led/
-│   ├── rgb_led.h/.c        RGB-status-LED på GPIO22
-│   └── rgb_led.pio         WS2812/SK6812-driver
-├── usb/
-│   ├── tusb_config.h       TinyUSB-konfig (CDC + HID + MSC)
-│   ├── usb_descriptors.c   Composite-descriptorer
-│   ├── msc_disk.c/.h       Kryptert MSC-disk
-│   └── cdc_console.c/.h    Seriell-kommandogrensesnitt
-└── mbedtls_config/
-    └── fjaeger_mbedtls_config.h  mbedTLS 3.x config (wrapper over default)
+```bash
+picotool load -f build/fjaeger.uf2
+picotool reboot
 ```
 
-## Hva som er fikset under debug-sesjonen
+Hosttesten kjøres slik:
 
-1. **USB-enumerering:** Byttet fra Pico SDK 2.0.0 + `pico2` → SDK 2.2.0 + `waveshare_rp2350_plus_16mb`.
-   - Rettet `CFG_TUSB_MCU` (var udefinert i CMake-bygget).
-   - Rettet endepunktskonflikt (HID IN `0x81` kolliderte med CDC-notif `0x81`).
-   - Rettet device-class til per-interface (`0x00`).
-2. **mbedTLS 3.x-migrering:** Ny config-wrapper (`fjaeger_mbedtls_config.h`) over default-config,
-   med Pico-spesifikke makroer (`MBEDTLS_NO_PLATFORM_ENTROPY`, `MBEDTLS_ENTROPY_HARDWARE_ALT`,
-   `MBEDTLS_SHA256_ALT`, `MBEDTLS_PLATFORM_MS_TIME_ALT`).
-   - Deaktiverte moduler som ikke virker på Pico: TLS/SSL, X.509, `MBEDTLS_TIMING_C`,
-     `MBEDTLS_NET_C`, `MBEDTLS_SHA3_C`.
-   - Ny `src/core/ms_time.c` som leverer `mbedtls_ms_time()`.
-3. **X.509-attestasjon fjernet:** `attestation.c` fjernet fra bygget (CTAP2 bruker `none`).
-4. **Init-kræsj fikset:** `fj_console_init()` kalte `tud_task()` (via `outln()`) **før**
-   `tud_init()`, noe som kræsjet fastvaren. Banner-utskriften fjernet fra `fj_console_init()`.
+```bash
+cc -std=c11 -Wall -Wextra -Werror \
+  -Isrc/core -Isrc/fido \
+  tests/test_ctap2.c src/fido/ctap2.c src/fido/cbor.c \
+  -o /tmp/fjaeger-test-ctap2
+/tmp/fjaeger-test-ctap2
+```
 
-## Verifisert
+Forventet resultat: `ctap2 host tests: ok`.
 
-- Fastvaren bygger grønt (`EXIT=0`), `build/fjaeger.uf2` produseres.
-- USB enummererer: `2e8a:4007 Fjaeger Fjaeger Security Key` (`/dev/ttyACM0`).
-- Konsollen er fysisk testet med `HELP`, `STATUS`, `LOCK`, riktig og feil
-  `UNLOCK`, `SETPIN`, `KEY LIST`, `KEY SELECT`, `KEY PROVISION`, `KEY ERASE`,
-  `TIMEOUT`, ugyldige argumenter og `RESET`.
-- Auto-lock er fysisk verifisert med to sekunders timeout.
-- PIN og slotdata overlever firmwareflash og watchdog-reset.
-- MSC-prototypen enumererer og mountes som et 8 KiB FAT-volum når ulåst, og
-  mountpunktet forsvinner ved låsing.
-- Hosttesten dekker CTAP2 `GetInfo` → `MakeCredential` → `GetAssertion`.
+## Fikset i denne runden
 
-## Kjente problemer / åpne punkter
+### Grunnleggende firmware og USB
 
-1. **`SETPIN` og `UNLOCK` må testes på fysisk enhet.** Parserfeilen er rettet og
-   `<strings.h>` er inkludert.
-2. **PIN vises i klartekst** når den settes/låses opp via konsoll (`SETPIN <pin>`, `UNLOCK <pin>`).
-   - Status: ikke adressert.
-3. **Foreldet attestasjonskode er slettet.** CTAP2 bruker `none`.
-4. **SSH / `ssh-keygen -t ecdsa-sk`** er ikke testet end-to-end ennå.
-   - Enheten må være ulåst (PIN) før `makeCredential`/`getAssertion` aksepteres.
-   - Kun ECDSA P-256 / ES256 støttes (ingen ed25519-sk).
-5. MSC er fortsatt en RAM-disk (8 KB), ikke vedvarende i flash. XTS gir heller
-   ikke autentisering/integritetsbeskyttelse.
+- Rettet USB-enumerering ved å bruke riktig SDK og board-profil.
+- Rettet TinyUSB MCU-konfigurasjon, device class og kolliderende endepunkter.
+- Fjernet konsollutskrift før `tud_init()`, som tidligere krasjet under oppstart.
+- Tilpasset mbedTLS 3.x til RP2350 og fjernet ubrukte TLS/X.509-moduler.
+- Fjernet gammel X.509-attestasjon; CTAP2 bruker `fmt: none`.
 
-## Anbefalte neste steg
+### Konsoll, låsing og flash
 
-1. Flashe og teste konsoll, LED og låsing på fysisk dongle.
-2. Verifisere CTAPHID med `fido2-token` og deretter `ssh-keygen -t ecdsa-sk`.
-3. Erstatte rå SHA-256 av PIN med saltet, treg nøkkelavledning og legge inn
-   forsinkelse etter feil PIN.
-4. Lage en eksplisitt flashpartisjon og persistent backing store for MSC.
-5. Lage sikker PIN-inntasting uten synlig PIN i kommandolinjen.
+- Rettet tokenisering av kommandoer med argumenter.
+- Rettet PIN- og slotlagring til et kontrollsummert A/B-lager i de to siste
+  flashsektorene.
+- Flashprogrammering er justert til 256-byte-sider.
+- PIN, slots og CTAP2-credentials overlever reset og vanlig firmwareflash.
+- Auto-lock kobler også bort MSC-tilgang.
+
+### FIDO/CTAP2 og OpenSSH
+
+- Rettet CTAPHID INIT, kommandoverdier, flerpakke-svar og transportbufferens
+  levetid.
+- Rettet utvidet APDU-lengde og lagt inn en minimal CTAP1 REGISTER-probe som
+  libfido2/OpenSSH kan bruke ved tokenvalg. Dette er **ikke full U2F/CTAP1**.
+- Rettet kanonisk CBOR-rekkefølge i `GetInfo` og `GetAssertion`.
+- Rettet `makeCredential`, `getAssertion`, authData, DER-signatur og korrekt
+  signaturgrunnlag.
+- Flyttet store CTAP-/kryptobuffere ut av stacken og økte tilgjengelig stack.
+- Rettet P-256 public-key-beregning ved å gi mbedTLS en blinding-RNG.
+- Rettet heng under signering. Det ble isolert til deterministisk ECDSA via
+  HMAC-DRBG; sannsynlig årsak er samspillet med Pico-SDK-ens globalt låste
+  SHA-256-maskinvarekontekst. Signering bruker nå RP2350-maskinvare-RNG for både
+  engangsskalar og blinding, og fysisk signering fullfører.
+- Lagt inn eksplisitt validering av lagret privat P-256-nøkkel før signering.
+
+### MSC og LED
+
+- Reparert FAT12-grunnbildet for MSC-prototypen.
+- MSC rapporterer utilgjengelig når donglen er låst eller auto-lock slår inn.
+- Implementert WS2812/SK6812-kompatibel LED-driver via PIO på GPIO22:
+  - rød: låst
+  - grønn: ulåst
+  - gul: ikke USB-enumerert
+  - kort blå puls: konsoll-, FIDO- eller diskaktivitet
+
+## Fysisk verifisert
+
+Følgende er testet på den faktiske RP2350-donglen:
+
+- Firmware bygger, flashes og starter.
+- USB enumererer som CDC + FIDO HID + MSC.
+- `/dev/ttyACM0` og FIDO `hidraw`-enhet opprettes.
+- Konsollkommandoene `HELP`, `STATUS`, `LOCK`, `UNLOCK`, `SETPIN`, `KEY LIST`,
+  `KEY SELECT`, `KEY PROVISION`, `KEY ERASE`, `TIMEOUT` og `RESET` er prøvd,
+  inkludert feil PIN og ugyldige argumenter.
+- Auto-lock med to sekunders timeout er prøvd.
+- PIN og slotdata har overlevd firmwareflash og watchdog-reset.
+- MSC mountes som et 8 KiB FAT-volum når ulåst og forsvinner ved låsing.
+- LED-status og aktivitetspuls er observert under tidligere fysisk test.
+- OpenSSH `ecdsa-sk` credential er opprettet via CTAP2.
+- Credential har overlevd firmwareflash og kan finnes igjen via credential-ID.
+- `ssh-keygen -Y sign` fullfører mot donglen uten heng.
+- Signaturen består `ssh-keygen -Y verify` med den registrerte public key.
+- Etter `LOCK` blir samme signeringsforsøk avvist.
+
+Verifisert testnøkkel hadde fingeravtrykk:
+
+```text
+SHA256:9/nEEvU6esvFLkLMgzOCgwF4HcjF0immAN8MU4s5qq0
+```
+
+## Rask OpenSSH-regresjonstest
+
+Finn riktig HID-enhet; ikke anta at den alltid er `/dev/hidraw2`. Lås deretter
+opp via CDC-konsollen:
+
+```text
+UNLOCK 12345
+STATUS
+```
+
+Opprett en ny testnøkkel:
+
+```bash
+ssh-keygen -t ecdsa-sk \
+  -O device=/dev/hidraw2 \
+  -f /tmp/fjaeger_test_key \
+  -N '' \
+  -C fjaeger-test
+```
+
+Signer en fil:
+
+```bash
+ssh-keygen -Y sign \
+  -f /tmp/fjaeger_test_key \
+  -n fjaeger-test \
+  /tmp/message.txt
+```
+
+Lag en `allowed_signers`-fil med public key på denne formen:
+
+```text
+fjaeger-test sk-ecdsa-sha2-nistp256@openssh.com AAAA...
+```
+
+Verifiser:
+
+```bash
+ssh-keygen -Y verify \
+  -f /tmp/allowed_signers \
+  -I fjaeger-test \
+  -n fjaeger-test \
+  -s /tmp/message.txt.sig \
+  < /tmp/message.txt
+```
+
+Kjør deretter `LOCK` og kontroller at en ny signering mislykkes. OpenSSH viser
+foreløpig en generell feil som `invalid format`; viktigste sikkerhetsegenskap er
+at ingen signatur returneres.
+
+## Dette bør testes videre
+
+Prioritert liste for neste utviklingsøkt:
+
+1. **Reell SSH-innlogging.** `ssh-keygen` enroll/sign/verify virker, men faktisk
+   innlogging mot en `sshd` med nøkkelen i `authorized_keys` er ikke prøvd.
+2. **Kaldstart og utholdenhet.** Koble strømmen helt fra, start igjen, lås opp og
+   signer med eksisterende credential. Gjenta etter flere firmwareflasher.
+3. **Flere credentials.** Opprett, bruk og gjenfinn alle åtte CTAP2-plassene;
+   test fullt lager, duplikater og credentials for flere RP-ID-er.
+4. **Flere FIDO-klienter.** Prøv `fido2-token`, nettleser/WebAuthn og gjerne
+   både Linux og Windows/macOS. Test også flere tilkoblede FIDO-enheter.
+5. **Avbrudd og feiltrafikk.** Test CTAPHID CANCEL, kanal-lock, fragmenterte og
+   maksimalt store meldinger, feil sekvensnummer og USB-frakobling midt i svar.
+6. **Langtidstest.** Kjør mange signeringer, lås/ulås-sykluser og auto-lock mens
+   HID og MSC brukes samtidig. Se etter USB-reset, heap-/stackproblemer og
+   flashslitasje.
+7. **MSC-dataintegritet.** Skriv og les filer over mange lock/unlock-sykluser,
+   auto-lock under I/O og bytte av aktiv slot. RAM-disken skal miste innhold ved
+   reboot, men må aldri lekke klartekst mens den er låst.
+8. **LED-regresjon.** Bekreft visuelt rød/grønn/gul og at blå aktivitetspuls ikke
+   skjuler låsestatus for lenge, særlig under kontinuerlig disk- eller HID-I/O.
+9. **Konsollregresjon etter siste FIDO-endringer.** Kjør hele kommandolisten én
+   gang til og verifiser feiltilfeller, grenselengder og slot 0–7.
+
+## Kjente begrensninger og sikkerhetsarbeid
+
+- PIN sendes og vises i klartekst på CDC-konsollen.
+- PIN lagres som usaltet SHA-256. Det må erstattes med saltet, treg
+  nøkkelavledning, og feilforsøk trenger ratebegrensning/forsinkelse.
+- Det finnes ingen egen fysisk touch-knapp. CTAP `up` representerer i praksis at
+  enheten allerede er låst opp via PIN, ikke en ny fysisk bekreftelse per bruk.
+- Full U2F/CTAP1 er ikke implementert. Bare kompatibilitetsproben som OpenSSH/
+  libfido2 trenger for tokenvalg finnes.
+- Bare ES256 / P-256 støttes. `ed25519-sk` støttes ikke.
+- CTAP2-implementasjonen er et nødvendig delsett, ikke en sertifisert komplett
+  FIDO2-autentikator. Blant annet mangler credential management og CTAP reset.
+- Signaturtelleren er null fordi en flyktig teller ville gått bakover etter
+  reboot. Persistent monotonteller er ikke implementert.
+- MSC er en **8 KiB RAM-disk**, ikke persistent lagring i flash.
+- AES-XTS gir konfidensialitet, men ikke autentisering eller integritetsvern.
+- Nøkler ligger i vanlig ekstern flash; secure boot, signert firmware,
+  flashbeskyttelse og motstand mot fysisk uttrekk er ikke ferdigstilt.
+- Flashlageret bruker A/B og CRC, men trenger egne tester for strømbrudd akkurat
+  under erase/program og for generasjonsteller-wrap.
+
+## Anbefalt videre rekkefølge
+
+1. Kjør testpunktene 1–4 over og noter eksakte klient-/OS-resultater her.
+2. Legg til automatiserte parser- og transporttester for CTAPHID/CBOR.
+3. Herd PIN-håndtering og legg til forsøksteller/ratebegrensning.
+4. Bestem om prosjektet skal ha fysisk bekreftelsesknapp for korrekt FIDO
+   user-presence-semantikk.
+5. Design en eksplisitt, persistent og integritetsbeskyttet flashpartisjon for
+   diskdata dersom MSC skal være mer enn en prototype.
+6. Planlegg secure boot, signerte oppdateringer og nøkkelbeskyttelse før bruk med
+   reelle hemmeligheter.
+
+## Relevante commits
+
+```text
+3c2ad51  Lokal baseline
+70f0fef  Document physical console and persistence tests
+5f1ac23  Fix CTAP2 OpenSSH enrollment and signing
+```
