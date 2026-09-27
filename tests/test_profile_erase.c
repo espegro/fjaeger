@@ -151,21 +151,35 @@ void fj_keys_wipe(void) {
 bool fj_keys_get_timeout(uint32_t *s) { *s = 900; return true; }
 bool fj_keys_set_timeout(uint32_t s) { (void)s; return true; }
 
-/* Credential wrapping key stubs (state.c + ctap2.c dependencies). */
-static uint8_t stored_cwk_enc[32];
-static uint8_t stored_cwk_salt[16];
-static bool have_cwk = false;
-bool fj_keys_cwk_set(void) { return have_cwk; }
-bool fj_keys_set_cwk(const uint8_t enc[32], const uint8_t salt[16]) {
-    memcpy(stored_cwk_enc, enc, 32);
-    memcpy(stored_cwk_salt, salt, 16);
-    have_cwk = true;
+/* Master key stubs (state.c + ctap2.c dependencies). */
+static uint8_t stored_m_enc_pin[32];
+static uint8_t stored_m_salt_pin[16];
+static uint8_t stored_m_enc_puk[32];
+static uint8_t stored_m_salt_puk[16];
+static bool have_master = false;
+bool fj_keys_master_key_set(void) { return have_master; }
+bool fj_keys_set_master_pin_wrap(const uint8_t enc[32], const uint8_t salt[16]) {
+    memcpy(stored_m_enc_pin, enc, 32);
+    memcpy(stored_m_salt_pin, salt, 16);
+    have_master = true;
     return true;
 }
-bool fj_keys_get_cwk(uint8_t enc[32], uint8_t salt[16]) {
-    if (!have_cwk) return false;
-    memcpy(enc, stored_cwk_enc, 32);
-    memcpy(salt, stored_cwk_salt, 16);
+bool fj_keys_get_master_pin_wrap(uint8_t enc[32], uint8_t salt[16]) {
+    if (!have_master) return false;
+    memcpy(enc, stored_m_enc_pin, 32);
+    memcpy(salt, stored_m_salt_pin, 16);
+    return true;
+}
+bool fj_keys_set_master_puk_wrap(const uint8_t enc[32], const uint8_t salt[16]) {
+    memcpy(stored_m_enc_puk, enc, 32);
+    memcpy(stored_m_salt_puk, salt, 16);
+    have_master = true;
+    return true;
+}
+bool fj_keys_get_master_puk_wrap(uint8_t enc[32], uint8_t salt[16]) {
+    if (!have_master) return false;
+    memcpy(enc, stored_m_enc_puk, 32);
+    memcpy(salt, stored_m_salt_puk, 16);
     return true;
 }
 bool fj_aes_gcm_encrypt(const uint8_t key[32], const uint8_t nonce[12],
@@ -183,6 +197,26 @@ bool fj_aes_gcm_decrypt(const uint8_t key[32], const uint8_t nonce[12],
     memcpy(out, in, len);
     return true;
 }
+
+/* Backup/restore stubs (state.c references them; unused here). */
+static uint8_t msc_backup_buf[4096];
+static size_t msc_backup_len;
+bool fj_msc_backup_write(const uint8_t *data, size_t len) {
+    if (!data || len > sizeof(msc_backup_buf)) return false;
+    memcpy(msc_backup_buf, data, len);
+    msc_backup_len = len;
+    return true;
+}
+bool fj_msc_backup_read(uint8_t *out, size_t cap, size_t *len) {
+    if (msc_backup_len == 0 || cap < msc_backup_len) return false;
+    memcpy(out, msc_backup_buf, msc_backup_len);
+    *len = msc_backup_len;
+    return true;
+}
+bool fj_msc_backup_delete(void) { msc_backup_len = 0; return true; }
+bool fj_msc_backup_exists(void) { return msc_backup_len > 0; }
+bool fj_keys_backup_fill(fj_backup_payload_t *out) { memset(out, 0, sizeof(*out)); return true; }
+bool fj_keys_backup_restore(const fj_backup_payload_t *in) { (void)in; return true; }
 
 /* --- helpers --------------------------------------------------------- */
 static unsigned count_profile(unsigned profile) {

@@ -136,13 +136,17 @@ void fj_keys_get_disk_secret(uint8_t enc[32], uint8_t salt[16], uint8_t hash[32]
 bool fj_keys_set_disk_secret(const uint8_t enc[32], const uint8_t salt[16],
                              const uint8_t hash[32]);
 
-/* The credential wrapping key (CWK) protects every CTAP2 credential private
- * key at rest. It is a random 32-byte master key wrapped by PBKDF2(device
- * PIN, cwk_salt); only the wrapped form and salt are persisted. The plaintext
- * CWK is held in RAM only while the device is unlocked (see state.c). */
-bool fj_keys_cwk_set(void);
-bool fj_keys_set_cwk(const uint8_t enc[32], const uint8_t salt[16]);
-bool fj_keys_get_cwk(uint8_t enc[32], uint8_t salt[16]);
+/* The master key M protects every CTAP2 credential private key at rest. M is
+ * a random 32-byte key wrapped independently by the device PIN and by the
+ * recovery PUK (each with its own salt), so either secret can recover M and
+ * decrypt the keys. Only the two wrapped forms and their salts are persisted;
+ * the plaintext M is held in RAM only while the device is unlocked (see
+ * state.c). */
+bool fj_keys_master_key_set(void);
+bool fj_keys_set_master_pin_wrap(const uint8_t enc[32], const uint8_t salt[16]);
+bool fj_keys_get_master_pin_wrap(uint8_t enc[32], uint8_t salt[16]);
+bool fj_keys_set_master_puk_wrap(const uint8_t enc[32], const uint8_t salt[16]);
+bool fj_keys_get_master_puk_wrap(uint8_t enc[32], uint8_t salt[16]);
 
 /* Brute-force protection state for the device PIN, disk PIN and PUK. */
 typedef struct {
@@ -180,6 +184,26 @@ void fj_keys_ctap2_load(fj_ctap2_cred_t *out);
 /* Persist the full CTAP2 credential table to flash. Returns true on
  * success. */
 bool fj_keys_ctap2_save(const fj_ctap2_cred_t *creds);
+
+/* Backup / restore of the master key and the credential/profile store.
+ * Used by the BACKUP/RESTORE console commands. */
+typedef struct {
+    uint8_t master[FJ_AES_KEY_BYTES];   /* plaintext M (decrypts the keys) */
+    fj_ctap2_cred_t ctap2[FJ_CTAP2_CREDS];
+    fj_profile_t profiles[FJ_NUM_PROFILES];
+    uint8_t active_profile;
+    uint8_t active_profile_valid;
+} fj_backup_payload_t;
+
+/* Fill the credential/profile/active-profile fields of 'out' from the
+ * persistent store. 'master' is filled by the caller (state.c) from the
+ * live master key. Returns true on success. */
+bool fj_keys_backup_fill(fj_backup_payload_t *out);
+
+/* Restore the credential/profile/active-profile fields from 'in' into the
+ * persistent store in one write. 'master' is handled by state.c (wrapped by
+ * a subsequently set PIN). Returns true on success. */
+bool fj_keys_backup_restore(const fj_backup_payload_t *in);
 
 /* Fill buf with 'len' random bytes from the hardware RNG. */
 void fj_random(void *buf, size_t len);

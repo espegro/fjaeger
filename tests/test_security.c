@@ -23,9 +23,15 @@ static unsigned ctap_forget_count;
 static unsigned wipe_count;
 static uint32_t stored_timeout;
 static bool have_timeout;
-static uint8_t stored_cwk_enc[32];
-static uint8_t stored_cwk_salt[16];
-static bool have_cwk;
+static uint8_t stored_m_enc_pin[32];
+static uint8_t stored_m_salt_pin[16];
+static uint8_t stored_m_enc_puk[32];
+static uint8_t stored_m_salt_puk[16];
+static bool have_master;
+static uint8_t backup_store[4096];
+static size_t backup_len;
+static uint32_t backup_writes;
+static uint32_t backup_deletes;
 
 absolute_time_t get_absolute_time(void) { return now_us; }
 
@@ -115,12 +121,14 @@ void fj_keys_wipe(void) {
     memset(stored_puk, 0, sizeof(stored_puk));
     memset(stored_puk_salt, 0, sizeof(stored_puk_salt));
     memset(&security, 0, sizeof(security));
-    memset(stored_cwk_enc, 0, sizeof(stored_cwk_enc));
-    memset(stored_cwk_salt, 0, sizeof(stored_cwk_salt));
+    memset(stored_m_enc_pin, 0, sizeof(stored_m_enc_pin));
+    memset(stored_m_salt_pin, 0, sizeof(stored_m_salt_pin));
+    memset(stored_m_enc_puk, 0, sizeof(stored_m_enc_puk));
+    memset(stored_m_salt_puk, 0, sizeof(stored_m_salt_puk));
     have_pin = false;
     have_puk = false;
     have_timeout = false;
-    have_cwk = false;
+    have_master = false;
     wipe_count++;
 }
 
@@ -136,20 +144,34 @@ bool fj_keys_set_timeout(uint32_t seconds) {
     return true;
 }
 
-/* Credential wrapping key stubs. */
-bool fj_keys_cwk_set(void) { return have_cwk; }
+/* Master key stubs. */
+bool fj_keys_master_key_set(void) { return have_master; }
 
-bool fj_keys_set_cwk(const uint8_t enc[32], const uint8_t salt[16]) {
-    memcpy(stored_cwk_enc, enc, 32);
-    memcpy(stored_cwk_salt, salt, 16);
-    have_cwk = true;
+bool fj_keys_set_master_pin_wrap(const uint8_t enc[32], const uint8_t salt[16]) {
+    memcpy(stored_m_enc_pin, enc, 32);
+    memcpy(stored_m_salt_pin, salt, 16);
+    have_master = true;
     return true;
 }
 
-bool fj_keys_get_cwk(uint8_t enc[32], uint8_t salt[16]) {
-    if (!have_cwk) return false;
-    memcpy(enc, stored_cwk_enc, 32);
-    memcpy(salt, stored_cwk_salt, 16);
+bool fj_keys_get_master_pin_wrap(uint8_t enc[32], uint8_t salt[16]) {
+    if (!have_master) return false;
+    memcpy(enc, stored_m_enc_pin, 32);
+    memcpy(salt, stored_m_salt_pin, 16);
+    return true;
+}
+
+bool fj_keys_set_master_puk_wrap(const uint8_t enc[32], const uint8_t salt[16]) {
+    memcpy(stored_m_enc_puk, enc, 32);
+    memcpy(stored_m_salt_puk, salt, 16);
+    have_master = true;
+    return true;
+}
+
+bool fj_keys_get_master_puk_wrap(uint8_t enc[32], uint8_t salt[16]) {
+    if (!have_master) return false;
+    memcpy(enc, stored_m_enc_puk, 32);
+    memcpy(salt, stored_m_salt_puk, 16);
     return true;
 }
 
@@ -162,6 +184,51 @@ bool fj_keys_profile_erase(unsigned profile_id) {
     return true;
 }
 
+/* --- backup / restore stubs --- */
+/* Simulate AES-GCM tag authentication keyed by the wrap key, so a wrong
+ * backup password yields a tag mismatch (like the real mbedTLS GCM). */
+bool fj_aes_gcm_encrypt(const uint8_t key[32], const uint8_t nonce[12],
+                        const uint8_t *in, size_t len,
+                        uint8_t *out, uint8_t tag[16]) {
+    memcpy(out, in, len);
+    for (int i = 0; i < 16; i++) tag[i] = key[i] ^ nonce[i % 12];
+    return true;
+}
+bool fj_aes_gcm_decrypt(const uint8_t key[32], const uint8_t nonce[12],
+                        const uint8_t tag[16],
+                        const uint8_t *in, size_t len, uint8_t *out) {
+    for (int i = 0; i < 16; i++) {
+        if (tag[i] != (key[i] ^ nonce[i % 12])) return false;
+    }
+    memcpy(out, in, len);
+    return true;
+}
+bool fj_msc_backup_write(const uint8_t *data, size_t len) {
+    if (!data || len == 0 || len > sizeof(backup_store)) return false;
+    memcpy(backup_store, data, len);
+    backup_len = len;
+    backup_writes++;
+    return true;
+}
+bool fj_msc_backup_read(uint8_t *out, size_t cap, size_t *len) {
+    if (backup_len == 0 || cap < backup_len) return false;
+    memcpy(out, backup_store, backup_len);
+    *len = backup_len;
+    return true;
+}
+bool fj_msc_backup_delete(void) { backup_len = 0; backup_deletes++; return true; }
+bool fj_msc_backup_exists(void) { return backup_len > 0; }
+
+static fj_backup_payload_t backup_payload;
+bool fj_keys_backup_fill(fj_backup_payload_t *out) {
+    *out = backup_payload;
+    return true;
+}
+bool fj_keys_backup_restore(const fj_backup_payload_t *in) {
+    backup_payload = *in;
+    return true;
+}
+
 static void reset_fixture(void) {
     memset(stored_pin, 0, sizeof(stored_pin));
     memset(stored_pin_salt, 0, sizeof(stored_pin_salt));
@@ -169,16 +236,22 @@ static void reset_fixture(void) {
     memset(stored_puk, 0, sizeof(stored_puk));
     memset(stored_puk_salt, 0, sizeof(stored_puk_salt));
     memset(&security, 0, sizeof(security));
-    memset(stored_cwk_enc, 0, sizeof(stored_cwk_enc));
-    memset(stored_cwk_salt, 0, sizeof(stored_cwk_salt));
+    memset(stored_m_enc_pin, 0, sizeof(stored_m_enc_pin));
+    memset(stored_m_salt_pin, 0, sizeof(stored_m_salt_pin));
+    memset(stored_m_enc_puk, 0, sizeof(stored_m_enc_puk));
+    memset(stored_m_salt_puk, 0, sizeof(stored_m_salt_puk));
     have_pin = false;
     have_puk = false;
     have_timeout = false;
-    have_cwk = false;
+    have_master = false;
     now_us = 0;
     disk_lock_count = 0;
     ctap_forget_count = 0;
     wipe_count = 0;
+    backup_len = 0;
+    backup_writes = 0;
+    backup_deletes = 0;
+    memset(&backup_payload, 0, sizeof(backup_payload));
     fj_state_brute_success(FJ_BRUTE_PIN);
     fj_state_brute_success(FJ_BRUTE_PUK);
     fj_state_brute_success(FJ_BRUTE_DISK);
@@ -306,39 +379,123 @@ static void test_brute_force_delay_backoff(void) {
     assert(fj_state_brute_ok(FJ_BRUTE_PIN));
 }
 
-static void test_cwk_at_rest(void) {
+static void test_master_key_at_rest(void) {
     reset_fixture();
 
-    /* No PIN, no CWK. */
-    uint8_t cwk[32];
-    assert(!fj_state_cwk(cwk));
-    assert(!fj_keys_cwk_set());
+    /* No PIN, no master key. */
+    uint8_t m[32];
+    assert(!fj_state_cwk(m));
+    assert(!fj_keys_master_key_set());
 
-    /* Setting a PIN creates and wraps a credential wrapping key. */
+    /* Setting a PIN creates and wraps the master key M. */
     assert(fj_state_set_pin("12345"));
-    assert(fj_keys_cwk_set());
-    assert(fj_state_cwk(cwk));
+    assert(fj_keys_master_key_set());
+    assert(fj_state_cwk(m));
 
-    /* The wrapped form stored in flash must differ from the plaintext CWK. */
+    /* The wrapped form stored in flash must differ from the plaintext M. */
     uint8_t enc[32], salt[16];
-    assert(fj_keys_get_cwk(enc, salt));
-    assert(memcmp(enc, cwk, 32) != 0);
+    assert(fj_keys_get_master_pin_wrap(enc, salt));
+    assert(memcmp(enc, m, 32) != 0);
 
-    /* Locking wipes the CWK from RAM; the wrapped form remains in flash. */
-    fj_state_lock();
-    assert(!fj_state_cwk(cwk));
-    assert(fj_keys_cwk_set());
-
-    /* Re-entering the PIN recovers the same CWK. */
+    /* Setting the PUK wraps M with the PUK too (a separate wrapped form). */
     assert(fj_state_unlock("12345"));
-    uint8_t cwk2[32];
-    assert(fj_state_cwk(cwk2));
-    assert(memcmp(cwk, cwk2, 32) == 0);
+    assert(fj_state_set_puk("recovery-code"));
+    assert(fj_keys_get_master_puk_wrap(enc, salt));
 
-    /* A factory wipe clears the persisted CWK too. */
+    /* Locking wipes M from RAM; the wrapped forms remain in flash. */
+    fj_state_lock();
+    assert(!fj_state_cwk(m));
+    assert(fj_keys_master_key_set());
+
+    /* Re-entering the PIN recovers the same M. */
+    assert(fj_state_unlock("12345"));
+    uint8_t m2[32];
+    assert(fj_state_cwk(m2));
+    assert(memcmp(m, m2, 32) == 0);
+
+    /* A factory wipe clears the persisted M too. */
     fj_state_factory_reset();
-    assert(!fj_keys_cwk_set());
-    assert(!fj_state_cwk(cwk));
+    assert(!fj_keys_master_key_set());
+    assert(!fj_state_cwk(m));
+}
+
+static void test_puk_sets_new_pin_preserves_keys(void) {
+    reset_fixture();
+
+    assert(fj_state_set_pin("12345"));
+    assert(fj_state_unlock("12345"));
+    assert(fj_state_set_puk("recovery-code"));
+    uint8_t m_orig[32];
+    assert(fj_state_cwk(m_orig));
+    fj_state_lock();
+
+    /* Block the PIN, then recover with the PUK. The PUK must recover M, so
+     * the keys stay usable and a new PIN can be set. */
+    now_us = 0;
+    assert(!fj_state_unlock("wrong"));
+    now_us += 40000000;
+    for (unsigned i = 1; i < FJ_MAX_PIN_FAILS; i++) {
+        now_us += 40000000;
+        assert(!fj_state_unlock("wrong"));
+    }
+    assert(fj_state_pin_blocked());
+    assert(!fj_state_unlock("12345"));
+
+    /* PUK recovery unlocks and recovers the same master key M. */
+    assert(fj_state_unlock_puk("recovery-code") == FJ_PUK_OK);
+    assert(fj_state_get() == FJ_STATE_UNLOCKED);
+    uint8_t m_puk[32];
+    assert(fj_state_cwk(m_puk));
+    assert(memcmp(m_orig, m_puk, 32) == 0);
+
+    /* Now set a NEW PIN; M (and thus the keys) is preserved, just re-wrapped
+     * with the new PIN. */
+    assert(fj_state_set_pin("newpin456"));
+    assert(fj_state_unlock("newpin456"));
+    uint8_t m_new[32];
+    assert(fj_state_cwk(m_new));
+    assert(memcmp(m_orig, m_new, 32) == 0);
+
+    /* The old PIN no longer works; the new PIN does. */
+    fj_state_lock();
+    assert(!fj_state_unlock("12345"));
+    /* A wrong-PIN attempt imposed a backoff delay; wait it out. */
+    now_us += 40000000;
+    assert(fj_state_unlock("newpin456"));
+    assert(fj_state_get() == FJ_STATE_UNLOCKED);
+}
+
+static void test_backup_restore(void) {
+    reset_fixture();
+    assert(fj_state_set_pin("12345"));
+    assert(fj_state_unlock("12345"));
+    assert(fj_state_set_puk("recovery-code"));
+
+    uint8_t m[32];
+    assert(fj_state_cwk(m));
+
+    /* Write a backup with a dedicated password. */
+    assert(fj_state_backup_write("backup-pass"));
+    assert(backup_len > 0);
+    assert(backup_writes == 1);
+
+    /* Locking wipes M from RAM. */
+    fj_state_lock();
+    assert(!fj_state_cwk(m));
+
+    /* Restore with the correct password recovers the same master key M. */
+    assert(fj_state_backup_restore("backup-pass"));
+    assert(fj_state_get() == FJ_STATE_UNLOCKED);
+    uint8_t m2[32];
+    assert(fj_state_cwk(m2));
+    assert(memcmp(m, m2, 32) == 0);
+
+    /* A wrong password must fail and not clobber M. */
+    uint8_t m_before[32];
+    assert(fj_state_cwk(m_before));
+    assert(!fj_state_backup_restore("wrong-pass"));
+    assert(fj_state_cwk(m2));
+    assert(memcmp(m_before, m2, 32) == 0);
 }
 
 int main(void) {
@@ -347,7 +504,9 @@ int main(void) {
     test_wrong_puk_factory_wipes_live_state();
     test_profile_erase_consistent();
     test_brute_force_delay_backoff();
-    test_cwk_at_rest();
+    test_master_key_at_rest();
+    test_puk_sets_new_pin_preserves_keys();
+    test_backup_restore();
     puts("security host tests: ok");
     return 0;
 }

@@ -74,6 +74,18 @@ bool fj_state_set_pin(const char *pin);
  * false when it is not derivable (e.g. unlocked via PUK, or no PIN set). */
 bool fj_state_cwk(uint8_t out[32]);
 
+/* Backup the master key and all credential/profile state to a file on the
+ * MSC drive, encrypted with the given backup password. Requires the device
+ * to be unlocked (so the master key is available). The file is deleted when
+ * the drive is locked. Returns true on success. */
+bool fj_state_backup_write(const char *password);
+
+/* Restore a backup file from the MSC drive. Decrypts with the backup
+ * password, imports the credentials, profiles and active profile, and holds
+ * the recovered master key in RAM. The user must then set a new PIN
+ * (SETPIN) to re-wrap the master key. Returns true on success. */
+bool fj_state_backup_restore(const char *password);
+
 /* Erase a profile and every credential bound to it as one consistent
  * operation: first the live CTAP2 cache is purged, then the persistent
  * store is updated and flushed. Rejects erasing the active profile. */

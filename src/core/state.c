@@ -21,11 +21,11 @@ static uint8_t pin_salt[FJ_PIN_SALT_LEN];
 static uint8_t pin_ctap2_verifier[16];
 static bool pin_configured = false;
 
-/* The credential wrapping key (CWK), held in RAM only while the device is
- * unlocked by entering the device PIN. It wraps every CTAP2 credential
- * private key at rest. It is wiped on lock. */
-static uint8_t cwk[32];
-static bool cwk_available = false;
+/* The master key M, held in RAM only while the device is unlocked. It wraps
+ * every CTAP2 credential private key at rest. It can be recovered by either
+ * the device PIN or the recovery PUK; it is wiped on lock. */
+static uint8_t master[32];
+static bool master_available = false;
 
 static fj_state_t state = FJ_STATE_LOCKED;
 static uint32_t timeout_sec = FJ_DEFAULT_TIMEOUT_SEC;
@@ -56,10 +56,10 @@ void fj_state_init(void) {
     timeout_sec = FJ_DEFAULT_TIMEOUT_SEC;
     (void)fj_keys_get_timeout(&timeout_sec);
     have_unlock_time = false;
-    /* The device starts locked, so no credential wrapping key is available
-     * until the device PIN is entered. */
-    memset(cwk, 0, sizeof(cwk));
-    cwk_available = false;
+    /* The device starts locked, so no master key is available until it is
+     * unlocked with the PIN or PUK. */
+    memset(master, 0, sizeof(master));
+    master_available = false;
 }
 
 fj_state_t fj_state_get(void) {
@@ -70,46 +70,55 @@ bool fj_state_pin_configured(void) {
     return pin_configured;
 }
 
-/* Unwrap the credential wrapping key (CWK) using PBKDF2(device PIN,
- * cwk_salt), XOR-wrapped like the disk key. The CWK stays in RAM for as long
- * as the device is unlocked. Returns true on success. */
-static bool cwk_unwrap(const char *pin, size_t len) {
-    uint8_t enc[32], salt[FJ_PIN_SALT_LEN];
-    if (!fj_keys_get_cwk(enc, salt)) return false;
-
+/* Unwrap the master key M using a passphrase and one of its stored wrapped
+ * forms (PIN or PUK). XOR-wrapped like the disk key. On success M is held in
+ * RAM until the device locks. 'salt' is the salt for 'wrap_enc'. */
+static bool master_unwrap(const char *secret, size_t len,
+                          const uint8_t wrap_enc[32], const uint8_t salt[16]) {
     uint8_t wrap[32];
-    if (!fj_pbkdf2_sha256((const uint8_t *)pin, len, salt, FJ_PIN_SALT_LEN,
+    if (!fj_pbkdf2_sha256((const uint8_t *)secret, len, salt, 16,
                           FJ_PBKDF2_ITERATIONS, wrap))
         return false;
-
-    for (int i = 0; i < 32; i++) cwk[i] = enc[i] ^ wrap[i];
-    cwk_available = true;
+    for (int i = 0; i < 32; i++) master[i] = wrap_enc[i] ^ wrap[i];
     memset(wrap, 0, sizeof(wrap));
+    master_available = true;
     return true;
 }
 
-/* Ensure a CWK exists and is wrapped by the given PIN. On first use it
- * generates a fresh random CWK and salt. Used when the PIN is set or
- * changed. */
-static bool cwk_ensure_wrapped(const char *pin, size_t len) {
-    uint8_t enc[32], salt[FJ_PIN_SALT_LEN];
-    if (!fj_keys_cwk_set()) {
-        /* First credential-wrapping key: fresh random value and salt. */
+static bool master_unwrap_pin(const char *pin, size_t len) {
+    uint8_t enc[32], salt[16];
+    if (!fj_keys_get_master_pin_wrap(enc, salt)) return false;
+    return master_unwrap(pin, len, enc, salt);
+}
+
+static bool master_unwrap_puk(const char *puk, size_t len) {
+    uint8_t enc[32], salt[16];
+    if (!fj_keys_get_master_puk_wrap(enc, salt)) return false;
+    return master_unwrap(puk, len, enc, salt);
+}
+
+/* Ensure the master key M exists (generating it on first use) and wrap it
+ * with 'secret' using a fresh salt, storing the wrapped form via 'set_wrap'.
+ * Used when the PIN or PUK is set or changed. */
+static bool master_wrap_with(const char *secret, size_t len,
+                             bool (*set_wrap)(const uint8_t[32], const uint8_t[16])) {
+    uint8_t enc[32], salt[16];
+    if (!fj_keys_master_key_set()) {
+        /* First master key: fresh random value and salt. */
         fj_random(salt, sizeof(salt));
-        fj_random(cwk, sizeof(cwk));
-    } else if (!fj_keys_get_cwk(enc, salt)) {
-        return false;
+        fj_random(master, sizeof(master));
+    } else {
+        fj_random(salt, sizeof(salt));
     }
 
     uint8_t wrap[32];
-    if (!fj_pbkdf2_sha256((const uint8_t *)pin, len, salt, FJ_PIN_SALT_LEN,
+    if (!fj_pbkdf2_sha256((const uint8_t *)secret, len, salt, 16,
                           FJ_PBKDF2_ITERATIONS, wrap))
         return false;
-
-    for (int i = 0; i < 32; i++) enc[i] = cwk[i] ^ wrap[i];
+    for (int i = 0; i < 32; i++) enc[i] = master[i] ^ wrap[i];
     memset(wrap, 0, sizeof(wrap));
-    if (!fj_keys_set_cwk(enc, salt)) return false;
-    cwk_available = true;
+    if (!set_wrap(enc, salt)) return false;
+    master_available = true;
     return true;
 }
 
@@ -132,9 +141,9 @@ bool fj_state_set_pin(const char *pin) {
 
     if (!fj_keys_set_pin(pin_hash, pin_salt, pin_ctap2_verifier)) return false;
     pin_configured = true;
-    /* Ensure the credential wrapping key is available and wrapped by the new
-     * PIN so credential private keys can be encrypted at rest. */
-    if (!cwk_ensure_wrapped(pin, len)) return false;
+    /* Ensure the master key exists and is wrapped by the new PIN so
+     * credential private keys can be encrypted at rest. */
+    if (!master_wrap_with(pin, len, fj_keys_set_master_pin_wrap)) return false;
     return true;
 }
 
@@ -142,8 +151,8 @@ void fj_state_lock(void) {
     /* The device lock is the security boundary for every subsystem. */
     fj_msc_lock();
     fj_led_pin_lock();
-    memset(cwk, 0, sizeof(cwk));
-    cwk_available = false;
+    memset(master, 0, sizeof(master));
+    master_available = false;
     state = FJ_STATE_LOCKED;
     have_unlock_time = false;
 }
@@ -194,11 +203,11 @@ bool fj_state_unlock(const char *pin) {
     }
     fj_state_brute_success(FJ_BRUTE_PIN);
 
-    /* Derive the credential wrapping key from the PIN so credential private
-     * keys can be decrypted for signing. Failure here is not fatal for the
-     * lock state itself but means SSH keys cannot be used until a PIN unlock
-     * with the CWK available. */
-    (void)cwk_unwrap(pin, strlen(pin));
+    /* Unwrap the master key from the PIN so credential private keys can be
+     * decrypted for signing. Failure here is not fatal for the lock state
+     * itself but means SSH keys cannot be used until a PIN unlock with the
+     * master key available. */
+    (void)master_unwrap_pin(pin, strlen(pin));
 
     state = FJ_STATE_UNLOCKED;
     unlock_since = get_absolute_time();
@@ -221,8 +230,8 @@ void fj_state_factory_reset(void) {
     memset(pin_hash, 0, sizeof(pin_hash));
     memset(pin_salt, 0, sizeof(pin_salt));
     memset(pin_ctap2_verifier, 0, sizeof(pin_ctap2_verifier));
-    memset(cwk, 0, sizeof(cwk));
-    cwk_available = false;
+    memset(master, 0, sizeof(master));
+    master_available = false;
     pin_configured = false;
     state = FJ_STATE_LOCKED;
     have_unlock_time = false;
@@ -230,8 +239,8 @@ void fj_state_factory_reset(void) {
 }
 
 bool fj_state_cwk(uint8_t out[32]) {
-    if (!cwk_available) return false;
-    memcpy(out, cwk, 32);
+    if (!master_available) return false;
+    memcpy(out, master, 32);
     return true;
 }
 
@@ -278,10 +287,17 @@ fj_puk_result_t fj_state_unlock_puk(const char *puk) {
     fj_security_t sec;
     if (!fj_keys_get_security(&sec)) return FJ_PUK_WRONG;
 
-    /* Correct PUK: reset PIN and PUK counters, unblock and unlock. */
+    /* Correct PUK: reset PIN and PUK counters, unblock and unlock. Because
+     * the master key M is also wrapped by the PUK, a PUK unlock recovers M,
+     * so credential keys remain usable and a new PIN can be set without
+     * losing them. */
     sec.pin_fail = 0;
     sec.pin_blocked = 0;
     if (!fj_keys_set_security(&sec)) return FJ_PUK_WRONG;
+    if (!master_unwrap_puk(puk, strlen(puk))) return FJ_PUK_WRONG;
+    /* A PUK recovery resets the PIN lockout, so clear the PIN backoff gate
+     * too; the user can immediately set or re-enter a PIN. */
+    fj_state_brute_success(FJ_BRUTE_PIN);
     state = FJ_STATE_UNLOCKED;
     unlock_since = get_absolute_time();
     have_unlock_time = true;
@@ -301,7 +317,10 @@ bool fj_state_set_puk(const char *puk) {
     if (!fj_pbkdf2_sha256((const uint8_t *)puk, len, salt, FJ_PUK_SALT_LEN,
                           FJ_PBKDF2_ITERATIONS, hash))
         return false;
-    return fj_keys_set_puk(hash, salt);
+    if (!fj_keys_set_puk(hash, salt)) return false;
+    /* Wrap the master key with the (new) PUK so a PUK recovery can recover
+     * the keys. */
+    return master_wrap_with(puk, len, fj_keys_set_master_puk_wrap);
 }
 
 bool fj_state_set_timeout(uint32_t seconds) {
@@ -355,4 +374,101 @@ void fj_state_brute_success(fj_brute_ctx_t ctx) {
     int c = brute_ctx_index(ctx);
     brute_fail_count[c] = 0;
     brute_allowed_at[c] = 0;
+}
+
+/* ------------------------------------------------------------------ */
+/* Backup / restore                                                    */
+/* ------------------------------------------------------------------ */
+#define BACKUP_MAGIC    0x464A4255u   /* "FJBU" */
+#define BACKUP_VERSION  1u
+#define BACKUP_SALT_LEN 16
+#define BACKUP_NONCE_LEN 12
+#define BACKUP_TAG_LEN  16
+/* Header before the ciphertext: magic(4) || version(1) || salt(16) || nonce(12).
+ * The AES-GCM tag follows the ciphertext. */
+#define BACKUP_HEADER   (4 + 1 + BACKUP_SALT_LEN + BACKUP_NONCE_LEN)
+#define BACKUP_TOTAL(payload_sz) (BACKUP_HEADER + (payload_sz) + BACKUP_TAG_LEN)
+
+/* Backup file on the disk: magic(4) || version(1) || salt(16) || nonce(12)
+ * || tag(16) || AES-GCM(payload). The key is PBKDF2(password, salt). */
+bool fj_state_backup_write(const char *password) {
+    if (!password || state != FJ_STATE_UNLOCKED) return false;
+    if (!master_available) return false;
+
+    fj_backup_payload_t payload;
+    memset(&payload, 0, sizeof(payload));
+    if (!fj_keys_backup_fill(&payload)) return false;
+    memcpy(payload.master, master, sizeof(payload.master));
+
+    uint8_t salt[BACKUP_SALT_LEN], nonce[BACKUP_NONCE_LEN], key[32];
+    fj_random(salt, sizeof(salt));
+    fj_random(nonce, sizeof(nonce));
+    if (!fj_pbkdf2_sha256((const uint8_t *)password, strlen(password),
+                          salt, sizeof(salt), FJ_PBKDF2_ITERATIONS, key))
+        return false;
+
+    uint8_t blob[BACKUP_TOTAL(sizeof(payload))];
+    uint32_t magic = BACKUP_MAGIC;
+    size_t p = 0;
+    memcpy(blob + p, &magic, 4); p += 4;
+    blob[p++] = BACKUP_VERSION;
+    memcpy(blob + p, salt, sizeof(salt)); p += sizeof(salt);
+    memcpy(blob + p, nonce, sizeof(nonce)); p += sizeof(nonce);
+    uint8_t tag[BACKUP_TAG_LEN];
+    if (!fj_aes_gcm_encrypt(key, nonce, (const uint8_t *)&payload, sizeof(payload),
+                            blob + p, tag))
+        return false;
+    memcpy(blob + p + sizeof(payload), tag, sizeof(tag));
+
+    memset(&payload, 0, sizeof(payload));
+    memset(key, 0, sizeof(key));
+
+    bool ok = fj_msc_backup_write(blob, sizeof(blob));
+    memset(blob, 0, sizeof(blob));
+    return ok;
+}
+
+bool fj_state_backup_restore(const char *password) {
+    if (!password) return false;
+
+    uint8_t blob[BACKUP_TOTAL(sizeof(fj_backup_payload_t))];
+    size_t blob_len = 0;
+    if (!fj_msc_backup_read(blob, sizeof(blob), &blob_len)) return false;
+    if (blob_len != BACKUP_TOTAL(sizeof(fj_backup_payload_t)))
+        return false;
+
+    uint32_t magic;
+    memcpy(&magic, blob, 4);
+    if (magic != BACKUP_MAGIC || blob[4] != BACKUP_VERSION) return false;
+
+    const uint8_t *salt = blob + 5;
+    const uint8_t *nonce = blob + 5 + BACKUP_SALT_LEN;
+    const uint8_t *cipher = blob + BACKUP_HEADER;
+    const uint8_t *tag = cipher + sizeof(fj_backup_payload_t);
+
+    uint8_t key[32];
+    if (!fj_pbkdf2_sha256((const uint8_t *)password, strlen(password),
+                          salt, BACKUP_SALT_LEN, FJ_PBKDF2_ITERATIONS, key))
+        return false;
+
+    fj_backup_payload_t payload;
+    if (!fj_aes_gcm_decrypt(key, nonce, tag, cipher, sizeof(payload),
+                            (uint8_t *)&payload)) {
+        memset(key, 0, sizeof(key));
+        return false;
+    }
+    memset(key, 0, sizeof(key));
+
+    /* Import the store and hold the recovered master key in RAM. The user
+     * must set a new PIN to re-wrap it. */
+    if (!fj_keys_backup_restore(&payload)) return false;
+    memcpy(master, payload.master, sizeof(master));
+    master_available = true;
+    memset(&payload, 0, sizeof(payload));
+    memset(blob, 0, sizeof(blob));
+
+    state = FJ_STATE_UNLOCKED;
+    unlock_since = get_absolute_time();
+    have_unlock_time = true;
+    return true;
 }

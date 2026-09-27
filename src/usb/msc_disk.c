@@ -383,6 +383,266 @@ static bool boot_sector_valid(void) {
 }
 
 /* ------------------------------------------------------------------ */
+/* Backup file: minimal FAT16 file operations for "FJAEGER.BAK".       */
+/* ------------------------------------------------------------------ */
+#define BACKUP_NAME        "FJAEGER"      /* 8.3 name (padded to 8) */
+#define BACKUP_EXT         "BAK"
+#define BACKUP_ATTR        0x20           /* archive */
+#define FAT_EOC            0xFFFF
+#define FAT_FREE           0x0000
+#define ROOT_ENTRY_SIZE    32
+#define ROOT_ENTRIES       (32 * DISK_SECTOR_SIZE / ROOT_ENTRY_SIZE) /* 512 */
+#define MAX_BACKUP_SIZE    4096
+
+static bool read_sector_raw(uint32_t lba, uint8_t out[DISK_SECTOR_SIZE]) {
+    uint8_t clear[DISK_BLOCK_SIZE];
+    if (!read_block_apply(block_index_for_lba(lba), clear)) return false;
+    memcpy(out, clear + (lba % DISK_SECTORS_PER_BLOCK) * DISK_SECTOR_SIZE,
+           DISK_SECTOR_SIZE);
+    return true;
+}
+
+/* Read-modify-write one clear-text sector via the block layer. */
+static void write_sector_raw(uint32_t lba, const uint8_t in[DISK_SECTOR_SIZE]) {
+    uint8_t clear[DISK_BLOCK_SIZE];
+    read_block_apply(block_index_for_lba(lba), clear);
+    memcpy(clear + (lba % DISK_SECTORS_PER_BLOCK) * DISK_SECTOR_SIZE,
+           in, DISK_SECTOR_SIZE);
+    write_block(block_index_for_lba(lba), clear);
+}
+
+/* FAT 1 begins at reserved sector (LBA 1). Entry 'e' is at byte 2*e. */
+static uint32_t fat1_lba(uint32_t byte_off) {
+    return 1u + byte_off / DISK_SECTOR_SIZE;
+}
+
+static bool fat_read_entry(uint32_t e, uint16_t *val) {
+    uint8_t sec[DISK_SECTOR_SIZE];
+    if (!read_sector_raw(fat1_lba(e * 2), sec)) return false;
+    uint32_t off = (e * 2) % DISK_SECTOR_SIZE;
+    *val = (uint16_t)(sec[off] | ((uint16_t)sec[off + 1] << 8));
+    return true;
+}
+
+/* Write 'val' to FAT entry 'e' in both FAT copies (mirrored). */
+static void fat_write_entry(uint32_t e, uint16_t val) {
+    uint32_t off = (e * 2) % DISK_SECTOR_SIZE;
+    uint8_t sec[DISK_SECTOR_SIZE];
+    read_sector_raw(fat1_lba(e * 2), sec);
+    sec[off] = val & 0xff;
+    sec[off + 1] = (uint8_t)((val >> 8) & 0xff);
+    write_sector_raw(fat1_lba(e * 2), sec);
+    /* FAT 2 mirror starts after FAT 1. */
+    read_sector_raw(1u + fat_sectors + (e * 2) / DISK_SECTOR_SIZE, sec);
+    sec[(e * 2) % DISK_SECTOR_SIZE] = val & 0xff;
+    sec[((e * 2) % DISK_SECTOR_SIZE) + 1] = (uint8_t)((val >> 8) & 0xff);
+    write_sector_raw(1u + fat_sectors + (e * 2) / DISK_SECTOR_SIZE, sec);
+}
+
+/* Cluster number -> data LBA (FAT16: cluster 2 starts the data region). */
+static uint32_t cluster_lba(uint32_t cluster) {
+    return data_lba + (cluster - 2);
+}
+
+/* Find a contiguous run of 'n' free clusters starting at or after 'start'.
+ * Returns the first cluster, or 0 if none. */
+static uint32_t find_free_run(uint32_t n, uint32_t start) {
+    uint32_t run = 0;
+    uint32_t first = 0;
+    for (uint32_t c = start; c <= total_clusters + 1; c++) {
+        uint16_t v;
+        if (!fat_read_entry(c, &v)) return 0;
+        if (v == FAT_FREE) {
+            if (run == 0) first = c;
+            run++;
+            if (run >= n) return first;
+        } else {
+            run = 0;
+        }
+    }
+    return 0;
+}
+
+/* Locate the root-directory entry named FJAEGER.BAK. Returns its byte offset
+ * into the root directory, or -1 if not present. */
+static int find_backup_root_entry(void) {
+    uint8_t name[8], ext[3];
+    memset(name, ' ', 8);
+    memcpy(name, BACKUP_NAME, strlen(BACKUP_NAME));
+    memset(ext, ' ', 3);
+    memcpy(ext, BACKUP_EXT, strlen(BACKUP_EXT));
+
+    for (uint32_t r = 0; r < ROOT_ENTRIES; r++) {
+        uint32_t byte_off = r * ROOT_ENTRY_SIZE;
+        uint32_t lba = root_dir_lba + byte_off / DISK_SECTOR_SIZE;
+        uint8_t sec[DISK_SECTOR_SIZE];
+        if (!read_sector_raw(lba, sec)) return -1;
+        const uint8_t *e = sec + (byte_off % DISK_SECTOR_SIZE);
+        if (e[0] == 0x00) return -1;        /* end of directory */
+        if (e[0] == 0xE5) continue;         /* free entry */
+        if ((e[11] & 0x08) != 0) continue;  /* skip volume label */
+        if (memcmp(e, name, 8) == 0 && memcmp(e + 8, ext, 3) == 0)
+            return (int)byte_off;
+    }
+    return -1;
+}
+
+static void write_root_entry(uint32_t byte_off, const uint8_t entry[ROOT_ENTRY_SIZE]) {
+    uint32_t lba = root_dir_lba + byte_off / DISK_SECTOR_SIZE;
+    uint8_t sec[DISK_SECTOR_SIZE];
+    read_sector_raw(lba, sec);
+    memcpy(sec + (byte_off % DISK_SECTOR_SIZE), entry, ROOT_ENTRY_SIZE);
+    write_sector_raw(lba, sec);
+}
+
+bool fj_msc_backup_exists(void) {
+    if (!disk_ready || !fs_initialised) return false;
+    return find_backup_root_entry() >= 0;
+}
+
+bool fj_msc_backup_write(const uint8_t *data, size_t len) {
+    if (!disk_ready || !fs_initialised) return false;
+    if (!data || len == 0 || len > MAX_BACKUP_SIZE) return false;
+    flush_pending_writes();
+
+    uint32_t clusters = (uint32_t)((len + DISK_SECTOR_SIZE - 1) / DISK_SECTOR_SIZE);
+    uint32_t first = find_free_run(clusters, 2);
+    if (first == 0) return false;
+
+    uint8_t name[8], ext[3];
+    memset(name, ' ', 8);
+    memcpy(name, BACKUP_NAME, strlen(BACKUP_NAME));
+    memset(ext, ' ', 3);
+    memcpy(ext, BACKUP_EXT, strlen(BACKUP_EXT));
+
+    /* Write data clusters. */
+    size_t pos = 0;
+    uint32_t c = first;
+    for (uint32_t i = 0; i < clusters; i++, c++) {
+        uint8_t sec[DISK_SECTOR_SIZE];
+        memset(sec, 0, sizeof(sec));
+        size_t n = len - pos;
+        if (n > DISK_SECTOR_SIZE) n = DISK_SECTOR_SIZE;
+        memcpy(sec, data + pos, n);
+        pos += n;
+        write_sector_raw(cluster_lba(c), sec);
+    }
+
+    /* Link the chain in the FAT (last cluster -> EOC). */
+    for (uint32_t i = 0; i < clusters; i++) {
+        uint16_t next = (i + 1 < clusters) ? (uint16_t)(first + i + 1) : FAT_EOC;
+        fat_write_entry(first + i, next);
+    }
+
+    /* Root directory entry. */
+    uint8_t entry[ROOT_ENTRY_SIZE];
+    memset(entry, 0, sizeof(entry));
+    memcpy(entry, name, 8);
+    memcpy(entry + 8, ext, 3);
+    entry[11] = BACKUP_ATTR;
+    /* DOS time/date: fixed, not important. */
+    entry[20] = 0x00; entry[21] = 0x00;   /* hi start cluster */
+    entry[26] = (uint8_t)(first & 0xff);
+    entry[27] = (uint8_t)((first >> 8) & 0xff);
+    entry[28] = (uint8_t)(len & 0xff);
+    entry[29] = (uint8_t)((len >> 8) & 0xff);
+    entry[30] = (uint8_t)((len >> 16) & 0xff);
+    entry[31] = (uint8_t)((len >> 24) & 0xff);
+
+    /* Find a free root slot (reuse existing FJAEGER.BAK slot if any, else
+     * the first free slot). */
+    int slot = find_backup_root_entry();
+    if (slot < 0) {
+        /* scan for a free (0xE5) or end-of-dir (0x00) slot */
+        for (uint32_t r = 0; r < ROOT_ENTRIES; r++) {
+            uint32_t bo = r * ROOT_ENTRY_SIZE;
+            uint8_t sec[DISK_SECTOR_SIZE];
+            if (!read_sector_raw(root_dir_lba + bo / DISK_SECTOR_SIZE, sec)) return false;
+            const uint8_t *e = sec + (bo % DISK_SECTOR_SIZE);
+            if (e[0] == 0x00 || e[0] == 0xE5) { slot = (int)bo; break; }
+        }
+    }
+    if (slot < 0) return false;   /* directory full */
+    write_root_entry((uint32_t)slot, entry);
+
+    flush_pending_writes();
+    return true;
+}
+
+bool fj_msc_backup_read(uint8_t *out, size_t cap, size_t *len) {
+    if (!disk_ready || !fs_initialised) return false;
+    if (!out || !len) return false;
+    flush_pending_writes();
+
+    int slot = find_backup_root_entry();
+    if (slot < 0) return false;
+
+    uint8_t sec[DISK_SECTOR_SIZE];
+    uint32_t bo = (uint32_t)slot;
+    if (!read_sector_raw(root_dir_lba + bo / DISK_SECTOR_SIZE, sec)) return false;
+    const uint8_t *e = sec + (bo % DISK_SECTOR_SIZE);
+    uint32_t size = (uint32_t)e[28] | ((uint32_t)e[29] << 8) |
+                    ((uint32_t)e[30] << 16) | ((uint32_t)e[31] << 24);
+    uint32_t first = (uint32_t)e[26] | ((uint32_t)e[27] << 8);
+    if (first < 2 || size == 0 || size > MAX_BACKUP_SIZE) return false;
+    if (cap < size) return false;
+
+    uint32_t clusters = (size + DISK_SECTOR_SIZE - 1) / DISK_SECTOR_SIZE;
+    uint32_t c = first;
+    size_t pos = 0;
+    for (uint32_t i = 0; i < clusters && c >= 2; i++) {
+        if (!read_sector_raw(cluster_lba(c), sec)) return false;
+        size_t n = size - pos;
+        if (n > DISK_SECTOR_SIZE) n = DISK_SECTOR_SIZE;
+        memcpy(out + pos, sec, n);
+        pos += n;
+        uint16_t next;
+        if (!fat_read_entry(c, &next)) return false;
+        c = next;
+        if (next == FAT_EOC) break;
+    }
+    if (pos != size) return false;
+    *len = size;
+    return true;
+}
+
+bool fj_msc_backup_delete(void) {
+    if (!disk_ready || !fs_initialised) return false;
+    flush_pending_writes();
+
+    int slot = find_backup_root_entry();
+    if (slot < 0) return true;   /* nothing to delete */
+
+    /* Read file metadata to free its clusters. */
+    uint8_t sec[DISK_SECTOR_SIZE];
+    uint32_t bo = (uint32_t)slot;
+    if (!read_sector_raw(root_dir_lba + bo / DISK_SECTOR_SIZE, sec)) return false;
+    const uint8_t *e = sec + (bo % DISK_SECTOR_SIZE);
+    uint32_t first = (uint32_t)e[26] | ((uint32_t)e[27] << 8);
+
+    /* Zero the data sectors, free the FAT chain. */
+    uint32_t c = first;
+    uint32_t guard = 0;
+    while (c >= 2 && c <= total_clusters + 1 && guard++ < 32) {
+        uint16_t next;
+        if (!fat_read_entry(c, &next)) break;
+        uint8_t zero[DISK_SECTOR_SIZE];
+        memset(zero, 0, sizeof(zero));
+        write_sector_raw(cluster_lba(c), zero);
+        fat_write_entry(c, FAT_FREE);
+        if (next == FAT_EOC) break;
+        c = next;
+    }
+
+    /* Mark the root entry free. */
+    sec[(bo % DISK_SECTOR_SIZE)] = 0xE5;
+    write_sector_raw(root_dir_lba + bo / DISK_SECTOR_SIZE, sec);
+
+    flush_pending_writes();
+    return true;
+}
+
+/* ------------------------------------------------------------------ */
 /* Public API                                                          */
 /* ------------------------------------------------------------------ */
 void fj_msc_init(void) {
@@ -488,7 +748,12 @@ fj_puk_result_t fj_msc_unblock_puk(const char *puk) {
 }
 
 void fj_msc_lock(void) {
-    if (disk_ready) flush_pending_writes();
+    if (disk_ready) {
+        /* Remove any backup file so it does not linger on the (still
+         * encrypted) disk once the drive is locked. */
+        fj_msc_backup_delete();
+        flush_pending_writes();
+    }
     disk_ready = false;
     disk_unlocked = false;
     memset(disk_key, 0, sizeof(disk_key));

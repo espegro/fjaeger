@@ -45,6 +45,24 @@ bool fj_msc_is_ready(void);
 /* Poll: flush any deferred flash writes. Call from the main loop. */
 void fj_msc_task(void);
 
+/* Backup / restore a small encrypted blob as a FAT file ("FJAEGER.BAK").
+ *
+ * fj_msc_backup_write() creates/overwrites the file with 'len' bytes (must
+ * be non-zero and <= 4096). fj_msc_backup_read() reads it back into 'out'
+ * (capacity 'cap'); on success *len is set to the file size. Callers must
+ * have flushed pending writes first; these functions flush internally.
+ *
+ * fj_msc_backup_delete() removes the file, frees its clusters and zeroes the
+ * file's data sectors so the backup does not linger at rest. It is called
+ * automatically when the drive is locked. Returns false if the drive is not
+ * mounted. */
+bool fj_msc_backup_write(const uint8_t *data, size_t len);
+bool fj_msc_backup_read(uint8_t *out, size_t cap, size_t *len);
+bool fj_msc_backup_delete(void);
+
+/* Whether a backup file currently exists on the drive. */
+bool fj_msc_backup_exists(void);
+
 #ifdef __cplusplus
 }
 #endif

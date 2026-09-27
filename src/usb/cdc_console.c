@@ -111,6 +111,8 @@ static void cmd_help(void) {
     outln("  DISK UNBLOCK <puk>         clear disk-PIN block (PIN still required)");
     outln("  DISK LOCK                  lock/unmount the drive");
     outln("  TIMEOUT <sec>              save auto-lock delay (default 900; 0 = off)");
+    outln("  BACKUP <password>          write encrypted backup to FJAEGER.BAK");
+    outln("  RESTORE <password>         restore backup from FJAEGER.BAK");
     outln("  RESET                      reboot the device");
     outln("  PROFILE LIST               list all profiles, active flag & credential count");
     outln("  PROFILE CREATE <id> <name> create a new empty profile (0-7)");
@@ -204,6 +206,52 @@ static void cmd_set_puk(const char *puk) {
     if (!require_unlocked()) return;
     if (fj_state_set_puk(puk)) outln("OK recovery PUK set");
     else outln("ERR invalid PUK (8-64 chars) or device locked");
+}
+
+/* BACKUP <password> — write an encrypted backup of the master key and all
+ * credentials/profiles to the MSC drive as FJAEGER.BAK. Requires the device
+ * unlocked (so the master key is available). The file is deleted on lock. */
+static void cmd_backup(const char *password) {
+    if (!password) {
+        outln("ERR usage: BACKUP <password>");
+        return;
+    }
+    if (!require_unlocked()) return;
+    if (strlen(password) < 8 || strlen(password) > 64) {
+        outln("ERR password must be 8-64 chars");
+        return;
+    }
+    if (!fj_msc_is_ready()) {
+        outln("ERR drive not mounted; DISK UNLOCK <pin> first");
+        return;
+    }
+    if (fj_state_backup_write(password)) {
+        outln("OK backup written to FJAEGER.BAK");
+    } else {
+        outln("ERR backup failed");
+    }
+}
+
+/* RESTORE <password> — read FJAEGER.BAK from the MSC drive, decrypt it and
+ * import the credentials/profiles/master key. Afterwards set a new PIN. */
+static void cmd_restore(const char *password) {
+    if (!password) {
+        outln("ERR usage: RESTORE <password>");
+        return;
+    }
+    if (strlen(password) < 8 || strlen(password) > 64) {
+        outln("ERR password must be 8-64 chars");
+        return;
+    }
+    if (!fj_msc_is_ready()) {
+        outln("ERR drive not mounted; DISK UNLOCK <pin> first");
+        return;
+    }
+    if (fj_state_backup_restore(password)) {
+        outln("OK restored; now SETPIN <pin> to secure the master key");
+    } else {
+        outln("ERR restore failed (bad password or no backup)");
+    }
 }
 
 /* DISK UNLOCK <pin> / SETPIN <pin> / LOCK / STATUS — independent drive lock. */
@@ -472,6 +520,10 @@ static void dispatch(char *cmdline) {
         else outln("ERR unknown PROFILE subcommand");
     } else if (strcasecmp(tok, "timeout") == 0) {
         cmd_timeout(next_token(&p));
+    } else if (strcasecmp(tok, "backup") == 0) {
+        cmd_backup(next_token(&p));
+    } else if (strcasecmp(tok, "restore") == 0) {
+        cmd_restore(next_token(&p));
     } else if (strcasecmp(tok, "reset") == 0) {
         cmd_reset(next_token(&p));
     } else {

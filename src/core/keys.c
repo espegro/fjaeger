@@ -13,7 +13,7 @@
  * Each update erases and programs only the older copy. A generation number
  * and CRC select the newest complete record after a reset or power loss. */
 #define STORE_MAGIC   0x464A5345u /* "FJSE" */
-#define STORE_VERSION 11u
+#define STORE_VERSION 12u
 #define FLASH_OFFSET_BYTES (PICO_FLASH_SIZE_BYTES - (2 * FLASH_SECTOR_SIZE))
 
 typedef struct {
@@ -42,11 +42,16 @@ typedef struct {
     /* Selected profile (v7). */
     uint8_t  active_profile;
     uint8_t  active_profile_valid;
-    /* Credential wrapping key (v11): wraps every CTAP2 private key at rest.
-     * cwk_enc = PBKDF2(device PIN, cwk_salt) XOR cwk. */
-    uint8_t  cwk_enc[32];
-    uint8_t  cwk_salt[16];
-    uint8_t  cwk_configured;
+    /* Master key M (v12): a random 32-byte master key that encrypts every
+     * CTAP2 credential private key at rest. M is wrapped independently by
+     * the device PIN and the recovery PUK (each with its own salt), so that
+     * either one can recover M and thus decrypt the keys. This lets the PUK
+     * set a new PIN without losing the keys. */
+    uint8_t  m_enc_pin[32];    /* M XOR PBKDF2(PIN, m_salt_pin) */
+    uint8_t  m_salt_pin[16];
+    uint8_t  m_enc_puk[32];    /* M XOR PBKDF2(PUK, m_salt_puk) */
+    uint8_t  m_salt_puk[16];
+    uint8_t  m_configured;     /* 1 once the master key exists */
 } fj_store_payload_t;
 
 typedef struct {
@@ -211,6 +216,24 @@ bool fj_keys_ctap2_save(const fj_ctap2_cred_t *creds) {
     return write_store();
 }
 
+bool fj_keys_backup_fill(fj_backup_payload_t *out) {
+    if (!store_loaded || !out) return false;
+    memcpy(out->ctap2, store.ctap2, sizeof(out->ctap2));
+    memcpy(out->profiles, store.profiles, sizeof(out->profiles));
+    out->active_profile = store.active_profile;
+    out->active_profile_valid = store.active_profile_valid;
+    return true;
+}
+
+bool fj_keys_backup_restore(const fj_backup_payload_t *in) {
+    if (!store_loaded || !in) return false;
+    memcpy(store.ctap2, in->ctap2, sizeof(store.ctap2));
+    memcpy(store.profiles, in->profiles, sizeof(store.profiles));
+    store.active_profile = in->active_profile;
+    store.active_profile_valid = in->active_profile_valid;
+    return write_store();
+}
+
 bool fj_keys_set_pin(const uint8_t pbkdf2_hash[32], const uint8_t salt[16],
                      const uint8_t ctap2_verifier[16]) {
     memcpy(store.pin_hash, pbkdf2_hash, 32);
@@ -256,23 +279,38 @@ bool fj_keys_set_disk_secret(const uint8_t enc[32], const uint8_t salt[16],
     return write_store();
 }
 
-bool fj_keys_cwk_set(void) {
+bool fj_keys_master_key_set(void) {
     if (!store_loaded) return false;
-    return store.cwk_configured != 0;
+    return store.m_configured != 0;
 }
 
-bool fj_keys_set_cwk(const uint8_t enc[32], const uint8_t salt[16]) {
+bool fj_keys_set_master_pin_wrap(const uint8_t enc[32], const uint8_t salt[16]) {
     if (!store_loaded) return false;
-    memcpy(store.cwk_enc, enc, 32);
-    memcpy(store.cwk_salt, salt, 16);
-    store.cwk_configured = 1;
+    memcpy(store.m_enc_pin, enc, 32);
+    memcpy(store.m_salt_pin, salt, 16);
+    store.m_configured = 1;
     return write_store();
 }
 
-bool fj_keys_get_cwk(uint8_t enc[32], uint8_t salt[16]) {
-    if (!store_loaded || !store.cwk_configured) return false;
-    memcpy(enc, store.cwk_enc, 32);
-    memcpy(salt, store.cwk_salt, 16);
+bool fj_keys_get_master_pin_wrap(uint8_t enc[32], uint8_t salt[16]) {
+    if (!store_loaded || !store.m_configured) return false;
+    memcpy(enc, store.m_enc_pin, 32);
+    memcpy(salt, store.m_salt_pin, 16);
+    return true;
+}
+
+bool fj_keys_set_master_puk_wrap(const uint8_t enc[32], const uint8_t salt[16]) {
+    if (!store_loaded) return false;
+    memcpy(store.m_enc_puk, enc, 32);
+    memcpy(store.m_salt_puk, salt, 16);
+    store.m_configured = 1;
+    return write_store();
+}
+
+bool fj_keys_get_master_puk_wrap(uint8_t enc[32], uint8_t salt[16]) {
+    if (!store_loaded || !store.m_configured) return false;
+    memcpy(enc, store.m_enc_puk, 32);
+    memcpy(salt, store.m_salt_puk, 16);
     return true;
 }
 
