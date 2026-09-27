@@ -29,6 +29,12 @@ er bare et utviklingsoppsett og må endres før reell bruk.
 | mbedTLS | 3.x fra Pico SDK |
 | USB | TinyUSB fra Pico SDK 2.2.0 |
 | Flash | 16 MB |
+| Flash-verktøy | **picotool** (for `load`/`erase`/`reboot`) |
+
+Forutsetninger for å bygge og flashe: CMake ≥ 3.13, ARM-none-EABI-toolchain,
+**Pico SDK ≥ 2.1.0** (helst 2.2.0) og **`picotool`** på PATH (for flashing).
+Hosttestene trenger `cc` (x86-64) og `pyserial` er valgfritt for
+konsollautomasjon.
 
 `waveshare_rp2350_plus_16mb` brukes fordi den er elektrisk kompatibel med
 TENSTAR-kortet. Pico SDK 2.0.0 med `pico2` ga tidligere ingen fungerende
@@ -43,12 +49,17 @@ cmake -S . -B build \
 cmake --build build -j$(nproc)
 ```
 
-UF2-filen blir `build/fjaeger.uf2` og flashes i BOOTSEL-modus, for eksempel:
+UF2-filen blir `build/fjaeger.uf2`. Sett donglen i BOOTSEL-modus og kjør:
 
 ```bash
-picotool load -f build/fjaeger.uf2
-picotool reboot
+scripts/reflash.sh            # bare firmware; disk + lager (profiler/PIN) bevares
+scripts/reflash_wipe.sh       # sletter hele flash (firmware + disk + lager), så flasher
 ```
+
+`reflash.sh` skriver kun firmwaren og bevarer MSC-disken og
+lageret (profiler, PIN, PUK, CTAP2-credentials). `reflash_wipe.sh` sletter
+hele 16 MB flash først (fabrikksletting på flash-nivå) og krever bekreftelse
+(`YES`); ved neste oppstart opprettes en tom «Default»-profil.
 
 Hosttesten kjøres slik:
 

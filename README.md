@@ -53,7 +53,7 @@ src/
 
 ## Bygge
 
-Forutsetninger: CMake ≥ 3.13, ARM-none-EABI-toolchain, **Pico SDK ≥ 2.1.0** (helst 2.2.0).
+Forutsetninger: CMake ≥ 3.13, ARM-none-EABI-toolchain, **Pico SDK ≥ 2.1.0** (helst 2.2.0) og **`picotool`** på PATH (for flashing). Hosttestene trenger bare `cc` (x86-64).
 
 Donglen er en **TENSTAR RP2350-USB 16 MB** og bruker board-profilen
 `waveshare_rp2350_plus_16mb` (elektrisk kompatibel). Den bygges mot Pico SDK
@@ -67,7 +67,23 @@ cmake -S . -B build \
 cmake --build build -j$(nproc)
 ```
 
-Resultat: `build/fjaeger.uf2` (flash via bootrom BOOTSEL).
+Resultat: `build/fjaeger.uf2`. Sett donglen i BOOTSEL-modus og flash med et av
+skriptene:
+
+```bash
+scripts/reflash.sh            # bare firmware; disk + lager (profiler/PIN) bevares
+scripts/reflash_wipe.sh       # sletter hele flash (firmware + disk + lager), så flasher
+```
+
+`reflash.sh` skriver kun firmwaren og bevarer MSC-disken og lageret
+(profiler, PIN, PUK, CTAP2-credentials). `reflash_wipe.sh` sletter hele
+16 MB flash først (fabrikksletting på flash-nivå) og krever bekreftelse
+(`YES`); ved neste oppstart opprettes en tom «Default»-profil.
+
+**Flash-layout:** firmware ~128 KB fra `0x10000000`, disk-partisjon 12 MiB fra
+`0x10100000`, lager (PIN/profiler/CTAP2/disknøkkel) i de siste 8 KiB. En vanlig
+firmware-flash rører verken disken eller lageret; bare en full erase sletter
+dem.
 
 ## Serial-kommandoer
 
@@ -107,17 +123,68 @@ tekst som terminalprogrammet selv har vist eller logget.
 
 ## SSH (sk-nøkler)
 
-Donglen er en CTAP2-autentikator med en ECDSA P-256-nøkkel, så den brukes med **`sk-ecdsa-sha2-nistp256@openssh.com`** — **ikke** `ed25519-sk` (enheten har ingen EdDSA-nøkkel). Enheten må være **ulåst** (PIN over serial) før credential-operasjoner slipper gjennom.
+Donglen er en CTAP2-autentikator med ECDSA P-256-nøkler, så den brukes med
+**`sk-ecdsa-sha2-nistp256@openssh.com`** — **ikke** `ed25519-sk` (enheten har
+ingen EdDSA-nøkkel). Enheten må være **ulåst** (PIN over serial) og **riktig
+profil valgt** før credential-operasjoner slipper gjennom.
+
+### Hvordan en nøkkel lages (enroll)
 
 ```bash
-# Generer et par (non-resident; credentialet lagres i donglens flash)
-ssh-keygen -t ecdsa-sk -f ~/.ssh/id_ecdsa_sk
-
-# Legg til på verten og bruk som vanlig
-ssh-add ~/.ssh/id_ecdsa_sk
+# 1. Lås opp donglen og velg profil over konsollen:
+#    UNLOCK <pin>  og  PROFILE SELECT <id>
+# 2. Finn FIDO-enheten (f.eks. /dev/hidraw2) og generer nøkkelen:
+ssh-keygen -t ecdsa-sk -O device=/dev/hidraw2 \
+  -f ~/.ssh/id_ecdsa_sk -N '' -C fjaeger-test
 ```
 
-CTAP2-credentials lagres i donglens flash (opptil 8). Attestasjonen er `none`, som OpenSSH og de fleste WebAuthn-tjenester godtar.
+`ssh-keygen` sender `makeCredential` (CTAP2) til donglen, som:
+1. genererer en **tilfeldig P-256-privatnøkkel** som **aldri forlater enheten**;
+2. lagrer den i flash med `credential_id` og `rp_id_hash` (SHA-256 av RP-en,
+   her `ssh:`), **bundet til aktiv profil**;
+3. returnerer kun `credential_id` + offentlig nøkkel til PC-en.
+
+Resultatet er `~/.ssh/id_ecdsa_sk` (inneholder credential-ID + offentlig nøkkel)
+og `~/.ssh/id_ecdsa_sk.pub`. Legg `.pub` i vertens `authorized_keys`.
+
+### Hvordan en nøkkel virker (signering)
+
+Ved innlogging sender OpenSSH `getAssertion` med credential-ID-en i allowList.
+Donglen:
+1. **verifiserer at credentialet er i aktiv profil** — er feil profil valgt
+   nektes signering, selv om PC-en har riktig nøkkelfil;
+2. signerer `authData || clientDataHash` med den lagrede private nøkkelen;
+3. returnerer DER-signaturen til PC-en, som sender den til verten.
+
+```bash
+ssh -i ~/.ssh/id_ecdsa_sk -o ControlPath=none bruker@vert
+```
+
+Bruk `-o ControlPath=none` under testing — `ControlMaster`/multiplexing i
+`~/.ssh/config` kan gjenbruke en eksisterende forbindelse uten ny
+autentisering og dermed maskere profilisoleringen.
+
+### Verifisere en signatur uten SSH-innlogging
+
+```bash
+ssh-keygen -Y sign -f id_ecdsa_sk -n test fil.txt      # lager fil.txt.sig
+ssh-keygen -Y verify -f allowed_signers -I <navn> -n test -s fil.txt.sig < fil.txt
+```
+
+`allowed_signers` må ha formen `navn sk-ecdsa-sha2-nistp256@openssh.com <base64 nøkkel>`.
+
+### Nøkkelmodellen
+
+- **Privatnøkkelen ligger bare i donglen**, aldri på PC-en. PC-en har kun
+  credential-ID + offentlig nøkkel.
+- **Profilen er tilgangsfilteret**: donglen nekter å bruke credentials utenfor
+  aktiv profil. SSH-filen kan peke på samme credential-ID, men virker bare når
+  riktig profil er valgt.
+- En profil er **ikke** en felles nøkkel — hvert credential har sin egen
+  tilfeldige P-256-nøkkel.
+- CTAP2-credentials lagres i flash (opptil 8) i et kontrollsummert A/B-format.
+  Attestasjonen er `none`. Slettet profil → credentials ubrukelige;
+  factory-wipe (5 feil PUK) sletter alle profiler og credentials.
 
 ## Status / kjent begrensning
 
@@ -130,7 +197,6 @@ CTAP2-credentials lagres i donglens flash (opptil 8). Attestasjonen er `none`, s
   - **Deferred write-behind:** USB MSC-callbacker køer sektor-skriver; selve flash-erase/program gjøres i main-loop (`fj_msc_task`), aldri inne i en USB-transaksjon. Data flusher ved `LOCK`/unmount og kontinuerlig.
   - **Integritet:** en vedvarende CRC-32-tabell (én per 4 KiB-blokk, lagret i klartekst i de siste blokkene av partisjonen) verifiseres ved mount. Korrupsjon fra strømbrudd eller tukling oppdages og disken re-initialiseres i stedet for å serve korrupte data.
   - Skriving av store filer er treg og sliter på flash fordi hver sektoroppdatering krever flash-erase.
-- **Flash-layout:** firmware ~128 KB fra `0x10000000`, disk-partisjon 12 MiB fra `0x10100000` (offset `0x00100000`), lager (PIN/profiler/CTAP2/disknøkkel) i de siste 8 KiB.
 
 ## Lisens
 
