@@ -460,10 +460,13 @@ bool fj_state_backup_restore(const char *password) {
     memset(key, 0, sizeof(key));
 
     /* Import the store and hold the recovered master key in RAM. The user
-     * must set a new PIN to re-wrap it. */
+     * must set a new PIN to re-wrap it. Reload the live CTAP2 cache so the
+     * restored credentials are usable immediately without a reboot. */
     if (!fj_keys_backup_restore(&payload)) return false;
     memcpy(master, payload.master, sizeof(master));
     master_available = true;
+    fj_ctap2_forget_all();
+    fj_ctap2_init();
     memset(&payload, 0, sizeof(payload));
     memset(blob, 0, sizeof(blob));
 
