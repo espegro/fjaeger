@@ -401,6 +401,49 @@ ssh-keygen -Y verify -f allowed_signers -I <name> -n test -s file.txt.sig < file
   - Writing large files is slow and wears flash, because every sector update
     requires a flash erase.
 
+## Security hardening: what RP2350 Secure Boot + fuses could add
+
+This is a prototype. **The firmware has no hardware-backed anti-tamper:** the
+dongle can be put into BOOTSEL mode (`RESET BOOTSEL`) and re-flashed with any
+firmware, so a would-be "seal" (blocking new enrollments/backup) is a policy
+feature, not a real barrier against an attacker who can re-flash. Credential
+private keys are still protected at rest by the master key M (PIN/PUK), but
+anyone who can run their own firmware on the chip could ignore that policy.
+
+The RP2350 can mitigate this, if you are willing to permanently configure it:
+
+- **Secure Boot (signed execution).** Only firmware signed with a key you
+  control is allowed to boot. Untrusted firmware is refused, so a "seal"
+  state cannot be bypassed by flashing an attacker's image. Requires
+  generating and protecting a signing key (offline/HSM).
+- **`BOOT_CPROT` fuses.** Hardware access control over flash via the boot
+  ROM: `CPROT_READ` blocks flash dumps over BOOTSEL; `CPROT_READ_WRITE` also
+  blocks boot-ROM writes, so the device can only be updated through a signed
+  update path. Can be set independently of Secure Boot.
+- **`BROM_LOCK`.** Locks down boot-ROM functionality so flash cannot be read
+  or modified through it.
+
+Together, Secure Boot + `BOOT_CPROT_READ_WRITE` (+ `BROM_LOCK`) would make a
+seal genuinely enforced (no code can run except the signed firmware that
+respects it) and make dumping the encrypted key material via BOOTSEL much
+harder.
+
+What it would **not** solve:
+
+- **Physical chip-off / probing.** An attacker with lab equipment who reads
+  the flash die directly is not stopped by these fuses. At-rest protection of
+  the keys still relies on the master key M and the PIN/PUK.
+- **A leaked signing key.** If the signing key is compromised, an attacker can
+  sign their own firmware and bypass everything.
+- **A "seal" still needs a strong unseal secret** (e.g. an admin PIN/PUK) and
+  should never be removable by simply rebooting.
+
+> **Practical note:** Secure Boot and the fuses are **one-time-programmable
+> and effectively irreversible** — mistakes can brick the device or lock you
+> out of firmware updates. They must be developed on a separate test dongle,
+> after the regular re-flash workflow is replaced by a signed-update path.
+> None of this is enabled in this repository.
+
 ## Acknowledgements
 
 This project builds on the **Raspberry Pi Pico SDK** (Apache-2.0), which
