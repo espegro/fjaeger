@@ -290,8 +290,46 @@ bool fj_aes_cbc(const uint8_t key[32], const uint8_t iv[16],
 bool fj_hmac_sha256(const uint8_t *key, size_t key_len,
                     const uint8_t *data, size_t len,
                     uint8_t out[32]) {
-    const mbedtls_md_info_t *md = mbedtls_md_info_from_type(MBEDTLS_MD_SHA256);
-    return mbedtls_md_hmac(md, key, key_len, data, len, out) == 0;
+    /* HMAC-SHA256 built directly on the mbedTLS SHA-256 context. This uses a
+     * ~100-byte stack frame instead of mbedtls_md_hmac's much larger
+     * mbedtls_md_context, which matters on the RP2350's limited RAM when a
+     * PBKDF2 pass runs deep in the unlock/backup call stack. */
+    uint8_t k[64], ipad[64], opad[64], inner[32];
+    memset(k, 0, sizeof(k));
+    if (key_len > 64) {
+        uint8_t kh[32];
+        mbedtls_sha256(key, key_len, kh, 0);
+        memcpy(k, kh, 32);
+        memset(kh, 0, sizeof(kh));
+    } else {
+        memcpy(k, key, key_len);
+    }
+    for (int i = 0; i < 64; i++) {
+        ipad[i] = k[i] ^ 0x36;
+        opad[i] = k[i] ^ 0x5c;
+    }
+    memset(k, 0, sizeof(k));
+
+    mbedtls_sha256_context ctx;
+    mbedtls_sha256_init(&ctx);
+
+    /* inner = SHA-256(ipad || message) */
+    mbedtls_sha256_starts(&ctx, 0);
+    mbedtls_sha256_update(&ctx, ipad, 64);
+    mbedtls_sha256_update(&ctx, data, len);
+    mbedtls_sha256_finish(&ctx, inner);
+
+    /* out = SHA-256(opad || inner) */
+    mbedtls_sha256_starts(&ctx, 0);
+    mbedtls_sha256_update(&ctx, opad, 64);
+    mbedtls_sha256_update(&ctx, inner, 32);
+    mbedtls_sha256_finish(&ctx, out);
+
+    mbedtls_sha256_free(&ctx);
+    memset(ipad, 0, sizeof(ipad));
+    memset(opad, 0, sizeof(opad));
+    memset(inner, 0, sizeof(inner));
+    return true;
 }
 
 bool fj_ct_equal(const void *a, const void *b, size_t n) {
