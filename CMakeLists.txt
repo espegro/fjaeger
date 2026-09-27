@@ -20,6 +20,26 @@ set(PICO_CMAKE_FLAGS "-DPICO_CYW43_SUPPORTED=0")
 # which has been removed - CTAP2 uses attestation format "none".)
 set(PICO_MBEDTLS_CONFIG_FILE "fjaeger_mbedtls_config.h")
 
+# ---------------------------------------------------------------------
+# Build version string (git describe)
+# ---------------------------------------------------------------------
+# Expose a short, deterministic version in the firmware: the nearest tag (if
+# any), the commit short-hash and a "-dirty" marker when the tree is not
+# clean. Falls back to "unknown" outside a git checkout. Shown in the serial
+# console banner and STATUS. Re-run cmake to refresh after a commit.
+find_package(Git QUIET)
+if(GIT_EXECUTABLE)
+  execute_process(
+    COMMAND "${GIT_EXECUTABLE}" describe --always --tags --dirty
+    WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+    OUTPUT_VARIABLE FJ_VERSION_STRING
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+    ERROR_QUIET)
+endif()
+if(NOT FJ_VERSION_STRING)
+  set(FJ_VERSION_STRING "unknown")
+endif()
+
 pico_sdk_init()
 
 # ---------------------------------------------------------------------
@@ -54,6 +74,7 @@ target_include_directories(fjaeger PRIVATE
 target_compile_definitions(fjaeger PRIVATE
   CFG_TUSB_CONFIG_FILE="tusb_config.h"
   PICO_FLASH_SIZE_BYTES=0x1000000
+  FJ_VERSION_STRING="${FJ_VERSION_STRING}"
   # mbedTLS P-256 signing plus CTAP2 request/response buffers exceed the
   # Pico SDK's 2 KiB default stack and otherwise wedge USB in getAssertion.
   PICO_STACK_SIZE=0x1000

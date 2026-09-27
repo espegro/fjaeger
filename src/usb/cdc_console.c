@@ -23,6 +23,12 @@
 
 #include "tusb.h"
 #include "pico/time.h"
+
+/* Build version, injected by CMake (git describe --always --tags --dirty).
+ * Fallback for builds not configured through CMake (e.g. host test targets). */
+#ifndef FJ_VERSION_STRING
+#define FJ_VERSION_STRING "dev"
+#endif
 #include "pico/bootrom.h"
 #include "hardware/watchdog.h"
 
@@ -122,10 +128,11 @@ static void cmd_help(void) {
 }
 
 static void cmd_status(void) {
-    char buf[192];
+    char buf[256];
     fj_security_t sec = {0};
     bool have_sec = fj_keys_get_security(&sec);
-    snprintf(buf, sizeof(buf), "state: %s\r\n"
+    snprintf(buf, sizeof(buf), "version: %s\r\n"
+             "state: %s\r\n"
              "disk: %s\r\n"
              "pin_blocked: %s\r\n"
              "pin_fail: %u\r\n"
@@ -136,6 +143,7 @@ static void cmd_status(void) {
              "active_profile: %u\r\n"
              "profiles: %u\r\n"
              "timeout: %lus",
+             FJ_VERSION_STRING,
              fj_state_get() == FJ_STATE_UNLOCKED ? "unlocked" : "locked",
              fj_msc_is_ready() ? "unlocked" : "locked",
              (have_sec && sec.pin_blocked) ? "yes" : "no", (unsigned)sec.pin_fail,
@@ -549,7 +557,8 @@ void fj_console_task(void) {
     if (tud_cdc_connected()) {
         if (!was_connected) {
             /* First connect: print the banner and a prompt. */
-            outln("Fjaeger serial console");
+            out("Fjaeger v");
+            outln(FJ_VERSION_STRING);
             outln("Type HELP for commands.");
             out(PROMPT);
             was_connected = true;
