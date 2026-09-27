@@ -1,0 +1,18 @@
+# Treat firmware images and object files as binary so git never rewrites them
+*.uf2   binary
+*.elf   binary
+*.bin   binary
+*.hex   binary
+*.map   binary
+
+# Normalise C/C++ sources to LF
+*.c     text eol=lf
+*.h     text eol=lf
+*.pio   text eol=lf
+CMakeLists.txt text eol=lf
+*.cmake text eol=lf
+*.sh    text eol=lf
+
+# Normalise text docs to LF
+*.md    text eol=lf
+.gitignore text eol=lf

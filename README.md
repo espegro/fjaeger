@@ -401,6 +401,12 @@ ssh-keygen -Y verify -f allowed_signers -I <name> -n test -s file.txt.sig < file
   - Writing large files is slow and wears flash, because every sector update
     requires a flash erase.
 
+## Acknowledgements
+
+This project builds on the **Raspberry Pi Pico SDK** (Apache-2.0), which
+bundles **TinyUSB** (MIT) and **mbedTLS** (Apache-2.0). Fjaeger's own source is
+MIT-licensed; see [LICENSE](LICENSE).
+
 ## License
 
 [MIT](LICENSE). Copyright (c) 2026 Espen Grøndahl.
