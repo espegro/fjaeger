@@ -31,10 +31,10 @@ credentials + profiles, AES-GCM-keyed by a dedicated backup password) to the
 MSC drive so the host can copy it out, and restore it onto a fresh device with
 `RESTORE <password> <new-pin> <new-puk>`.
 
-The dongle was left **locked** after the last test. Test PIN is **`12345`**,
-PUK is **`recovery-code`**, disk PIN is **`54321`**, backup password is
-**`backup-pass-123`**. This is only a development setup and must be changed
-before real use.
+The dongle was left **unlocked** with the **active profile 1** after the last
+test (a restore set these). Current test secrets: PIN **`new-pin-1`**, PUK
+**`new-puk-1`**, disk PIN **`99999`**, backup password **`backup-pass-123`**.
+This is only a development setup and must be changed before real use.
 
 ## Build environment
 
@@ -405,6 +405,29 @@ flash:  m_enc_pin = M XOR PBKDF2(PIN, salt_pin)
 - Recovery PUK: 8-64 characters (any characters). Since the PUK can recover
   the master key, a weak PUK weakens at-rest key protection.
 - Disk PIN: 4-32 characters.
+
+### Physically verified 2026-09-27 (master key + backup/restore)
+
+Verified on the RP2350 dongle with `ssh-keygen` (`-Y sign`/`-Y verify`, which
+use the same CTAP2 `getAssertion` path as SSH login):
+
+- **PIN/PUK setup and unlock:** `SETPIN`, `UNLOCK`, `PUK`, `DISK SETPIN`,
+  `DISK UNLOCK` work; 5 wrong device PINs block the PIN; `UNLOCKPUK`
+  recovers it and resets the counters.
+- **PUK recovers the keys:** after `UNLOCKPUK`, an enrolled resident key still
+  signs (the PUK recovers the master key M). `SETPIN <new>` then re-wraps M,
+  the old PIN stops working and the key still signs with the new PIN.
+- **Credential management / signing:** `ssh-keygen -K` downloads the resident
+  key (stored public key, no decryption) with an identical fingerprint;
+  signing and verification succeed.
+- **Backup/restore round-trip:** `BACKUP backup-pass-123` wrote a 2539-byte
+  `FJAEGER.BAK` to the drive (the host copied it out, md5-matched). A factory
+  wipe, then `RESTORE backup-pass-123 <new-pin> <new-puk>` on a fresh device
+  recovered the credentials/profiles and set both new secrets; the restored
+  key signed **immediately (no reboot)** with an identical fingerprint, and
+  survived reboot.
+- **Backup deleted on lock:** locking the device removed `FJAEGER.BAK` from
+  the drive and closed the volume to the host.
 
 ## What should be tested next
 
