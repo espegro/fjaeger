@@ -103,28 +103,68 @@ static bool parse_uint(const char *s, unsigned long *value) {
 /* Command handlers                                                    */
 /* ------------------------------------------------------------------ */
 static void cmd_help(void) {
-    outln("Fjaeger commands (case-insensitive):");
+    out("Fjaeger ");
+    outln(FJ_VERSION_STRING);
+    outln("A USB security key: SSH/CTAP2 credentials and an encrypted drive.");
+    outln("");
+    outln("Concepts:");
+    outln("  * The device is LOCKED or UNLOCKED. While locked, no signing,");
+    outln("    enrollment or drive access is allowed. UNLOCK with the PIN.");
+    outln("  * The PIN unlocks the device. The PUK recovers it if you forget");
+    outln("    or lock out the PIN (5 wrong PINs block it). The PUK can set a");
+    outln("    new PIN without losing keys.");
+    outln("  * The encrypted MSC drive has its OWN disk PIN, separate from the");
+    outln("    device PIN. It must be unlocked to mount/use it.");
+    outln("  * Credentials live in named PROFILES. Only the active profile's");
+    outln("    credentials can be used or discovered.");
+    outln("");
+    outln("Commands:");
     outln("  HELP|?                     this help");
-    outln("  STATUS                     show device & disk state, slot, timeout");
-    outln("  LOCK                       lock device (and close the disk)");
-    outln("  UNLOCK <pin>               unlock device for key ops only");
-    outln("  SETPIN <pin>               set/change PIN");
-    outln("  UNLOCKPUK <puk>            unblock device with recovery PUK");
-    outln("  PUK <code>                 set/change the recovery PUK");
+    outln("  STATUS                     device & disk state, active profile, timeout");
+    outln("");
+    outln("  LOCK                       lock the device (and close the drive)");
+    outln("  UNLOCK <pin>               unlock the device for key operations");
+    outln("  SETPIN <pin>               set or change the device PIN");
+    outln("  UNLOCKPUK <puk>            unlock via the recovery PUK (also clears a PIN lock)");
+    outln("  PUK <code>                 set or change the recovery PUK");
+    outln("  TIMEOUT <sec>              auto-lock delay in seconds (default 900; 0 = off)");
+    outln("");
     outln("  DISK STATUS                show drive lock state");
-    outln("  DISK SETPIN <pin>          set/change the disk PIN");
-    outln("  DISK UNLOCK <pin>          unlock/mount the drive with disk PIN");
-    outln("  DISK UNBLOCK <puk>         clear disk-PIN block (PIN still required)");
-    outln("  DISK LOCK                  lock/unmount the drive");
-    outln("  TIMEOUT <sec>              save auto-lock delay (default 900; 0 = off)");
-    outln("  BACKUP <password>          write encrypted backup to FJAEGER.BAK");
-    outln("  RESTORE <pw> <pin> <puk>    restore backup, set new PIN and PUK");
+    outln("  DISK SETPIN <pin>          set or change the drive's disk PIN");
+    outln("  DISK UNLOCK <pin>          unlock and mount the encrypted drive");
+    outln("  DISK UNBLOCK <puk>         clear a disk-PIN lock (the disk PIN is still needed)");
+    outln("  DISK LOCK                  lock and unmount the drive");
+    outln("");
+    outln("  PROFILE LIST               list profiles, the active one and credential counts");
+    outln("  PROFILE CREATE <id> <name> create a new empty profile (id 0-7)");
+    outln("  PROFILE SELECT <id>        select and persist the active profile");
+    outln("  PROFILE RENAME <id> <name> rename a profile without touching its credentials");
+    outln("  PROFILE ERASE <id>         delete a profile and every credential in it");
+    outln("");
+    outln("  BACKUP <password>          write an encrypted backup (keys+profiles) to the drive");
+    outln("  RESTORE <pw> <pin> <puk>   restore a backup; sets a new PIN and PUK in one step");
+    outln("");
     outln("  RESET                      reboot the device");
-    outln("  PROFILE LIST               list all profiles, active flag & credential count");
-    outln("  PROFILE CREATE <id> <name> create a new empty profile (0-7)");
-    outln("  PROFILE SELECT <id>        set & save the active profile");
-    outln("  PROFILE RENAME <id> <name> rename a profile");
-    outln("  PROFILE ERASE <id>         erase a profile and its credentials");
+    outln("  RESET BOOTSEL              reboot into the USB bootloader for flashing");
+    outln("");
+    outln("SSH usage (OpenSSH talks to the key directly, not through this console):");
+    outln("  1. Make sure the device is UNLOCKED and the right PROFILE is SELECTED.");
+    outln("  2. Enroll a resident key (on the PC):");
+    outln("       ssh-keygen -t ecdsa-sk -O resident -f ~/.ssh/id_ecdsa_sk");
+    outln("     The credential is bound to the currently active profile.");
+    outln("  3. Use it for SSH login; the agent signs with the key on the device.");
+    outln("  4. Copy a resident key back to the PC with:");
+    outln("       ssh-keygen -K            (may prompt for the device PIN)");
+    outln("  5. Verify a signature (on the PC):");
+    outln("       ssh-keygen -Y sign -f ~/.ssh/id_ecdsa_sk -n <ns> <file>");
+    outln("       ssh-keygen -Y verify -f allowed_signers -I <name> -n <ns> \\");
+    outln("                       -s <file>.sig < <file>");
+    outln("  Only ECDSA P-256 / ES256 is supported (no ed25519-sk).");
+    outln("  A wrong profile returns no signature; select the owning profile first.");
+    outln("");
+    outln("Mutating commands (SETPIN, PUK, DISK SETPIN, PROFILE CREATE/SELECT/RENAME/ERASE,");
+    outln("TIMEOUT, BACKUP) require the device to be unlocked. Five wrong PINs block the");
+    outln("PIN; five wrong PUKs wipe the device (factory reset).");
 }
 
 static void cmd_status(void) {
@@ -557,7 +597,7 @@ void fj_console_task(void) {
     if (tud_cdc_connected()) {
         if (!was_connected) {
             /* First connect: print the banner and a prompt. */
-            out("Fjaeger v");
+            out("Fjaeger ");
             outln(FJ_VERSION_STRING);
             outln("Type HELP for commands.");
             out(PROMPT);
