@@ -9,8 +9,8 @@ project(fjaeger C CXX)
 # ---------------------------------------------------------------------
 # TENSTAR RP2350-USB 16 MB dongle: electrically compatible with the
 # Waveshare RP2350-Plus 16 MB profile. NOTE: this board requires Pico SDK
-# 2.1.0+ (TinyUSB with RP2350 support). Configure with
-#   -DPICO_SDK_PATH=/home/espegro/programming/pico-sdk  (2.2.0)
+# 2.1.0+ (TinyUSB with RP2350 support). Set PICO_SDK_PATH to your checkout
+# of Pico SDK 2.2.0.
 set(PICO_BOARD waveshare_rp2350_plus_16mb)
 set(PICO_CMAKE_FLAGS "-DPICO_CYW43_SUPPORTED=0")
 

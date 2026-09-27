@@ -111,14 +111,19 @@ Prerequisites: CMake ≥ 3.13, ARM-none-EABI toolchain, **Pico SDK ≥ 2.1.0**
 (preferably 2.2.0) and **`picotool`** on PATH (for flashing). The host tests
 only need `cc` (x86-64).
 
+> The Pico SDK (and the `pico-extras` submodule it references) are **not
+> vendored** in this repository; clone them next to this checkout and point
+> `PICO_SDK_PATH` at the SDK before configuring.
+
 The dongle is a **TENSTAR RP2350-USB 16 MB** and uses the board profile
 `waveshare_rp2350_plus_16mb` (electrically compatible). It builds against
 Pico SDK 2.2.0 (with TinyUSB that supports RP2350).
 
 ```bash
-# Use SDK 2.2.0 (required for RP2350 USB support)
+# Use SDK 2.2.0 (required for RP2350 USB support); point PICO_SDK_PATH at
+# wherever you cloned the Pico SDK
 cmake -S . -B build \
-  -DPICO_SDK_PATH=/home/espegro/programming/pico-sdk \
+  -DPICO_SDK_PATH=/path/to/pico-sdk \
   -DPICO_BOARD=waveshare_rp2350_plus_16mb
 cmake --build build -j$(nproc)
 ```
@@ -329,4 +334,4 @@ ssh-keygen -Y verify -f allowed_signers -I <name> -n test -s file.txt.sig < file
 
 ## License
 
-BSD-3-Clause.
+[MIT](LICENSE). Copyright (c) 2026 Espen Grøndahl.

@@ -40,7 +40,7 @@ This is only a development setup and must be changed before real use.
 
 | Component | Value |
 |---|---|
-| Pico SDK | 2.2.0 (`/home/espegro/programming/pico-sdk`) |
+| Pico SDK | 2.2.0 (set `PICO_SDK_PATH` to your checkout) |
 | Board | `waveshare_rp2350_plus_16mb` |
 | Toolchain | ARM-none-EABI GCC 14.2.1 |
 | mbedTLS | 3.x from the Pico SDK |
@@ -61,7 +61,7 @@ Build:
 
 ```bash
 cmake -S . -B build \
-  -DPICO_SDK_PATH=/home/espegro/programming/pico-sdk \
+  -DPICO_SDK_PATH=/path/to/pico-sdk \
   -DPICO_BOARD=waveshare_rp2350_plus_16mb
 cmake --build build -j$(nproc)
 ```
