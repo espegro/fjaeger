@@ -14,12 +14,24 @@
 #define PIN_MIN_LEN 4
 #define PIN_MAX_LEN 32
 
-/* PBKDF2-SHA256 of the PIN (with its salt) loaded from / persisted to the
- * flash store, plus the 16-byte CTAP2 client-PIN verifier. */
-static uint8_t pin_hash[FJ_HASH_LEN];
-static uint8_t pin_salt[FJ_PIN_SALT_LEN];
-static uint8_t pin_ctap2_verifier[16];
-static bool pin_configured = false;
+/* The unlock passphrase can be longer than a FIDO PIN; it is the primary
+ * secret that protects the master key M. */
+#define PASS_MIN_LEN 8
+#define PASS_MAX_LEN 64
+
+/* PBKDF2-SHA256 of the unlock passphrase (with its salt) loaded from /
+ * persisted to the flash store. The passphrase protects the master key M. It
+ * is independent of the CTAP2 PIN (which only authenticates the CTAP2 client
+ * PIN protocol), so a fast brute-force of the CTAP2 verifier cannot recover
+ * the passphrase that unwraps M. */
+static uint8_t pass_hash[FJ_HASH_LEN];
+static uint8_t pass_salt[FJ_PIN_SALT_LEN];
+static bool pass_configured = false;
+
+/* The 16-byte CTAP2 client-PIN verifier (LEFT(SHA-256(pin),16)), independent
+ * of the unlock passphrase. Used only by the CTAP2 clientPIN protocol. */
+static uint8_t ctap2_pin_verifier[16];
+static bool ctap2_pin_configured = false;
 
 /* The master key M, held in RAM only while the device is unlocked. It wraps
  * every CTAP2 credential private key at rest. It can be recovered by either
@@ -50,14 +62,17 @@ static fj_brute_ctx_t brute_ctx_index(fj_brute_ctx_t ctx) {
 
 void fj_state_init(void) {
     state = FJ_STATE_LOCKED;
-    pin_configured = fj_keys_pin_configured();
-    if (pin_configured)
-        fj_keys_get_pin(pin_hash, pin_salt, pin_ctap2_verifier);
+    pass_configured = fj_keys_passphrase_configured();
+    if (pass_configured)
+        fj_keys_get_passphrase(pass_hash, pass_salt);
+    ctap2_pin_configured = fj_keys_ctap2_pin_configured();
+    if (ctap2_pin_configured)
+        fj_keys_get_ctap2_pin(ctap2_pin_verifier);
     timeout_sec = FJ_DEFAULT_TIMEOUT_SEC;
     (void)fj_keys_get_timeout(&timeout_sec);
     have_unlock_time = false;
     /* The device starts locked, so no master key is available until it is
-     * unlocked with the PIN or PUK. */
+     * unlocked with the passphrase or PUK. */
     memset(master, 0, sizeof(master));
     master_available = false;
 }
@@ -67,7 +82,11 @@ fj_state_t fj_state_get(void) {
 }
 
 bool fj_state_pin_configured(void) {
-    return pin_configured;
+    return pass_configured;
+}
+
+bool fj_state_ctap2_pin_configured(void) {
+    return ctap2_pin_configured;
 }
 
 /* Unwrap the master key M using a passphrase and one of its stored wrapped
@@ -85,10 +104,10 @@ static bool master_unwrap(const char *secret, size_t len,
     return true;
 }
 
-static bool master_unwrap_pin(const char *pin, size_t len) {
+static bool master_unwrap_passphrase(const char *passphrase, size_t len) {
     uint8_t enc[32], salt[16];
     if (!fj_keys_get_master_pin_wrap(enc, salt)) return false;
-    return master_unwrap(pin, len, enc, salt);
+    return master_unwrap(passphrase, len, enc, salt);
 }
 
 static bool master_unwrap_puk(const char *puk, size_t len) {
@@ -125,29 +144,53 @@ static bool master_wrap_with(const char *secret, size_t len,
     return true;
 }
 
-bool fj_state_set_pin(const char *pin) {
+bool fj_state_set_passphrase(const char *passphrase) {
+    size_t len = strlen(passphrase);
+    if (len < PASS_MIN_LEN || len > PASS_MAX_LEN) return false;
+    /* The initial passphrase can be set on an unconfigured device. Changing
+     * an existing passphrase requires the device to have been unlocked first
+     * (so the master key is available to re-wrap). */
+    if (pass_configured && state != FJ_STATE_UNLOCKED) return false;
+
+    fj_random(pass_salt, FJ_PIN_SALT_LEN);
+    if (!fj_pbkdf2_sha256((const uint8_t *)passphrase, len, pass_salt,
+                          FJ_PIN_SALT_LEN, FJ_PBKDF2_ITERATIONS, pass_hash))
+        return false;
+
+    if (!fj_keys_set_passphrase(pass_hash, pass_salt)) return false;
+    pass_configured = true;
+    /* Ensure the master key exists and is wrapped by the new passphrase so
+     * credential private keys can be encrypted at rest. This is independent
+     * of the CTAP2 PIN. */
+    if (!master_wrap_with(passphrase, len, fj_keys_set_master_pin_wrap))
+        return false;
+    return true;
+}
+
+/* Set the CTAP2 client PIN (independent of the unlock passphrase). Stored as
+ * LEFT(SHA-256(pin),16) for the CTAP2 clientPIN protocol. Requires the device
+ * unlocked. Does not touch the master key. */
+bool fj_state_set_ctap2_pin(const char *pin) {
     size_t len = strlen(pin);
     if (len < PIN_MIN_LEN || len > PIN_MAX_LEN) return false;
-    /* The initial PIN can be set on an unconfigured device. Changing an
-     * existing PIN requires the old PIN to have unlocked the device first. */
-    if (pin_configured && state != FJ_STATE_UNLOCKED) return false;
+    if (state != FJ_STATE_UNLOCKED) return false;
 
-    fj_random(pin_salt, FJ_PIN_SALT_LEN);
-    if (!fj_pbkdf2_sha256((const uint8_t *)pin, len, pin_salt, FJ_PIN_SALT_LEN,
-                          FJ_PBKDF2_ITERATIONS, pin_hash))
-        return false;
-    /* The CTAP2 client-PIN protocol only transmits LEFT(SHA-256(pin),16), so
-     * keep a small verifier for it in addition to the PBKDF2 hash. */
     uint8_t sha[FJ_HASH_LEN];
     fj_sha256((const uint8_t *)pin, len, sha);
-    memcpy(pin_ctap2_verifier, sha, 16);
-
-    if (!fj_keys_set_pin(pin_hash, pin_salt, pin_ctap2_verifier)) return false;
-    pin_configured = true;
-    /* Ensure the master key exists and is wrapped by the new PIN so
-     * credential private keys can be encrypted at rest. */
-    if (!master_wrap_with(pin, len, fj_keys_set_master_pin_wrap)) return false;
+    memcpy(ctap2_pin_verifier, sha, 16);
+    if (!fj_keys_set_ctap2_pin(ctap2_pin_verifier)) return false;
+    ctap2_pin_configured = true;
     return true;
+}
+
+/* Verify the CTAP2 client PIN verifier (LEFT(SHA-256(pin),16)) supplied by
+ * the CTAP2 clientPIN protocol. Returns true if it matches the configured
+ * CTAP2 PIN. With no CTAP2 PIN set, accepts anything (dummy mode). */
+bool fj_state_ctap2_verify(const uint8_t verifier[16]) {
+    if (!ctap2_pin_configured) return true;   /* dummy mode */
+    uint8_t acc = 0;
+    for (int i = 0; i < 16; i++) acc |= ctap2_pin_verifier[i] ^ verifier[i];
+    return acc == 0;
 }
 
 void fj_state_lock(void) {
@@ -168,29 +211,30 @@ bool fj_state_profile_erase(unsigned profile_id) {
     return fj_keys_profile_erase(profile_id);
 }
 
-bool fj_state_unlock(const char *pin) {
-    if (!pin_configured) return false;
+bool fj_state_unlock(const char *passphrase) {
+    if (!pass_configured) return false;
 
-    /* Brute-force protection: a blocked PIN requires the PUK, and a growing
-     * delay is imposed between failed attempts. */
+    /* Brute-force protection: a blocked passphrase requires the PUK, and a
+     * growing delay is imposed between failed attempts. */
     fj_security_t sec;
     if (!fj_keys_get_security(&sec)) return false;
     if (sec.pin_blocked) return false;
     if (!fj_state_brute_ok(FJ_BRUTE_PIN)) return false;
 
     uint8_t hash[FJ_HASH_LEN];
-    if (!fj_pbkdf2_sha256((const uint8_t *)pin, strlen(pin), pin_salt,
-                          FJ_PIN_SALT_LEN, FJ_PBKDF2_ITERATIONS, hash))
+    if (!fj_pbkdf2_sha256((const uint8_t *)passphrase, strlen(passphrase),
+                          pass_salt, FJ_PIN_SALT_LEN,
+                          FJ_PBKDF2_ITERATIONS, hash))
         return false;
 
     /* Constant-time comparison to avoid timing leaks. */
     uint8_t acc = 0;
     for (size_t i = 0; i < FJ_HASH_LEN; i++) {
-        acc |= hash[i] ^ pin_hash[i];
+        acc |= hash[i] ^ pass_hash[i];
     }
     if (acc != 0) {
-        /* Wrong PIN: count it, grow the backoff delay and block once the
-         * limit is reached. */
+        /* Wrong passphrase: count it, grow the backoff delay and block once
+         * the limit is reached. */
         sec.pin_fail++;
         if (sec.pin_fail >= FJ_MAX_PIN_FAILS) sec.pin_blocked = 1;
         fj_keys_set_security(&sec);
@@ -198,7 +242,7 @@ bool fj_state_unlock(const char *pin) {
         return false;
     }
 
-    /* Correct PIN resets the counter and the backoff delay. */
+    /* Correct passphrase resets the counter and the backoff delay. */
     if (sec.pin_fail != 0 || sec.pin_blocked) {
         sec.pin_fail = 0;
         sec.pin_blocked = 0;
@@ -206,11 +250,11 @@ bool fj_state_unlock(const char *pin) {
     }
     fj_state_brute_success(FJ_BRUTE_PIN);
 
-    /* Unwrap the master key from the PIN so credential private keys can be
-     * decrypted for signing. Failure here is not fatal for the lock state
-     * itself but means SSH keys cannot be used until a PIN unlock with the
+    /* Unwrap the master key from the passphrase so credential private keys
+     * can be decrypted for signing. Failure here is not fatal for the lock
+     * state itself but means SSH keys cannot be used until an unlock with the
      * master key available. */
-    (void)master_unwrap_pin(pin, strlen(pin));
+    (void)master_unwrap_passphrase(passphrase, strlen(passphrase));
 
     state = FJ_STATE_UNLOCKED;
     unlock_since = get_absolute_time();
@@ -230,12 +274,13 @@ void fj_state_factory_reset(void) {
     fj_msc_lock();
     fj_ctap2_forget_all();
     fj_keys_wipe();
-    memset(pin_hash, 0, sizeof(pin_hash));
-    memset(pin_salt, 0, sizeof(pin_salt));
-    memset(pin_ctap2_verifier, 0, sizeof(pin_ctap2_verifier));
+    memset(pass_hash, 0, sizeof(pass_hash));
+    memset(pass_salt, 0, sizeof(pass_salt));
+    memset(ctap2_pin_verifier, 0, sizeof(ctap2_pin_verifier));
     memset(master, 0, sizeof(master));
     master_available = false;
-    pin_configured = false;
+    pass_configured = false;
+    ctap2_pin_configured = false;
     state = FJ_STATE_LOCKED;
     have_unlock_time = false;
     timeout_sec = FJ_DEFAULT_TIMEOUT_SEC;
@@ -431,11 +476,11 @@ bool fj_state_backup_write(const char *password) {
     return ok;
 }
 
-bool fj_state_backup_restore(const char *password, const char *new_pin,
+bool fj_state_backup_restore(const char *password, const char *new_pass,
                              const char *new_puk) {
-    if (!password || !new_pin || !new_puk) return false;
-    size_t pin_len = strlen(new_pin), puk_len = strlen(new_puk);
-    if (pin_len < PIN_MIN_LEN || pin_len > PIN_MAX_LEN) return false;
+    if (!password || !new_pass || !new_puk) return false;
+    size_t pass_len = strlen(new_pass), puk_len = strlen(new_puk);
+    if (pass_len < PASS_MIN_LEN || pass_len > PASS_MAX_LEN) return false;
     if (puk_len < 8 || puk_len > 64) return false;
 
     uint8_t blob[BACKUP_TOTAL(sizeof(fj_backup_payload_t))];
@@ -473,17 +518,15 @@ bool fj_state_backup_restore(const char *password, const char *new_pin,
     memset(&payload, 0, sizeof(payload));
     memset(blob, 0, sizeof(blob));
 
-    /* Set the new device PIN and re-wrap the recovered master key with it. */
-    fj_random(pin_salt, FJ_PIN_SALT_LEN);
-    if (!fj_pbkdf2_sha256((const uint8_t *)new_pin, pin_len, pin_salt,
-                          FJ_PIN_SALT_LEN, FJ_PBKDF2_ITERATIONS, pin_hash))
+    /* Set the new unlock passphrase and re-wrap the recovered master key with
+     * it. (The CTAP2 PIN is separate and is set with SETPIN afterwards.) */
+    fj_random(pass_salt, FJ_PIN_SALT_LEN);
+    if (!fj_pbkdf2_sha256((const uint8_t *)new_pass, pass_len, pass_salt,
+                          FJ_PIN_SALT_LEN, FJ_PBKDF2_ITERATIONS, pass_hash))
         return false;
-    uint8_t sha[FJ_HASH_LEN];
-    fj_sha256((const uint8_t *)new_pin, pin_len, sha);
-    memcpy(pin_ctap2_verifier, sha, 16);
-    if (!fj_keys_set_pin(pin_hash, pin_salt, pin_ctap2_verifier)) return false;
-    pin_configured = true;
-    if (!master_wrap_with(new_pin, pin_len, fj_keys_set_master_pin_wrap))
+    if (!fj_keys_set_passphrase(pass_hash, pass_salt)) return false;
+    pass_configured = true;
+    if (!master_wrap_with(new_pass, pass_len, fj_keys_set_master_pin_wrap))
         return false;
 
     /* Set the new recovery PUK and re-wrap the master key with it too. */

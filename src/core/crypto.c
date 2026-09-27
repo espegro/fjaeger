@@ -320,31 +320,32 @@ bool fj_pbkdf2_sha256(const uint8_t *password, size_t pw_len,
     return true;
 }
 
-bool fj_aes_gcm_encrypt(const uint8_t key[32], const uint8_t nonce[12],
-                        const uint8_t *in, size_t len,
-                        uint8_t *out, uint8_t tag[16]) {
+bool fj_aes_gcm_encrypt_with_aad(const uint8_t key[32], const uint8_t nonce[12],
+                                 const uint8_t *aad, size_t aad_len,
+                                 const uint8_t *in, size_t len,
+                                 uint8_t *out, uint8_t tag[16]) {
     mbedtls_gcm_context ctx;
     mbedtls_gcm_init(&ctx);
     int ret = mbedtls_gcm_setkey(&ctx, MBEDTLS_CIPHER_ID_AES, key, 256);
     if (ret != 0) { mbedtls_gcm_free(&ctx); return false; }
-    /* No AAD. The ciphertext is written in place of the plaintext. */
     ret = mbedtls_gcm_crypt_and_tag(&ctx, MBEDTLS_GCM_ENCRYPT, len,
-                                    nonce, 12, NULL, 0,
+                                    nonce, 12, aad, aad_len,
                                     in, out, 16, tag);
     mbedtls_gcm_free(&ctx);
     return ret == 0;
 }
 
-bool fj_aes_gcm_decrypt(const uint8_t key[32], const uint8_t nonce[12],
-                        const uint8_t tag[16],
-                        const uint8_t *in, size_t len, uint8_t *out) {
+bool fj_aes_gcm_decrypt_with_aad(const uint8_t key[32], const uint8_t nonce[12],
+                                 const uint8_t tag[16],
+                                 const uint8_t *aad, size_t aad_len,
+                                 const uint8_t *in, size_t len, uint8_t *out) {
     mbedtls_gcm_context ctx;
     mbedtls_gcm_init(&ctx);
     int ret = mbedtls_gcm_setkey(&ctx, MBEDTLS_CIPHER_ID_AES, key, 256);
     if (ret != 0) { mbedtls_gcm_free(&ctx); return false; }
     uint8_t check_tag[16];
     ret = mbedtls_gcm_crypt_and_tag(&ctx, MBEDTLS_GCM_DECRYPT, len,
-                                    nonce, 12, NULL, 0,
+                                    nonce, 12, aad, aad_len,
                                     in, out, 16, check_tag);
     if (ret != 0) { mbedtls_gcm_free(&ctx); return false; }
     /* Authenticate the supplied tag in constant time. */
@@ -352,4 +353,16 @@ bool fj_aes_gcm_decrypt(const uint8_t key[32], const uint8_t nonce[12],
     for (int i = 0; i < 16; i++) acc |= check_tag[i] ^ tag[i];
     mbedtls_gcm_free(&ctx);
     return acc == 0;
+}
+
+bool fj_aes_gcm_encrypt(const uint8_t key[32], const uint8_t nonce[12],
+                        const uint8_t *in, size_t len,
+                        uint8_t *out, uint8_t tag[16]) {
+    return fj_aes_gcm_encrypt_with_aad(key, nonce, NULL, 0, in, len, out, tag);
+}
+
+bool fj_aes_gcm_decrypt(const uint8_t key[32], const uint8_t nonce[12],
+                        const uint8_t tag[16],
+                        const uint8_t *in, size_t len, uint8_t *out) {
+    return fj_aes_gcm_decrypt_with_aad(key, nonce, tag, NULL, 0, in, len, out);
 }

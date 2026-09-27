@@ -662,28 +662,37 @@ void fj_msc_init(void) {
     fs_initialised = false;
 }
 
-/* Derive the 32-byte disk wrap/verification key from the disk PIN and salt
- * using slow, salted PBKDF2-HMAC-SHA256. The same value is used both to wrap
- * the disk key and to verify the PIN, so a dumped store cannot be brute-forced
- * offline with a fast hash. */
+/* Derive the 32-byte disk key-wrapping key from the disk PIN and salt using
+ * slow, salted PBKDF2-HMAC-SHA256. The disk key is protected with AES-256-GCM
+ * keyed by this value; the GCM tag verifies the PIN and the ciphertext, so no
+ * separate verification hash is stored (which would otherwise reveal the disk
+ * key as ciphertext XOR hash). */
+#define DISK_WRAP_AAD "Fjaeger disk key v1"
+
 static bool disk_derive(const char *pin, const uint8_t salt[16], uint8_t out[32]) {
     return fj_pbkdf2_sha256((const uint8_t *)pin, strlen(pin), salt, 16,
                             FJ_PBKDF2_ITERATIONS, out);
 }
 
-/* Verify the disk PIN (constant-time) and unwrap the disk key into disk_key. */
+/* Verify the disk PIN and unwrap the disk key into disk_key. Returns false on
+ * a wrong PIN (AES-GCM tag mismatch). */
 static bool disk_unwrap(const char *pin) {
-    uint8_t enc[32], salt[16], hash[32];
-    fj_keys_get_disk_secret(enc, salt, hash);
+    uint8_t enc[32], salt[16], nonce[12], tag[16];
+    fj_keys_get_disk_secret(enc, salt, nonce, tag);
 
-    uint8_t w[32];
-    if (!disk_derive(pin, salt, w)) return false;
+    uint8_t k[32];
+    if (!disk_derive(pin, salt, k)) return false;
 
-    uint8_t acc = 0;
-    for (int i = 0; i < 32; i++) acc |= w[i] ^ hash[i];
-    if (acc != 0) return false;
+    uint8_t key[32];
+    bool ok = fj_aes_gcm_decrypt_with_aad(k, nonce, tag,
+                                          (const uint8_t *)DISK_WRAP_AAD,
+                                          sizeof(DISK_WRAP_AAD) - 1,
+                                          enc, sizeof(enc), key);
+    memset(k, 0, sizeof(k));
+    if (!ok) return false;
 
-    for (int i = 0; i < 32; i++) disk_key[i] = enc[i] ^ w[i];
+    memcpy(disk_key, key, sizeof(disk_key));
+    memset(key, 0, sizeof(key));
     return true;
 }
 
@@ -772,7 +781,7 @@ bool fj_msc_set_pin(const char *pin) {
     size_t n = pin ? strlen(pin) : 0;
     if (n < 4 || n > 32) return false;
 
-    uint8_t salt[16], enc[32], wrap[32], hash[32];
+    uint8_t salt[16], nonce[12], enc[32], wrap[32], tag[16];
     if (!fj_keys_disk_secret_set()) {
         /* First-time: generate a fresh master secret for the drive. */
         fj_random(salt, sizeof(salt));
@@ -784,10 +793,20 @@ bool fj_msc_set_pin(const char *pin) {
     }
 
     if (!disk_derive(pin, salt, wrap)) return false;
-    for (int i = 0; i < 32; i++) enc[i] = disk_key[i] ^ wrap[i];
-    memcpy(hash, wrap, 32);   /* verification hash == wrap key (same PBKDF2) */
+    fj_random(nonce, sizeof(nonce));
+    /* Authenticated key wrapping: enc, tag = AES-GCM(wrap, nonce, disk_key).
+     * No separate verification hash is stored, so the disk key cannot be
+     * recovered as a simple XOR of two persisted values. */
+    if (!fj_aes_gcm_encrypt_with_aad(wrap, nonce,
+                                     (const uint8_t *)DISK_WRAP_AAD,
+                                     sizeof(DISK_WRAP_AAD) - 1,
+                                     disk_key, sizeof(disk_key), enc, tag)) {
+        memset(wrap, 0, sizeof(wrap));
+        return false;
+    }
+    memset(wrap, 0, sizeof(wrap));
 
-    if (!fj_keys_set_disk_secret(enc, salt, hash)) return false;
+    if (!fj_keys_set_disk_secret(enc, salt, nonce, tag)) return false;
     if (!fj_msc_prepare()) return false;
     disk_unlocked = true;
     disk_ready = true;

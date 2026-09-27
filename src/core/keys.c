@@ -13,19 +13,36 @@
  * Each update erases and programs only the older copy. A generation number
  * and CRC select the newest complete record after a reset or power loss. */
 #define STORE_MAGIC   0x464A5345u /* "FJSE" */
-#define STORE_VERSION 12u
+#define STORE_VERSION 14u
 #define FLASH_OFFSET_BYTES (PICO_FLASH_SIZE_BYTES - (2 * FLASH_SECTOR_SIZE))
 
 typedef struct {
-    uint8_t  pin_hash[32];       /* PBKDF2-SHA256(pin, pin_salt) for console */
-    uint8_t  pin_salt[16];
-    uint8_t  pin_ctap2_verifier[16]; /* LEFT(SHA-256(pin),16) for CTAP2 PIN */
-    uint8_t  pin_configured;     /* 1 once the device PIN is set */
+    /* Unlock passphrase (v14): protects the master key M. Stored as a salted
+     * PBKDF2 hash. This is INDEPENDENT of the CTAP2 PIN, so a flash dump that
+     * brute-forces the (fast) CTAP2 verifier cannot recover the passphrase
+     * that unwraps M. */
+    uint8_t  pass_hash[32];        /* PBKDF2-SHA256(passphrase, pass_salt) */
+    uint8_t  pass_salt[16];
+    uint8_t  pass_configured;      /* 1 once the unlock passphrase is set */
+    /* CTAP2 PIN (v14): used only by the CTAP2 clientPIN protocol. Stored as
+     * LEFT(SHA-256(pin),16) because the CTAP2 protocol only transmits that
+     * value. It does NOT protect M, so its fast offline brute-force yields at
+     * most a pinUvAuthToken, never the credential keys. */
+    uint8_t  ctap2_verifier[16];
+    uint8_t  ctap2_pin_configured; /* 1 once a CTAP2 PIN is set */
     fj_profile_t profiles[FJ_NUM_PROFILES];
     fj_ctap2_cred_t ctap2[FJ_CTAP2_CREDS];
-    uint8_t  disk_secret_enc[32];  /* disk key, XOR-wrapped by PBKDF2(disk PIN) */
+    /* Disk secret (v13): the random AES-XTS disk key is protected with
+     * authenticated key wrapping. K = PBKDF2(disk PIN, disk_pin_salt), then
+     * disk_secret_enc, disk_wrap_tag = AES-256-GCM(K, disk_wrap_nonce,
+     * disk_key). The GCM tag both authenticates the ciphertext and verifies
+     * the disk PIN (a wrong PIN fails decryption). A separate verification
+     * hash is deliberately NOT stored, so a flash dump cannot derive the disk
+     * key (disk_secret_enc XOR hash). */
+    uint8_t  disk_secret_enc[32];  /* AES-GCM ciphertext of the disk key */
     uint8_t  disk_pin_salt[16];
-    uint8_t  disk_pin_hash[32];    /* PBKDF2-SHA256(disk PIN, salt) for verify */
+    uint8_t  disk_wrap_nonce[12];
+    uint8_t  disk_wrap_tag[16];
     uint8_t  disk_secret_valid;    /* 1 once the disk PIN/secret are set */
     /* Brute-force protection (v5). */
     uint8_t  pin_fail;             /* wrong device-PIN attempts */
@@ -234,26 +251,36 @@ bool fj_keys_backup_restore(const fj_backup_payload_t *in) {
     return write_store();
 }
 
-bool fj_keys_set_pin(const uint8_t pbkdf2_hash[32], const uint8_t salt[16],
-                     const uint8_t ctap2_verifier[16]) {
-    memcpy(store.pin_hash, pbkdf2_hash, 32);
-    memcpy(store.pin_salt, salt, 16);
-    memcpy(store.pin_ctap2_verifier, ctap2_verifier, 16);
-    store.pin_configured = 1;
+bool fj_keys_set_passphrase(const uint8_t pbkdf2_hash[32], const uint8_t salt[16]) {
+    memcpy(store.pass_hash, pbkdf2_hash, 32);
+    memcpy(store.pass_salt, salt, 16);
+    store.pass_configured = 1;
     store.pin_fail = 0;
     store.pin_blocked = 0;
     return write_store();
 }
 
-bool fj_keys_pin_configured(void) {
-    return store_loaded && store.pin_configured != 0;
+bool fj_keys_passphrase_configured(void) {
+    return store_loaded && store.pass_configured != 0;
 }
 
-void fj_keys_get_pin(uint8_t pbkdf2_hash[32], uint8_t salt[16],
-                     uint8_t ctap2_verifier[16]) {
-    memcpy(pbkdf2_hash, store.pin_hash, 32);
-    memcpy(salt, store.pin_salt, 16);
-    memcpy(ctap2_verifier, store.pin_ctap2_verifier, 16);
+void fj_keys_get_passphrase(uint8_t pbkdf2_hash[32], uint8_t salt[16]) {
+    memcpy(pbkdf2_hash, store.pass_hash, 32);
+    memcpy(salt, store.pass_salt, 16);
+}
+
+bool fj_keys_set_ctap2_pin(const uint8_t verifier[16]) {
+    memcpy(store.ctap2_verifier, verifier, 16);
+    store.ctap2_pin_configured = 1;
+    return write_store();
+}
+
+bool fj_keys_ctap2_pin_configured(void) {
+    return store_loaded && store.ctap2_pin_configured != 0;
+}
+
+void fj_keys_get_ctap2_pin(uint8_t verifier[16]) {
+    memcpy(verifier, store.ctap2_verifier, 16);
 }
 
 bool fj_keys_disk_secret_set(void) {
@@ -261,18 +288,21 @@ bool fj_keys_disk_secret_set(void) {
     return store.disk_secret_valid != 0;
 }
 
-void fj_keys_get_disk_secret(uint8_t enc[32], uint8_t salt[16], uint8_t hash[32]) {
+void fj_keys_get_disk_secret(uint8_t enc[32], uint8_t salt[16],
+                             uint8_t nonce[12], uint8_t tag[16]) {
     memcpy(enc, store.disk_secret_enc, 32);
     memcpy(salt, store.disk_pin_salt, 16);
-    memcpy(hash, store.disk_pin_hash, 32);
+    memcpy(nonce, store.disk_wrap_nonce, 12);
+    memcpy(tag, store.disk_wrap_tag, 16);
 }
 
 bool fj_keys_set_disk_secret(const uint8_t enc[32], const uint8_t salt[16],
-                             const uint8_t hash[32]) {
+                             const uint8_t nonce[12], const uint8_t tag[16]) {
     if (!store_loaded) return false;
     memcpy(store.disk_secret_enc, enc, 32);
     memcpy(store.disk_pin_salt, salt, 16);
-    memcpy(store.disk_pin_hash, hash, 32);
+    memcpy(store.disk_wrap_nonce, nonce, 12);
+    memcpy(store.disk_wrap_tag, tag, 16);
     store.disk_secret_valid = 1;
     store.disk_fail = 0;
     store.disk_blocked = 0;

@@ -117,24 +117,29 @@ unsigned fj_keys_active_profile(void);
 /* Persist the whole store to flash. */
 bool fj_keys_flush(void);
 
-/* Persist the device PIN. Three values derived from the same PIN are stored:
- * a PBKDF2-HMAC-SHA256 hash (for console UNLOCK), its random salt, and a
- * 16-byte CTAP2 client-PIN verifier (LEFT(SHA-256(pin),16)) — the CTAP2 PIN
- * protocol only transmits that value, so it cannot be verified against a
- * PBKDF2 hash. */
-bool fj_keys_set_pin(const uint8_t pbkdf2_hash[32], const uint8_t salt[16],
-                     const uint8_t ctap2_verifier[16]);
-bool fj_keys_pin_configured(void);
-void fj_keys_get_pin(uint8_t pbkdf2_hash[32], uint8_t salt[16],
-                     uint8_t ctap2_verifier[16]);
+/* Persist the device unlock passphrase as a salted PBKDF2-HMAC-SHA256 hash.
+ * The passphrase protects the master key M; it is independent of the CTAP2
+ * PIN. */
+bool fj_keys_set_passphrase(const uint8_t pbkdf2_hash[32], const uint8_t salt[16]);
+bool fj_keys_passphrase_configured(void);
+void fj_keys_get_passphrase(uint8_t pbkdf2_hash[32], uint8_t salt[16]);
 
-/* The MSC drive's secret is wrapped by a dedicated disk PIN. These accessors
- * read/write the stored (wrapped) secret, its KDF salt and the PBKDF2 disk-PIN
- * hash. See msc_disk.c for how the secret is wrapped/unwrapped. */
+/* Persist the CTAP2 client PIN, stored as LEFT(SHA-256(pin),16) — the CTAP2
+ * PIN protocol only transmits that value. The CTAP2 PIN does NOT protect M,
+ * so a fast offline brute-force of it yields at most a pinUvAuthToken. */
+bool fj_keys_set_ctap2_pin(const uint8_t verifier[16]);
+bool fj_keys_ctap2_pin_configured(void);
+void fj_keys_get_ctap2_pin(uint8_t verifier[16]);
+
+/* The MSC drive's secret is a random AES-XTS key protected with authenticated
+ * key wrapping (AES-256-GCM) keyed by PBKDF2(disk PIN). These accessors
+ * read/write the stored ciphertext, its KDF salt, nonce and GCM tag. See
+ * msc_disk.c for the wrap/unwrap. */
 bool fj_keys_disk_secret_set(void);
-void fj_keys_get_disk_secret(uint8_t enc[32], uint8_t salt[16], uint8_t hash[32]);
+void fj_keys_get_disk_secret(uint8_t enc[32], uint8_t salt[16],
+                             uint8_t nonce[12], uint8_t tag[16]);
 bool fj_keys_set_disk_secret(const uint8_t enc[32], const uint8_t salt[16],
-                             const uint8_t hash[32]);
+                             const uint8_t nonce[12], const uint8_t tag[16]);
 
 /* The master key M protects every CTAP2 credential private key at rest. M is
  * a random 32-byte key wrapped independently by the device PIN and by the

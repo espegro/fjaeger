@@ -97,6 +97,18 @@ bool fj_aes_gcm_decrypt(const uint8_t key[32], const uint8_t nonce[12],
                         const uint8_t tag[16],
                         const uint8_t *in, size_t len, uint8_t *out);
 
+/* AES-256-GCM with additional authenticated data (AAD). Use the AAD variants
+ * to bind non-encrypted metadata (or a domain/version label) to the
+ * ciphertext, so changing it invalidates the authentication tag. */
+bool fj_aes_gcm_encrypt_with_aad(const uint8_t key[32], const uint8_t nonce[12],
+                                 const uint8_t *aad, size_t aad_len,
+                                 const uint8_t *in, size_t len,
+                                 uint8_t *out, uint8_t tag[16]);
+bool fj_aes_gcm_decrypt_with_aad(const uint8_t key[32], const uint8_t nonce[12],
+                                 const uint8_t tag[16],
+                                 const uint8_t *aad, size_t aad_len,
+                                 const uint8_t *in, size_t len, uint8_t *out);
+
 /* Whether the crypto subsystem initialised correctly. */
 bool fj_crypto_ok(void);
 

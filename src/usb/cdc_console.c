@@ -5,7 +5,8 @@
  *   HELP
  *   STATUS
  *   LOCK
- *   UNLOCK <pin>
+ *   UNLOCK <passphrase>
+ *   SETPASS <passphrase>
  *   SETPIN <pin>
  *   PROFILE LIST
  *   PROFILE CREATE <id> <name>
@@ -109,12 +110,13 @@ static void cmd_help(void) {
     outln("");
     outln("Concepts:");
     outln("  * The device is LOCKED or UNLOCKED. While locked, no signing,");
-    outln("    enrollment or drive access is allowed. UNLOCK with the PIN.");
-    outln("  * The PIN unlocks the device. The PUK recovers it if you forget");
-    outln("    or lock out the PIN (5 wrong PINs block it). The PUK can set a");
-    outln("    new PIN without losing keys.");
+    outln("    enrollment or drive access is allowed. UNLOCK with the passphrase.");
+    outln("  * The UNLOCK PASSPHRASE protects your SSH keys. The PUK recovers it");
+    outln("    if you forget or lock it out (5 wrong attempts block it).");
+    outln("  * The CTAP2 PIN is separate: it only authenticates the FIDO/WebAuthn");
+    outln("    protocol (e.g. ssh-keygen -K). It does NOT unlock the device.");
     outln("  * The encrypted MSC drive has its OWN disk PIN, separate from the");
-    outln("    device PIN. It must be unlocked to mount/use it.");
+    outln("    device. It must be unlocked to mount/use it.");
     outln("  * Credentials live in named PROFILES. Only the active profile's");
     outln("    credentials can be used or discovered.");
     outln("");
@@ -123,9 +125,10 @@ static void cmd_help(void) {
     outln("  STATUS                     device & disk state, active profile, timeout");
     outln("");
     outln("  LOCK                       lock the device (and close the drive)");
-    outln("  UNLOCK <pin>               unlock the device for key operations");
-    outln("  SETPIN <pin>               set or change the device PIN");
-    outln("  UNLOCKPUK <puk>            unlock via the recovery PUK (also clears a PIN lock)");
+    outln("  UNLOCK <passphrase>        unlock the device (protects your SSH keys)");
+    outln("  SETPASS <passphrase>       set or change the unlock passphrase");
+    outln("  SETPIN <pin>               set/change the CTAP2 PIN (FIDO protocol only)");
+    outln("  UNLOCKPUK <puk>            unlock via the recovery PUK (clears a lockout)");
     outln("  PUK <code>                 set or change the recovery PUK");
     outln("  TIMEOUT <sec>              auto-lock delay in seconds (default 900; 0 = off)");
     outln("");
@@ -142,19 +145,20 @@ static void cmd_help(void) {
     outln("  PROFILE ERASE <id>         delete a profile and every credential in it");
     outln("");
     outln("  BACKUP <password>          write an encrypted backup (keys+profiles) to the drive");
-    outln("  RESTORE <pw> <pin> <puk>   restore a backup; sets a new PIN and PUK in one step");
+    outln("  RESTORE <pw> <pass> <puk>  restore a backup; sets a new passphrase and PUK");
     outln("");
     outln("  RESET                      reboot the device");
     outln("  RESET BOOTSEL              reboot into the USB bootloader for flashing");
     outln("");
     outln("SSH usage (OpenSSH talks to the key directly, not through this console):");
-    outln("  1. Make sure the device is UNLOCKED and the right PROFILE is SELECTED.");
+    outln("  1. Make sure the device is UNLOCKED (passphrase) and the right");
+    outln("     PROFILE is SELECTED.");
     outln("  2. Enroll a resident key (on the PC):");
     outln("       ssh-keygen -t ecdsa-sk -O resident -f ~/.ssh/id_ecdsa_sk");
     outln("     The credential is bound to the currently active profile.");
     outln("  3. Use it for SSH login; the agent signs with the key on the device.");
     outln("  4. Copy a resident key back to the PC with:");
-    outln("       ssh-keygen -K            (may prompt for the device PIN)");
+    outln("       ssh-keygen -K            (may prompt for the CTAP2 PIN)");
     outln("  5. Verify a signature (on the PC):");
     outln("       ssh-keygen -Y sign -f ~/.ssh/id_ecdsa_sk -n <ns> <file>");
     outln("       ssh-keygen -Y verify -f allowed_signers -I <name> -n <ns> \\");
@@ -162,9 +166,10 @@ static void cmd_help(void) {
     outln("  Only ECDSA P-256 / ES256 is supported (no ed25519-sk).");
     outln("  A wrong profile returns no signature; select the owning profile first.");
     outln("");
-    outln("Mutating commands (SETPIN, PUK, DISK SETPIN, PROFILE CREATE/SELECT/RENAME/ERASE,");
-    outln("TIMEOUT, BACKUP) require the device to be unlocked. Five wrong PINs block the");
-    outln("PIN; five wrong PUKs wipe the device (factory reset).");
+    outln("Mutating commands (SETPASS, SETPIN, PUK, DISK SETPIN, PROFILE");
+    outln("CREATE/SELECT/RENAME/ERASE, TIMEOUT, BACKUP) require the device to be");
+    outln("unlocked. Five wrong passphrase/PIN attempts block; five wrong PUKs");
+    outln("wipe the device (factory reset).");
 }
 
 static void cmd_status(void) {
@@ -199,16 +204,16 @@ static void cmd_lock(void) {
     outln("OK locked");
 }
 
-static void cmd_unlock(const char *pin) {
-    if (!pin) {
-        outln("ERR usage: UNLOCK <pin>");
+static void cmd_unlock(const char *passphrase) {
+    if (!passphrase) {
+        outln("ERR usage: UNLOCK <passphrase>");
         return;
     }
     if (fj_state_pin_blocked()) {
-        outln("ERR PIN blocked, use UNLOCKPUK <puk>");
+        outln("ERR passphrase blocked, use UNLOCKPUK <puk>");
         return;
     }
-    if (fj_state_unlock(pin)) {
+    if (fj_state_unlock(passphrase)) {
         /* Only unlocks the device for key operations. The encrypted drive
          * is a separate step: DISK UNLOCK. */
         outln("OK unlocked");
@@ -218,13 +223,13 @@ static void cmd_unlock(const char *pin) {
         if (sec.pin_blocked) {
             char buf[64];
             snprintf(buf, sizeof(buf),
-                     "ERR PIN blocked after %u fails, use UNLOCKPUK <puk>",
+                     "ERR passphrase blocked after %u fails, use UNLOCKPUK <puk>",
                      (unsigned)FJ_MAX_PIN_FAILS);
             outln(buf);
         } else {
             char buf[64];
             snprintf(buf, sizeof(buf),
-                     "ERR bad pin (%u/%u left)", (unsigned)FJ_MAX_PIN_FAILS - sec.pin_fail,
+                     "ERR bad passphrase (%u/%u left)", (unsigned)FJ_MAX_PIN_FAILS - sec.pin_fail,
                      (unsigned)FJ_MAX_PIN_FAILS);
             outln(buf);
         }
@@ -283,10 +288,10 @@ static void cmd_backup(const char *password) {
 /* RESTORE <password> <new-pin> <new-puk> — read FJAEGER.BAK from the MSC
  * drive, decrypt it and import the credentials/profiles/master key, setting
  * a new PIN and PUK in one step. */
-static void cmd_restore(const char *password, const char *new_pin,
+static void cmd_restore(const char *password, const char *new_pass,
                         const char *new_puk) {
-    if (!password || !new_pin || !new_puk) {
-        outln("ERR usage: RESTORE <password> <new-pin> <new-puk>");
+    if (!password || !new_pass || !new_puk) {
+        outln("ERR usage: RESTORE <password> <new-passphrase> <new-puk>");
         return;
     }
     if (strlen(password) < 8 || strlen(password) > 64) {
@@ -297,10 +302,10 @@ static void cmd_restore(const char *password, const char *new_pin,
         outln("ERR drive not mounted; DISK UNLOCK <pin> first");
         return;
     }
-    if (fj_state_backup_restore(password, new_pin, new_puk)) {
-        outln("OK restored with new PIN and PUK");
+    if (fj_state_backup_restore(password, new_pass, new_puk)) {
+        outln("OK restored with new passphrase and PUK");
     } else {
-        outln("ERR restore failed (bad password, no backup, or invalid pin/puk)");
+        outln("ERR restore failed (bad password, no backup, or invalid pass/puk)");
     }
 }
 
@@ -372,10 +377,22 @@ static void cmd_setpin(const char *pin) {
         outln("ERR usage: SETPIN <pin>");
         return;
     }
-    if (fj_state_set_pin(pin)) {
-        outln("OK pin set");
+    if (fj_state_set_ctap2_pin(pin)) {
+        outln("OK CTAP2 PIN set");
     } else {
-        outln("ERR invalid pin or device locked");
+        outln("ERR invalid CTAP2 PIN or device locked");
+    }
+}
+
+static void cmd_setpass(const char *passphrase) {
+    if (!passphrase) {
+        outln("ERR usage: SETPASS <passphrase>");
+        return;
+    }
+    if (fj_state_set_passphrase(passphrase)) {
+        outln("OK unlock passphrase set");
+    } else {
+        outln("ERR invalid passphrase (8-64 chars) or device locked");
     }
 }
 
@@ -551,6 +568,8 @@ static void dispatch(char *cmdline) {
         cmd_set_puk(next_token(&p));
     } else if (strcasecmp(tok, "setpin") == 0) {
         cmd_setpin(next_token(&p));
+    } else if (strcasecmp(tok, "setpass") == 0) {
+        cmd_setpass(next_token(&p));
     } else if (strcasecmp(tok, "disk") == 0) {
         cmd_disk(next_token(&p), p);
     } else if (strcasecmp(tok, "profile") == 0) {

@@ -110,20 +110,20 @@ bool fj_pbkdf2_sha256(const uint8_t *pw, size_t pw_len, const uint8_t *salt,
     return true;
 }
 
-bool fj_keys_set_pin(const uint8_t pbkdf2_hash[32], const uint8_t salt[16],
-                     const uint8_t ctap2_verifier[16]) {
+bool fj_keys_set_passphrase(const uint8_t pbkdf2_hash[32], const uint8_t salt[16]) {
     memcpy(stored_pin, pbkdf2_hash, 32);
     memcpy(stored_pin_salt, salt, 16);
-    (void)ctap2_verifier;
     have_pin = true;
     return true;
 }
-bool fj_keys_pin_configured(void) { return have_pin; }
-void fj_keys_get_pin(uint8_t pbkdf2_hash[32], uint8_t salt[16], uint8_t ctap2_verifier[16]) {
+bool fj_keys_passphrase_configured(void) { return have_pin; }
+void fj_keys_get_passphrase(uint8_t pbkdf2_hash[32], uint8_t salt[16]) {
     memcpy(pbkdf2_hash, stored_pin, 32);
     memcpy(salt, stored_pin_salt, 16);
-    (void)ctap2_verifier;
 }
+bool fj_keys_set_ctap2_pin(const uint8_t verifier[16]) { (void)verifier; return true; }
+bool fj_keys_ctap2_pin_configured(void) { return false; }
+void fj_keys_get_ctap2_pin(uint8_t verifier[16]) { (void)verifier; }
 void fj_led_pin_lock(void) {}
 void fj_led_pin_unlock(void) {}
 void fj_led_sign(void) {}
@@ -266,8 +266,8 @@ int main(void) {
     seed_store();
     active_profile = 1;
     fj_state_init();          /* unlock the device so makeCredential proceeds */
-    assert(fj_state_set_pin("12345"));
-    assert(fj_state_unlock("12345"));
+    assert(fj_state_set_passphrase("testpass1"));
+    assert(fj_state_unlock("testpass1"));
     assert(fj_state_get() == FJ_STATE_UNLOCKED);
     fj_ctap2_init();          /* load persisted (A profile 1, B profile 0) */
 

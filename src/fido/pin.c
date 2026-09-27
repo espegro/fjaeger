@@ -207,22 +207,17 @@ static size_t get_pin_token(const uint8_t *req, size_t len,
     if (!fj_aes_cbc(secret, zero_iv, left16, sizeof(left16), false))
         return ctap_err(out, cap, ERR_INVALID_PARAMETER);
 
-    /* Verify against the stored CTAP2 client-PIN verifier, if a PIN is set.
-     * The verifier is LEFT(SHA-256(pin),16); the CTAP2 PIN protocol only
-     * transmits that value, so it cannot be checked against the PBKDF2 hash
-     * used by the console. */
-    bool pin_set = fj_keys_pin_configured();
-    if (pin_set) {
-        uint8_t pbkdf2[32], salt[16], verifier[16];
-        fj_keys_get_pin(pbkdf2, salt, verifier);
-        if (memcmp(left16, verifier, 16) != 0) {
-            sec.pin_fail++;
-            if (sec.pin_fail >= FJ_MAX_PIN_FAILS) sec.pin_blocked = 1;
-            fj_keys_set_security(&sec);
-            fj_state_brute_failure(FJ_BRUTE_PIN);
-            return ctap_err(out, cap, sec.pin_blocked ? ERR_PIN_BLOCKED
-                                                      : ERR_PIN_INVALID);
-        }
+    /* Verify against the CTAP2 client-PIN verifier (LEFT(SHA-256(pin),16)).
+     * The CTAP2 PIN is independent of the device unlock passphrase, so a
+     * fast brute-force of this verifier yields at most a pinUvAuthToken and
+     * never the master key M. */
+    if (!fj_state_ctap2_verify(left16)) {
+        sec.pin_fail++;
+        if (sec.pin_fail >= FJ_MAX_PIN_FAILS) sec.pin_blocked = 1;
+        fj_keys_set_security(&sec);
+        fj_state_brute_failure(FJ_BRUTE_PIN);
+        return ctap_err(out, cap, sec.pin_blocked ? ERR_PIN_BLOCKED
+                                                  : ERR_PIN_INVALID);
     }
 
     /* Correct (or dummy-mode): reset the retry counter and mint a token. */

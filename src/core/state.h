@@ -29,16 +29,17 @@ void fj_state_init(void);
 /* Current lock state. */
 fj_state_t fj_state_get(void);
 
-/* Whether a PIN has been provisioned. */
+/* Whether the unlock passphrase has been provisioned. */
 bool fj_state_pin_configured(void);
 
 /* Lock immediately (manual lock or auto-relock timeout). */
 void fj_state_lock(void);
 
-/* Attempt to unlock with the given PIN. Returns true on success. */
-bool fj_state_unlock(const char *pin);
+/* Attempt to unlock with the given unlock passphrase (protects the master
+ * key M). Returns true on success. */
+bool fj_state_unlock(const char *passphrase);
 
-/* Whether the device PIN is currently blocked (needs a PUK). */
+/* Whether the device passphrase is currently blocked (needs a PUK). */
 bool fj_state_pin_blocked(void);
 
 /* Result of a PUK unlock attempt. */
@@ -63,9 +64,22 @@ void fj_state_factory_reset(void);
 /* Set (or change) the recovery PUK. Requires the device to be unlocked. */
 bool fj_state_set_puk(const char *puk);
 
-/* Set (or change) the PIN. Stored as a SHA-256 hash. Returns true on
- * success. */
-bool fj_state_set_pin(const char *pin);
+/* Set (or change) the device unlock passphrase. Protects the master key M.
+ * Returns true on success. */
+bool fj_state_set_passphrase(const char *passphrase);
+
+/* Set (or change) the CTAP2 client PIN. Independent of the unlock
+ * passphrase; used only by the CTAP2 clientPIN protocol. Requires the device
+ * unlocked. Returns true on success. */
+bool fj_state_set_ctap2_pin(const char *pin);
+
+/* Whether a CTAP2 client PIN has been provisioned. */
+bool fj_state_ctap2_pin_configured(void);
+
+/* Verify a CTAP2 client-PIN verifier (LEFT(SHA-256(pin),16)) supplied by the
+ * CTAP2 clientPIN protocol. With no CTAP2 PIN set, accepts anything (dummy
+ * mode). */
+bool fj_state_ctap2_verify(const uint8_t verifier[16]);
 
 /* The credential wrapping key (CWK), held in RAM only while the device is
  * unlocked. ctap2.c uses it to encrypt/decrypt credential private keys at
@@ -82,10 +96,11 @@ bool fj_state_backup_write(const char *password);
 
 /* Restore a backup file from the MSC drive. Decrypts with the backup
  * password, imports the credentials, profiles and active profile, and
- * re-wraps the recovered master key with the supplied new device PIN and
- * new recovery PUK in one atomic step. The device is left unlocked. Returns
- * true on success. */
-bool fj_state_backup_restore(const char *password, const char *new_pin,
+ * re-wraps the recovered master key with the supplied new unlock passphrase
+ * and new recovery PUK in one atomic step. The device is left unlocked (a
+ * CTAP2 PIN, if wanted, is set separately with SETPIN). Returns true on
+ * success. */
+bool fj_state_backup_restore(const char *password, const char *new_pass,
                              const char *new_puk);
 
 /* Erase a profile and every credential bound to it as one consistent

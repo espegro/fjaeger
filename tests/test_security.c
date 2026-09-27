@@ -16,6 +16,7 @@ static uint8_t stored_puk[32];
 static uint8_t stored_puk_salt[16];
 static bool have_pin;
 static bool have_puk;
+static bool have_ctap2;
 static fj_security_t security;
 static int64_t now_us;
 static unsigned disk_lock_count;
@@ -67,24 +68,32 @@ bool fj_pbkdf2_sha256(const uint8_t *pw, size_t pw_len, const uint8_t *salt,
     return true;
 }
 
-bool fj_keys_set_pin(const uint8_t pbkdf2_hash[32], const uint8_t salt[16],
-                     const uint8_t ctap2_verifier[16]) {
+bool fj_keys_set_passphrase(const uint8_t pbkdf2_hash[32], const uint8_t salt[16]) {
     memcpy(stored_pin, pbkdf2_hash, 32);
     memcpy(stored_pin_salt, salt, 16);
-    memcpy(stored_ctap2_verifier, ctap2_verifier, 16);
     have_pin = true;
     security.pin_fail = 0;
     security.pin_blocked = 0;
     return true;
 }
 
-bool fj_keys_pin_configured(void) { return have_pin; }
+bool fj_keys_passphrase_configured(void) { return have_pin; }
 
-void fj_keys_get_pin(uint8_t pbkdf2_hash[32], uint8_t salt[16],
-                     uint8_t ctap2_verifier[16]) {
+void fj_keys_get_passphrase(uint8_t pbkdf2_hash[32], uint8_t salt[16]) {
     memcpy(pbkdf2_hash, stored_pin, 32);
     memcpy(salt, stored_pin_salt, 16);
-    memcpy(ctap2_verifier, stored_ctap2_verifier, 16);
+}
+
+bool fj_keys_set_ctap2_pin(const uint8_t verifier[16]) {
+    memcpy(stored_ctap2_verifier, verifier, 16);
+    have_ctap2 = true;
+    return true;
+}
+
+bool fj_keys_ctap2_pin_configured(void) { return have_ctap2; }
+
+void fj_keys_get_ctap2_pin(uint8_t verifier[16]) {
+    memcpy(verifier, stored_ctap2_verifier, 16);
 }
 void fj_led_pin_lock(void) {}
 void fj_led_pin_unlock(void) {}
@@ -129,6 +138,7 @@ void fj_keys_wipe(void) {
     memset(stored_m_salt_puk, 0, sizeof(stored_m_salt_puk));
     have_pin = false;
     have_puk = false;
+    have_ctap2 = false;
     have_timeout = false;
     have_master = false;
     wipe_count++;
@@ -245,6 +255,7 @@ static void reset_fixture(void) {
     memset(stored_m_salt_puk, 0, sizeof(stored_m_salt_puk));
     have_pin = false;
     have_puk = false;
+    have_ctap2 = false;
     have_timeout = false;
     have_master = false;
     now_us = 0;
@@ -263,8 +274,8 @@ static void reset_fixture(void) {
 
 static void test_pin_block_and_puk_recovery(void) {
     reset_fixture();
-    assert(fj_state_set_pin("12345"));
-    assert(fj_state_unlock("12345"));
+    assert(fj_state_set_passphrase("testpass1"));
+    assert(fj_state_unlock("testpass1"));
     assert(fj_state_set_puk("recovery-code"));
     fj_state_lock();
 
@@ -275,7 +286,7 @@ static void test_pin_block_and_puk_recovery(void) {
         assert(!fj_state_unlock("wrong"));
     }
     assert(fj_state_pin_blocked());
-    assert(!fj_state_unlock("12345"));
+    assert(!fj_state_unlock("testpass1"));
     assert(fj_state_unlock_puk("recovery-code") == FJ_PUK_OK);
     assert(fj_state_get() == FJ_STATE_UNLOCKED);
     assert(!fj_state_pin_blocked());
@@ -285,12 +296,12 @@ static void test_pin_block_and_puk_recovery(void) {
 static void test_auto_lock_closes_disk(void) {
     reset_fixture();
     assert(fj_state_timeout() == FJ_DEFAULT_TIMEOUT_SEC);
-    assert(fj_state_set_pin("12345"));
-    assert(fj_state_unlock("12345"));
+    assert(fj_state_set_passphrase("testpass1"));
+    assert(fj_state_unlock("testpass1"));
     assert(fj_state_set_timeout(2));
     fj_state_init();
     assert(fj_state_timeout() == 2);
-    assert(fj_state_unlock("12345"));
+    assert(fj_state_unlock("testpass1"));
     unsigned before = disk_lock_count;
     now_us = 1999999;
     fj_state_tick();
@@ -300,11 +311,11 @@ static void test_auto_lock_closes_disk(void) {
     assert(fj_state_get() == FJ_STATE_LOCKED);
     assert(disk_lock_count == before + 1);
 
-    assert(fj_state_unlock("12345"));
+    assert(fj_state_unlock("testpass1"));
     assert(fj_state_set_timeout(0));
     fj_state_init();
     assert(fj_state_timeout() == 0);
-    assert(fj_state_unlock("12345"));
+    assert(fj_state_unlock("testpass1"));
     now_us += 24LL * 60 * 60 * 1000000;
     fj_state_tick();
     assert(fj_state_get() == FJ_STATE_UNLOCKED);
@@ -312,8 +323,8 @@ static void test_auto_lock_closes_disk(void) {
 
 static void test_wrong_puk_factory_wipes_live_state(void) {
     reset_fixture();
-    assert(fj_state_set_pin("12345"));
-    assert(fj_state_unlock("12345"));
+    assert(fj_state_set_passphrase("testpass1"));
+    assert(fj_state_unlock("testpass1"));
     assert(fj_state_set_puk("recovery-code"));
     fj_state_lock();
 
@@ -334,8 +345,8 @@ static void test_wrong_puk_factory_wipes_live_state(void) {
 
 static void test_profile_erase_consistent(void) {
     reset_fixture();
-    assert(fj_state_set_pin("12345"));
-    assert(fj_state_unlock("12345"));
+    assert(fj_state_set_passphrase("testpass1"));
+    assert(fj_state_unlock("testpass1"));
 
     unsigned before = ctap_forget_count;
     /* Erasing a non-active profile must purge the live CTAP2 cache and the
@@ -346,8 +357,8 @@ static void test_profile_erase_consistent(void) {
 
 static void test_brute_force_delay_backoff(void) {
     reset_fixture();
-    assert(fj_state_set_pin("12345"));
-    assert(fj_state_unlock("12345"));
+    assert(fj_state_set_passphrase("testpass1"));
+    assert(fj_state_unlock("testpass1"));
     fj_state_lock();
 
     /* Immediately after boot an attempt is allowed. */
@@ -377,7 +388,7 @@ static void test_brute_force_delay_backoff(void) {
     assert(fj_state_brute_ok(FJ_BRUTE_PUK));
 
     /* A correct PIN clears the backoff. */
-    assert(fj_state_unlock("12345"));
+    assert(fj_state_unlock("testpass1"));
     assert(fj_state_get() == FJ_STATE_UNLOCKED);
     assert(fj_state_brute_ok(FJ_BRUTE_PIN));
 }
@@ -391,7 +402,7 @@ static void test_master_key_at_rest(void) {
     assert(!fj_keys_master_key_set());
 
     /* Setting a PIN creates and wraps the master key M. */
-    assert(fj_state_set_pin("12345"));
+    assert(fj_state_set_passphrase("testpass1"));
     assert(fj_keys_master_key_set());
     assert(fj_state_cwk(m));
 
@@ -401,7 +412,7 @@ static void test_master_key_at_rest(void) {
     assert(memcmp(enc, m, 32) != 0);
 
     /* Setting the PUK wraps M with the PUK too (a separate wrapped form). */
-    assert(fj_state_unlock("12345"));
+    assert(fj_state_unlock("testpass1"));
     assert(fj_state_set_puk("recovery-code"));
     assert(fj_keys_get_master_puk_wrap(enc, salt));
 
@@ -411,7 +422,7 @@ static void test_master_key_at_rest(void) {
     assert(fj_keys_master_key_set());
 
     /* Re-entering the PIN recovers the same M. */
-    assert(fj_state_unlock("12345"));
+    assert(fj_state_unlock("testpass1"));
     uint8_t m2[32];
     assert(fj_state_cwk(m2));
     assert(memcmp(m, m2, 32) == 0);
@@ -425,8 +436,8 @@ static void test_master_key_at_rest(void) {
 static void test_puk_sets_new_pin_preserves_keys(void) {
     reset_fixture();
 
-    assert(fj_state_set_pin("12345"));
-    assert(fj_state_unlock("12345"));
+    assert(fj_state_set_passphrase("testpass1"));
+    assert(fj_state_unlock("testpass1"));
     assert(fj_state_set_puk("recovery-code"));
     uint8_t m_orig[32];
     assert(fj_state_cwk(m_orig));
@@ -442,7 +453,7 @@ static void test_puk_sets_new_pin_preserves_keys(void) {
         assert(!fj_state_unlock("wrong"));
     }
     assert(fj_state_pin_blocked());
-    assert(!fj_state_unlock("12345"));
+    assert(!fj_state_unlock("testpass1"));
 
     /* PUK recovery unlocks and recovers the same master key M. */
     assert(fj_state_unlock_puk("recovery-code") == FJ_PUK_OK);
@@ -453,25 +464,25 @@ static void test_puk_sets_new_pin_preserves_keys(void) {
 
     /* Now set a NEW PIN; M (and thus the keys) is preserved, just re-wrapped
      * with the new PIN. */
-    assert(fj_state_set_pin("newpin456"));
-    assert(fj_state_unlock("newpin456"));
+    assert(fj_state_set_passphrase("newpass456"));
+    assert(fj_state_unlock("newpass456"));
     uint8_t m_new[32];
     assert(fj_state_cwk(m_new));
     assert(memcmp(m_orig, m_new, 32) == 0);
 
     /* The old PIN no longer works; the new PIN does. */
     fj_state_lock();
-    assert(!fj_state_unlock("12345"));
+    assert(!fj_state_unlock("testpass1"));
     /* A wrong-PIN attempt imposed a backoff delay; wait it out. */
     now_us += 40000000;
-    assert(fj_state_unlock("newpin456"));
+    assert(fj_state_unlock("newpass456"));
     assert(fj_state_get() == FJ_STATE_UNLOCKED);
 }
 
 static void test_backup_restore(void) {
     reset_fixture();
-    assert(fj_state_set_pin("12345"));
-    assert(fj_state_unlock("12345"));
+    assert(fj_state_set_passphrase("testpass1"));
+    assert(fj_state_unlock("testpass1"));
     assert(fj_state_set_puk("recovery-code"));
 
     uint8_t m[32];

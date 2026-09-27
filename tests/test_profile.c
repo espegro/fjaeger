@@ -109,9 +109,7 @@ bool fj_hmac_sha256(const uint8_t *key, size_t key_len,
 bool fj_keys_get_security(fj_security_t *s) { memset(s, 0, sizeof(*s)); return true; }
 bool fj_keys_set_security(const fj_security_t *s) { (void)s; return true; }
 bool fj_keys_pin_configured(void) { return false; }
-void fj_keys_get_pin(uint8_t pbkdf2[32], uint8_t salt[16], uint8_t verifier[16]) {
-    (void)pbkdf2; (void)salt; (void)verifier;
-}
+bool fj_state_ctap2_verify(const uint8_t verifier[16]) { (void)verifier; return true; }
 void fj_led_sign(void) {}
 
 bool fj_ecdsa_sign(const uint8_t private_key[32], const uint8_t digest[32],
