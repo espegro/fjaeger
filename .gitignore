@@ -13,3 +13,7 @@
 .vscode/
 .idea/
 *~
+
+# Development log files, kept local (not pushed)
+/STATUS.md
+/TODO.md
