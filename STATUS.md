@@ -91,6 +91,23 @@ Forventet resultat: `profile host tests: ok`. Den dekker at
 fra en annen profil brukes aldri, heller ikke ved dublettregistrering via
 excludeList.
 
+Cache-/persistenssamspilltesten (profilsletting + utsatt flush) kjøres slik:
+
+```bash
+cc -std=c11 -Wall -Wextra -Werror \
+  -Itests/stubs -Isrc/core -Isrc/fido -Isrc/usb \
+  tests/test_profile_erase.c src/core/state.c \
+  src/fido/ctap2.c src/fido/cbor.c \
+  -o /tmp/fjaeger-test-profile-erase
+/tmp/fjaeger-test-profile-erase
+```
+
+Forventet resultat: `profile erase/flush host test: ok`. Den dekker at
+`fj_state_profile_erase` tømmer både live CTAP2-cache og persistent lager som
+én konsistent operasjon, og at en påfølgende utsatt `fj_ctap2_task()`-flush
+**ikke** skriver slettede credentials tilbake til flash. Credentials i andre
+profiler overlever.
+
 ## Profiler (implementert 2026-09-27)
 
 De gamle nøkkel-slot-ene er erstattet med navngitte profiler.
@@ -120,6 +137,40 @@ De gamle nøkkel-slot-ene er erstattet med navngitte profiler.
   Utviklingsdata kan tapes; eksisterende credentials må enrolles på nytt.
 - Factory-wipe sletter fortsatt begge flashkopier og alt live nøkkelmateriale,
   inkludert profiler og credentials; ved neste oppstart opprettes «Default» på nytt.
+
+## Fysisk verifisert 2026-09-27 (profiler)
+
+Profilfunksjonen er testet på den faktiske RP2350-donglen med `ssh-keygen`
+(`-Y sign`/`-Y verify`), som bruker samme CTAP2 `getAssertion`-vei som SSH-login,
+samt med reell SSH-innlogging mot en lokal `sshd`:
+
+- **Profil 0 «Default» opprettes automatisk** på tomt lager og velges; enheten
+  starter låst med timeout 900 s.
+- **PIN/PUK settes og virker**; enheten ulåses med PIN.
+- **Enrollment knytter credentialet til aktiv profil.** `PROFILE LIST` viser
+  korrekt credential-antall per profil.
+- **Profilisolasjon med signering:** keyA i profil 1 signerer når profil 1 er
+  valgt, avvises (`invalid format`, RC 255) når profil 0 er valgt, og virker igjen
+  når profil 1 velges på nytt. Uten allowList (rp-hash-søk) filtreres også.
+- **Profilisolasjon med reell SSH-login (toveis):** `ssh`-innlogging med keyA
+  lykkes i profil 1 (`SSH_LOGIN_OK`), avvises i profil 0
+  (`sign_and_send_pubkey: signing failed ... invalid format` →
+  `Permission denied (publickey)`), og lykkes igjen etter bytte tilbake til
+  profil 1.
+- **Valg, navn og credential-binding overlever watchdog-`RESET`**; aktiv profil
+  gjenopprettes korrekt.
+- **Sletting av inaktiv profil** gjør dens credentials ubrukelige umiddelbart og
+  etter reboot; andre profiler virker fortsatt. **Sletting av aktiv profil** og
+  av ukjent profil avvises.
+- **Låst enhet** avviser signering.
+- **Factory-wipe** etter fem feil PUK-forsøk tømmer profiler og credentials;
+  ved neste oppstart opprettes «Default»-profil på nytt.
+
+> Merk: reell SSH-login krever en root-kjørt `sshd` (non-root `sshd` resetter
+> tilkoblinger pga. manglende privilege separation). SSH `ControlMaster`/
+> multiplexing i `~/.ssh/config` kan maskere isolasjonen ved å gjenbruke en
+> eksisterende forbindelse uten re-autentisering; bruk `-o ControlPath=none`
+> under testing.
 
 ## Fikset i denne runden
 
