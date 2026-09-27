@@ -156,6 +156,10 @@ bool fj_keys_set_timeout(uint32_t seconds) {
     return true;
 }
 
+void fj_store_begin(void) {}
+bool fj_store_commit(void) { return true; }
+void fj_store_abort(void) {}
+
 /* Master key stubs. */
 bool fj_keys_master_key_set(void) { return have_master; }
 
@@ -191,6 +195,8 @@ void fj_msc_lock(void) { disk_lock_count++; }
 void fj_ctap2_forget_all(void) { ctap_forget_count++; }
 void fj_ctap2_init(void) {}
 void fj_ctap2_forget_profile(unsigned profile_id) { (void)profile_id; ctap_forget_count++; }
+void fj_ctap2_invalidate_discovery(void) {}
+void fj_pin_reset_token(void) {}
 
 bool fj_keys_profile_erase(unsigned profile_id) {
     (void)profile_id;

@@ -294,6 +294,14 @@ bool fj_hmac_sha256(const uint8_t *key, size_t key_len,
     return mbedtls_md_hmac(md, key, key_len, data, len, out) == 0;
 }
 
+bool fj_ct_equal(const void *a, const void *b, size_t n) {
+    const uint8_t *x = (const uint8_t *)a;
+    const uint8_t *y = (const uint8_t *)b;
+    uint8_t diff = 0;
+    for (size_t i = 0; i < n; i++) diff |= x[i] ^ y[i];
+    return diff == 0;
+}
+
 bool fj_pbkdf2_sha256(const uint8_t *password, size_t pw_len,
                       const uint8_t *salt, size_t salt_len,
                       uint32_t iterations, uint8_t out[32]) {

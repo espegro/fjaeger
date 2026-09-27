@@ -117,6 +117,14 @@ unsigned fj_keys_active_profile(void);
 /* Persist the whole store to flash. */
 bool fj_keys_flush(void);
 
+/* Group multiple store updates into one atomic A/B flash commit (FJ-005), so
+ * a power loss cannot leave a half-updated security state. Call begin(),
+ * make the individual fj_keys_set_*() updates, then commit(); abort() discards
+ * the pending changes without writing. */
+void fj_store_begin(void);
+bool fj_store_commit(void);
+void fj_store_abort(void);
+
 /* Persist the device unlock passphrase as a salted PBKDF2-HMAC-SHA256 hash.
  * The passphrase protects the master key M; it is independent of the CTAP2
  * PIN. */

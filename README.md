@@ -394,10 +394,12 @@ ssh-keygen -Y verify -f allowed_signers -I <name> -n test -s file.txt.sig < file
   - **Deferred write-behind:** USB MSC callbacks queue sector writes; the
     actual flash erase/program happens in the main loop (`fj_msc_task`), never
     inside a USB transaction. Data flushes on `LOCK`/unmount and continuously.
-  - **Integrity:** a persistent CRC-32 table (one per 4 KiB block, stored in
-    cleartext in the last blocks of the partition) is verified on mount.
-    Corruption from power loss or tampering is detected and the drive is
-    re-initialized instead of serving corrupt data.
+  - **Corruption detection:** a persistent CRC-32 table (one per 4 KiB block,
+    stored in cleartext in the last blocks of the partition) is checked when
+    blocks are read, so corrupted blocks are detected rather than served to the
+    host. On a mount-time metadata corruption the drive fails closed (it is not
+    auto-reformatted); the user must explicitly reset the drive. CRC-32 is
+    corruption detection only — it is not cryptographic authentication.
   - Writing large files is slow and wears flash, because every sector update
     requires a flash erase.
 

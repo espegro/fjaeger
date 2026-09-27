@@ -78,6 +78,11 @@ bool fj_aes_cbc(const uint8_t key[32], const uint8_t iv[16], uint8_t *buf, size_
 bool fj_hmac_sha256(const uint8_t *key, size_t key_len, const uint8_t *data, size_t len, uint8_t out[32]) {
     (void)key; (void)key_len; (void)data; (void)len; memset(out, 0xBB, 32); return true;
 }
+bool fj_ct_equal(const void *a, const void *b, size_t n) {
+    const uint8_t *x = a, *y = b; uint8_t d = 0;
+    for (size_t i = 0; i < n; i++) d |= x[i] ^ y[i];
+    return d == 0;
+}
 bool fj_ecdsa_sign(const uint8_t k[32], const uint8_t d[32], uint8_t s[64]) {
     (void)k; (void)d; memset(s, 0x33, 64); return true;
 }
@@ -151,6 +156,10 @@ void fj_keys_wipe(void) {
 bool fj_keys_get_timeout(uint32_t *s) { *s = 900; return true; }
 bool fj_keys_set_timeout(uint32_t s) { (void)s; return true; }
 
+void fj_store_begin(void) {}
+bool fj_store_commit(void) { return true; }
+void fj_store_abort(void) {}
+
 /* Master key stubs (state.c + ctap2.c dependencies). */
 static uint8_t stored_m_enc_pin[32];
 static uint8_t stored_m_salt_pin[16];
@@ -182,20 +191,32 @@ bool fj_keys_get_master_puk_wrap(uint8_t enc[32], uint8_t salt[16]) {
     memcpy(salt, stored_m_salt_puk, 16);
     return true;
 }
-bool fj_aes_gcm_encrypt(const uint8_t key[32], const uint8_t nonce[12],
-                        const uint8_t *in, size_t len,
-                        uint8_t *out, uint8_t tag[16]) {
-    (void)key; (void)nonce;
+bool fj_aes_gcm_encrypt_with_aad(const uint8_t key[32], const uint8_t nonce[12],
+                                 const uint8_t *aad, size_t aad_len,
+                                 const uint8_t *in, size_t len,
+                                 uint8_t *out, uint8_t tag[16]) {
+    (void)key; (void)nonce; (void)aad; (void)aad_len;
     memcpy(out, in, len);
     memset(tag, 0, 16);
     return true;
 }
+bool fj_aes_gcm_decrypt_with_aad(const uint8_t key[32], const uint8_t nonce[12],
+                                 const uint8_t tag[16],
+                                 const uint8_t *aad, size_t aad_len,
+                                 const uint8_t *in, size_t len, uint8_t *out) {
+    (void)key; (void)nonce; (void)tag; (void)aad; (void)aad_len;
+    memcpy(out, in, len);
+    return true;
+}
+bool fj_aes_gcm_encrypt(const uint8_t key[32], const uint8_t nonce[12],
+                        const uint8_t *in, size_t len,
+                        uint8_t *out, uint8_t tag[16]) {
+    return fj_aes_gcm_encrypt_with_aad(key, nonce, NULL, 0, in, len, out, tag);
+}
 bool fj_aes_gcm_decrypt(const uint8_t key[32], const uint8_t nonce[12],
                         const uint8_t tag[16],
                         const uint8_t *in, size_t len, uint8_t *out) {
-    (void)key; (void)nonce; (void)tag;
-    memcpy(out, in, len);
-    return true;
+    return fj_aes_gcm_decrypt_with_aad(key, nonce, tag, NULL, 0, in, len, out);
 }
 
 /* Backup/restore stubs (state.c references them; unused here). */

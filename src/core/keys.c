@@ -220,8 +220,49 @@ static bool write_store(void) {
     return true;
 }
 
+/* ------------------------------------------------------------------ */
+/* Store transactions (FJ-005)                                        */
+/*                                                                     */
+/* Several security-state updates (e.g. a passphrase change re-wraps    */
+/* the master key) touch multiple store fields. Without care they        */
+/* commit as several independent A/B generations; a power loss between  */
+/* them can leave a partially-updated state (new verifier + old wrap).  */
+/* fj_store_begin()/fj_store_commit() group such changes into ONE flash */
+/* commit so the store is always either fully old or fully new.         */
+/* ------------------------------------------------------------------ */
+static bool store_tx = false;
+static bool store_dirty = false;
+
+/* Decide whether to write flash now (outside a transaction) or defer to a
+ * later fj_store_commit(). Returns true on success (always in a tx). */
+static bool store_write_commit(void) {
+    if (store_tx) {
+        store_dirty = true;
+        return true;
+    }
+    return store_write_commit();
+}
+
+void fj_store_begin(void) {
+    store_tx = true;
+    store_dirty = false;
+}
+
+bool fj_store_commit(void) {
+    bool dirty = store_dirty;
+    store_tx = false;
+    store_dirty = false;
+    if (!dirty) return true;
+    return store_write_commit();
+}
+
+void fj_store_abort(void) {
+    store_tx = false;
+    store_dirty = false;
+}
+
 bool fj_keys_flush(void) {
-    return write_store();
+    return store_write_commit();
 }
 
 void fj_keys_ctap2_load(fj_ctap2_cred_t *out) {
@@ -230,7 +271,7 @@ void fj_keys_ctap2_load(fj_ctap2_cred_t *out) {
 
 bool fj_keys_ctap2_save(const fj_ctap2_cred_t *creds) {
     memcpy(store.ctap2, creds, sizeof(store.ctap2));
-    return write_store();
+    return store_write_commit();
 }
 
 bool fj_keys_backup_fill(fj_backup_payload_t *out) {
@@ -248,7 +289,7 @@ bool fj_keys_backup_restore(const fj_backup_payload_t *in) {
     memcpy(store.profiles, in->profiles, sizeof(store.profiles));
     store.active_profile = in->active_profile;
     store.active_profile_valid = in->active_profile_valid;
-    return write_store();
+    return store_write_commit();
 }
 
 bool fj_keys_set_passphrase(const uint8_t pbkdf2_hash[32], const uint8_t salt[16]) {
@@ -257,7 +298,7 @@ bool fj_keys_set_passphrase(const uint8_t pbkdf2_hash[32], const uint8_t salt[16
     store.pass_configured = 1;
     store.pin_fail = 0;
     store.pin_blocked = 0;
-    return write_store();
+    return store_write_commit();
 }
 
 bool fj_keys_passphrase_configured(void) {
@@ -272,7 +313,7 @@ void fj_keys_get_passphrase(uint8_t pbkdf2_hash[32], uint8_t salt[16]) {
 bool fj_keys_set_ctap2_pin(const uint8_t verifier[16]) {
     memcpy(store.ctap2_verifier, verifier, 16);
     store.ctap2_pin_configured = 1;
-    return write_store();
+    return store_write_commit();
 }
 
 bool fj_keys_ctap2_pin_configured(void) {
@@ -306,7 +347,7 @@ bool fj_keys_set_disk_secret(const uint8_t enc[32], const uint8_t salt[16],
     store.disk_secret_valid = 1;
     store.disk_fail = 0;
     store.disk_blocked = 0;
-    return write_store();
+    return store_write_commit();
 }
 
 bool fj_keys_master_key_set(void) {
@@ -319,7 +360,7 @@ bool fj_keys_set_master_pin_wrap(const uint8_t enc[32], const uint8_t salt[16]) 
     memcpy(store.m_enc_pin, enc, 32);
     memcpy(store.m_salt_pin, salt, 16);
     store.m_configured = 1;
-    return write_store();
+    return store_write_commit();
 }
 
 bool fj_keys_get_master_pin_wrap(uint8_t enc[32], uint8_t salt[16]) {
@@ -334,7 +375,7 @@ bool fj_keys_set_master_puk_wrap(const uint8_t enc[32], const uint8_t salt[16]) 
     memcpy(store.m_enc_puk, enc, 32);
     memcpy(store.m_salt_puk, salt, 16);
     store.m_configured = 1;
-    return write_store();
+    return store_write_commit();
 }
 
 bool fj_keys_get_master_puk_wrap(uint8_t enc[32], uint8_t salt[16]) {
@@ -361,7 +402,7 @@ bool fj_keys_set_security(const fj_security_t *sec) {
     store.disk_fail = sec->disk_fail;
     store.disk_blocked = sec->disk_blocked;
     store.puk_fail = sec->puk_fail;
-    return write_store();
+    return store_write_commit();
 }
 
 bool fj_keys_puk_configured(void) {
@@ -375,7 +416,7 @@ bool fj_keys_set_puk(const uint8_t pbkdf2_hash[32], const uint8_t salt[16]) {
     memcpy(store.puk_salt, salt, 16);
     store.puk_configured = 1;
     store.puk_fail = 0;
-    return write_store();
+    return store_write_commit();
 }
 
 bool fj_keys_get_puk(uint8_t pbkdf2_hash[32], uint8_t salt[16]) {
@@ -396,7 +437,7 @@ bool fj_keys_set_timeout(uint32_t seconds) {
     if (!store_loaded) return false;
     store.timeout_sec = seconds;
     store.timeout_configured = 1;
-    return write_store();
+    return store_write_commit();
 }
 
 void fj_keys_wipe(void) {
@@ -442,7 +483,7 @@ bool fj_keys_profile_create(unsigned profile, const char *name) {
     p->name[sizeof(p->name) - 1] = '\0';
     p->in_use = true;
 
-    return write_store();
+    return store_write_commit();
 }
 
 bool fj_keys_profile_select(unsigned profile) {
@@ -452,7 +493,7 @@ bool fj_keys_profile_select(unsigned profile) {
     store.active_profile = (uint8_t)profile;
     store.active_profile_valid = 1;
     active_profile = (int)profile;
-    return write_store();
+    return store_write_commit();
 }
 
 bool fj_keys_profile_rename(unsigned profile, const char *name) {
@@ -464,7 +505,7 @@ bool fj_keys_profile_rename(unsigned profile, const char *name) {
     strncpy(p->name, name, sizeof(p->name) - 1);
     p->name[sizeof(p->name) - 1] = '\0';
 
-    return write_store();
+    return store_write_commit();
 }
 
 bool fj_keys_profile_erase(unsigned profile) {
@@ -483,7 +524,7 @@ bool fj_keys_profile_erase(unsigned profile) {
             memset(&store.ctap2[i], 0, sizeof(fj_ctap2_cred_t));
     }
 
-    return write_store();
+    return store_write_commit();
 }
 
 void fj_random(void *buf, size_t len) {

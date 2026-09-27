@@ -8,6 +8,7 @@
 #include "keys.h"
 #include "msc_disk.h"
 #include "ctap2.h"
+#include "pin.h"
 #include "rgb_led.h"
 #include "pico/time.h"
 
@@ -157,14 +158,17 @@ bool fj_state_set_passphrase(const char *passphrase) {
                           FJ_PIN_SALT_LEN, FJ_PBKDF2_ITERATIONS, pass_hash))
         return false;
 
-    if (!fj_keys_set_passphrase(pass_hash, pass_salt)) return false;
+    /* Write the passphrase hash and the new master-key wrap in one atomic
+     * A/B commit, so a power loss cannot leave a new verifier with an old
+     * wrap (FJ-005). */
+    fj_store_begin();
+    if (!fj_keys_set_passphrase(pass_hash, pass_salt)) { fj_store_abort(); return false; }
     pass_configured = true;
-    /* Ensure the master key exists and is wrapped by the new passphrase so
-     * credential private keys can be encrypted at rest. This is independent
-     * of the CTAP2 PIN. */
-    if (!master_wrap_with(passphrase, len, fj_keys_set_master_pin_wrap))
+    if (!master_wrap_with(passphrase, len, fj_keys_set_master_pin_wrap)) {
+        fj_store_abort();
         return false;
-    return true;
+    }
+    return fj_store_commit();
 }
 
 /* Set the CTAP2 client PIN (independent of the unlock passphrase). Stored as
@@ -199,6 +203,12 @@ void fj_state_lock(void) {
     fj_led_pin_lock();
     memset(master, 0, sizeof(master));
     master_available = false;
+    /* A lock is a complete security-session boundary: invalidate the CTAP2
+     * pinUvAuthToken and any in-progress resident-discovery/credential-
+     * management cursors so no stale state can be reused across a lock
+     * (FJ-008). */
+    fj_pin_reset_token();
+    fj_ctap2_invalidate_discovery();
     state = FJ_STATE_LOCKED;
     have_unlock_time = false;
 }
@@ -365,10 +375,15 @@ bool fj_state_set_puk(const char *puk) {
     if (!fj_pbkdf2_sha256((const uint8_t *)puk, len, salt, FJ_PUK_SALT_LEN,
                           FJ_PBKDF2_ITERATIONS, hash))
         return false;
-    if (!fj_keys_set_puk(hash, salt)) return false;
-    /* Wrap the master key with the (new) PUK so a PUK recovery can recover
-     * the keys. */
-    return master_wrap_with(puk, len, fj_keys_set_master_puk_wrap);
+    /* Commit the new PUK and its master-key wrap in one atomic A/B update
+     * (FJ-005). */
+    fj_store_begin();
+    if (!fj_keys_set_puk(hash, salt)) { fj_store_abort(); return false; }
+    if (!master_wrap_with(puk, len, fj_keys_set_master_puk_wrap)) {
+        fj_store_abort();
+        return false;
+    }
+    return fj_store_commit();
 }
 
 bool fj_state_set_timeout(uint32_t seconds) {
@@ -511,8 +526,11 @@ bool fj_state_backup_restore(const char *password, const char *new_pass,
     }
     memset(key, 0, sizeof(key));
 
-    /* Import the store and hold the recovered master key in RAM. */
-    if (!fj_keys_backup_restore(&payload)) return false;
+    /* Import the store and hold the recovered master key in RAM. All of the
+     * restore writes (credentials/profiles, passphrase, PUK, master-key wraps)
+     * are committed in one atomic A/B update (FJ-005). */
+    fj_store_begin();
+    if (!fj_keys_backup_restore(&payload)) { fj_store_abort(); return false; }
     memcpy(master, payload.master, sizeof(master));
     master_available = true;
     memset(&payload, 0, sizeof(payload));
@@ -522,22 +540,31 @@ bool fj_state_backup_restore(const char *password, const char *new_pass,
      * it. (The CTAP2 PIN is separate and is set with SETPIN afterwards.) */
     fj_random(pass_salt, FJ_PIN_SALT_LEN);
     if (!fj_pbkdf2_sha256((const uint8_t *)new_pass, pass_len, pass_salt,
-                          FJ_PIN_SALT_LEN, FJ_PBKDF2_ITERATIONS, pass_hash))
+                          FJ_PIN_SALT_LEN, FJ_PBKDF2_ITERATIONS, pass_hash)) {
+        fj_store_abort();
         return false;
-    if (!fj_keys_set_passphrase(pass_hash, pass_salt)) return false;
+    }
+    if (!fj_keys_set_passphrase(pass_hash, pass_salt)) { fj_store_abort(); return false; }
     pass_configured = true;
-    if (!master_wrap_with(new_pass, pass_len, fj_keys_set_master_pin_wrap))
+    if (!master_wrap_with(new_pass, pass_len, fj_keys_set_master_pin_wrap)) {
+        fj_store_abort();
         return false;
+    }
 
     /* Set the new recovery PUK and re-wrap the master key with it too. */
     uint8_t puk_salt[FJ_PUK_SALT_LEN], puk_hash[FJ_HASH_LEN];
     fj_random(puk_salt, FJ_PUK_SALT_LEN);
     if (!fj_pbkdf2_sha256((const uint8_t *)new_puk, puk_len, puk_salt,
-                          FJ_PUK_SALT_LEN, FJ_PBKDF2_ITERATIONS, puk_hash))
+                          FJ_PUK_SALT_LEN, FJ_PBKDF2_ITERATIONS, puk_hash)) {
+        fj_store_abort();
         return false;
-    if (!fj_keys_set_puk(puk_hash, puk_salt)) return false;
-    if (!master_wrap_with(new_puk, puk_len, fj_keys_set_master_puk_wrap))
+    }
+    if (!fj_keys_set_puk(puk_hash, puk_salt)) { fj_store_abort(); return false; }
+    if (!master_wrap_with(new_puk, puk_len, fj_keys_set_master_puk_wrap)) {
+        fj_store_abort();
         return false;
+    }
+    if (!fj_store_commit()) return false;
 
     /* Reload the live CTAP2 cache so the restored credentials are usable
      * immediately without a reboot. */

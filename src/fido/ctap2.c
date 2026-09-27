@@ -198,15 +198,39 @@ void fj_ctap2_forget_profile(unsigned profile_id) {
     if (removed) ctap2_dirty = true;
 }
 
+/* Build the AES-GCM AAD that binds a credential's immutable, security-
+ * relevant metadata to its encrypted private key (FJ-006). Any change to
+ * these fields invalidates the GCM tag, so e.g. moving a credential between
+ * profiles or altering its RP binding fails decryption. Mutable fields are
+ * deliberately excluded. Returns the AAD length. */
+static size_t cred_build_aad(const fj_ctap2_cred_t *cr, uint8_t aad[128]) {
+    uint8_t ver = 1;
+    size_t p = 0;
+    aad[p++] = ver;
+    memcpy(aad + p, cr->credential_id, FJ_CRED_ID_LEN); p += FJ_CRED_ID_LEN;
+    aad[p++] = cr->profile_id;
+    memcpy(aad + p, cr->rp_id_hash, FJ_HASH_LEN); p += FJ_HASH_LEN;
+    memcpy(aad + p, cr->public_key, 65); p += 65;
+    aad[p++] = cr->resident ? 1 : 0;
+    return p;
+}
+
 /* Decrypt a credential's private scalar (wrapped by the CWK at rest) into
  * 'out' (FJ_ECDSA_KEY_BYTES bytes). Returns false when the device is not
- * unlocked with the CWK available or when the GCM tag fails to authenticate.
+ * unlocked with the CWK available or when the GCM tag fails to authenticate
+ * (which also detects tampering with the credential's bound metadata).
  * The caller must wipe the output buffer after signing. */
 static bool cred_decrypt_private(const fj_ctap2_cred_t *cr, uint8_t out[FJ_ECDSA_KEY_BYTES]) {
     uint8_t cwk[FJ_ECDSA_KEY_BYTES];
     if (!fj_state_cwk(cwk)) return false;
-    bool ok = fj_aes_gcm_decrypt(cwk, cr->private_key_nonce, cr->private_key_tag,
-                                 cr->private_key_enc, FJ_ECDSA_KEY_BYTES, out);
+    uint8_t aad[128];
+    size_t aad_len = cred_build_aad(cr, aad);
+    bool ok = fj_aes_gcm_decrypt_with_aad(cwk, cr->private_key_nonce,
+                                          cr->private_key_tag,
+                                          aad, aad_len,
+                                          cr->private_key_enc,
+                                          FJ_ECDSA_KEY_BYTES, out);
+    memset(aad, 0, sizeof(aad));
     memset(cwk, 0, sizeof(cwk));
     return ok;
 }
@@ -604,18 +628,23 @@ static size_t make_credential(const uint8_t *req, size_t len,
         memset(work_priv, 0, sizeof(work_priv));
         return ctap_error(out, cap, ERR_INVALID_PARAMETER);
     }
+    /* Bind the private key to its immutable metadata via AES-GCM AAD, so
+     * later tampering with those fields fails decryption (FJ-006). */
+    memcpy(cr->rp_id_hash, rp_id_hash, FJ_HASH_LEN);
     fj_random(cr->private_key_nonce, sizeof(cr->private_key_nonce));
-    if (!fj_aes_gcm_encrypt(cwk, cr->private_key_nonce, work_priv,
-                            FJ_ECDSA_KEY_BYTES, cr->private_key_enc,
-                            cr->private_key_tag)) {
+    uint8_t aad[128];
+    size_t aad_len = cred_build_aad(cr, aad);
+    if (!fj_aes_gcm_encrypt_with_aad(cwk, cr->private_key_nonce, aad, aad_len,
+                                     work_priv, FJ_ECDSA_KEY_BYTES,
+                                     cr->private_key_enc, cr->private_key_tag)) {
         cr->in_use = false;
         memset(work_priv, 0, sizeof(work_priv));
         return ctap_error(out, cap, ERR_INVALID_PARAMETER);
     }
+    memset(aad, 0, sizeof(aad));
     memset(work_priv, 0, sizeof(work_priv));
     memset(cwk, 0, sizeof(cwk));
 
-    memcpy(cr->rp_id_hash, rp_id_hash, FJ_HASH_LEN);
     if (resident) {
         memcpy(cr->rp, rp_id, rp_id_len);
         cr->rp_len = (uint8_t)rp_id_len;

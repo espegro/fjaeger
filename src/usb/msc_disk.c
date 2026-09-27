@@ -84,6 +84,7 @@ static void write_block(uint32_t idx, const uint8_t clear[DISK_BLOCK_SIZE]);
 
 static uint32_t block_crcs[DISK_DATA_BLOCKS];
 static bool crc_dirty = false;
+static bool crc_valid = false;   /* block_crcs[] reflects the on-flash blocks */
 
 static uint32_t crc32_update(uint32_t crc, const uint8_t *data, size_t len) {
     while (len--) {
@@ -141,7 +142,10 @@ static bool crc_table_load(void) {
     uint32_t magic, count;
     memcpy(&magic, buf, 4);
     memcpy(&count, buf + 4, 4);
-    if (magic != CRC_MAGIC || count != DISK_DATA_BLOCKS) return false;
+    if (magic != CRC_MAGIC || count != DISK_DATA_BLOCKS) {
+        crc_valid = false;
+        return false;
+    }
     for (uint32_t i = 0; i < DISK_DATA_BLOCKS; i++) {
         uint32_t g = CRC_HEADER_SIZE + i * 4;
         uint32_t tb = g / DISK_BLOCK_SIZE;
@@ -152,6 +156,7 @@ static bool crc_table_load(void) {
         memcpy(&block_crcs[i], buf + (g % DISK_BLOCK_SIZE), 4);
     }
     crc_dirty = false;
+    crc_valid = true;
     return true;
 }
 
@@ -166,6 +171,7 @@ static void crc_table_build_from_disk(void) {
         }
     }
     crc_dirty = true;
+    crc_valid = true;
 }
 
 /* ------------------------------------------------------------------ */
@@ -210,14 +216,18 @@ static void wq_reset(void) {
 }
 
 /* Apply any pending writes that belong to flash block 'idx' onto the
- * decrypted block 'clear' (8 sectors in clear text). */
-static void wq_apply_to_block(uint32_t idx, uint8_t clear[DISK_BLOCK_SIZE]) {
+ * decrypted block 'clear' (8 sectors in clear text). Returns true if any
+ * pending write was applied (the on-flash CRC for this block is then stale). */
+static bool wq_apply_to_block(uint32_t idx, uint8_t clear[DISK_BLOCK_SIZE]) {
+    bool applied = false;
     for (unsigned i = 0; i < WRITE_QUEUE_SIZE; i++) {
         if (!wq[i].in_use) continue;
         if (block_index_for_lba(wq[i].lba) != idx) continue;
         uint32_t off = (wq[i].lba % DISK_SECTORS_PER_BLOCK) * DISK_SECTOR_SIZE;
         memcpy(clear + off, wq[i].data, DISK_SECTOR_SIZE);
+        applied = true;
     }
+    return applied;
 }
 
 /* Read flash block 'idx' from XIP, decrypt all 8 sectors and apply any
@@ -234,7 +244,15 @@ static bool read_block_apply(uint32_t idx, uint8_t clear[DISK_BLOCK_SIZE]) {
         if (!fj_xts_sector(disk_key, tweak, clear + s * DISK_SECTOR_SIZE, false))
             return false;
     }
-    wq_apply_to_block(idx, clear);
+    /* FJ-003: when a CRC table is loaded, verify this block's CRC before
+     * returning decrypted data, so corrupted blocks are detected rather than
+     * silently served to the host. (CRC-32 is corruption detection, not
+     * cryptographic tamper protection.) Skip the check when there are
+     * unflushed pending writes for the block, whose CRC is not yet stored. */
+    bool pending = wq_apply_to_block(idx, clear);
+    if (crc_valid && !pending && crc32_block(clear) != block_crcs[idx]) {
+        return false;
+    }
     return true;
 }
 
@@ -696,12 +714,23 @@ static bool disk_unwrap(const char *pin) {
     return true;
 }
 
-/* Build or verify the filesystem using the live (unwrapped) disk key. */
-static bool fj_msc_prepare(void) {
-    if (!crc_table_load()) {
+/* Build or verify the filesystem using the live (unwrapped) disk key.
+ *
+ * On a first-time setup (no disk secret yet) the filesystem is initialized.
+ * On an existing disk the filesystem metadata is verified and any integrity
+ * failure is fail-closed (FJ-004): we do NOT automatically re-initialize,
+ * which could destroy recoverable data. The drive is instead left in an
+ * error state and the user must explicitly format it (DISK FORMAT). */
+static bool fj_msc_prepare(bool first_time) {
+    if (first_time) {
         init_filesystem();
-    } else if (!boot_sector_valid()) {
-        init_filesystem();
+        fs_initialised = true;
+        return true;
+    }
+    if (!crc_table_load() || !boot_sector_valid()) {
+        /* Corrupt filesystem. Fail closed and do not auto-format. */
+        fs_initialised = false;
+        return false;
     }
     fs_initialised = true;
     return true;
@@ -745,7 +774,7 @@ bool fj_msc_unlock(const char *pin) {
     }
     fj_state_brute_success(FJ_BRUTE_DISK);
 
-    if (!fj_msc_prepare()) return false;
+    if (!fj_msc_prepare(false)) return false;
     disk_unlocked = true;
     disk_ready = true;
     return true;
@@ -781,8 +810,9 @@ bool fj_msc_set_pin(const char *pin) {
     size_t n = pin ? strlen(pin) : 0;
     if (n < 4 || n > 32) return false;
 
+    bool first_time = !fj_keys_disk_secret_set();
     uint8_t salt[16], nonce[12], enc[32], wrap[32], tag[16];
-    if (!fj_keys_disk_secret_set()) {
+    if (first_time) {
         /* First-time: generate a fresh master secret for the drive. */
         fj_random(salt, sizeof(salt));
         fj_random(disk_key, sizeof(disk_key));
@@ -807,7 +837,7 @@ bool fj_msc_set_pin(const char *pin) {
     memset(wrap, 0, sizeof(wrap));
 
     if (!fj_keys_set_disk_secret(enc, salt, nonce, tag)) return false;
-    if (!fj_msc_prepare()) return false;
+    if (!fj_msc_prepare(first_time)) return false;
     disk_unlocked = true;
     disk_ready = true;
     return true;

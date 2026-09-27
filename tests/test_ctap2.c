@@ -72,29 +72,50 @@ bool fj_state_cwk(uint8_t out[32]) {
     return true;
 }
 
-bool fj_aes_gcm_encrypt(const uint8_t key[32], const uint8_t nonce[12],
-                        const uint8_t *in, size_t len,
-                        uint8_t *out, uint8_t tag[16]) {
-    (void)key; (void)nonce;
+bool fj_aes_gcm_encrypt_with_aad(const uint8_t key[32], const uint8_t nonce[12],
+                                 const uint8_t *aad, size_t aad_len,
+                                 const uint8_t *in, size_t len,
+                                 uint8_t *out, uint8_t tag[16]) {
+    (void)key; (void)nonce; (void)aad; (void)aad_len;
     memcpy(out, in, len);
     memset(tag, 0, 16);
     return true;
 }
 
+bool fj_aes_gcm_decrypt_with_aad(const uint8_t key[32], const uint8_t nonce[12],
+                                 const uint8_t tag[16],
+                                 const uint8_t *aad, size_t aad_len,
+                                 const uint8_t *in, size_t len, uint8_t *out) {
+    (void)key; (void)nonce; (void)tag; (void)aad; (void)aad_len;
+    memcpy(out, in, len);
+    return true;
+}
+
+bool fj_aes_gcm_encrypt(const uint8_t key[32], const uint8_t nonce[12],
+                        const uint8_t *in, size_t len,
+                        uint8_t *out, uint8_t tag[16]) {
+    return fj_aes_gcm_encrypt_with_aad(key, nonce, NULL, 0, in, len, out, tag);
+}
+
 bool fj_aes_gcm_decrypt(const uint8_t key[32], const uint8_t nonce[12],
                         const uint8_t tag[16],
                         const uint8_t *in, size_t len, uint8_t *out) {
-    (void)key; (void)nonce; (void)tag;
-    memcpy(out, in, len);
-    return true;
+    return fj_aes_gcm_decrypt_with_aad(key, nonce, tag, NULL, 0, in, len, out);
 }
 
 bool fj_hmac_sha256(const uint8_t *key, size_t key_len,
                     const uint8_t *data, size_t len,
                     uint8_t out[32]) {
     (void)key; (void)key_len; (void)data; (void)len;
-    memset(out, 0xBB, 32);
+    memset(out, 0, 32);
     return true;
+}
+
+bool fj_ct_equal(const void *a, const void *b, size_t n) {
+    const uint8_t *x = a, *y = b;
+    uint8_t d = 0;
+    for (size_t i = 0; i < n; i++) d |= x[i] ^ y[i];
+    return d == 0;
 }
 
 bool fj_keys_get_security(fj_security_t *s) { memset(s, 0, sizeof(*s)); return true; }

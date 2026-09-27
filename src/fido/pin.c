@@ -331,5 +331,7 @@ bool fj_pin_verify_auth(const uint8_t *message, size_t message_len,
     if (!token_valid) return false;
     uint8_t mac[32];
     if (!fj_hmac_sha256(pin_token, FJ_PIN_TOKEN_LEN, message, message_len, mac)) return false;
-    return memcmp(mac, param, 16) == 0;
+    bool ok = fj_ct_equal(mac, param, 16);
+    memset(mac, 0, sizeof(mac));
+    return ok;
 }

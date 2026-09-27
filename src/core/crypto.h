@@ -61,6 +61,12 @@ bool fj_hmac_sha256(const uint8_t *key, size_t key_len,
                     const uint8_t *data, size_t len,
                     uint8_t out[32]);
 
+/* Constant-time comparison of two buffers of 'n' bytes (FJ-007). Use for all
+ * secret / authentication values (PIN verifiers, HMACs, tags, PUK hashes) to
+ * avoid timing side channels. Non-secret identifiers (e.g. credential/RP IDs)
+ * do not need this. */
+bool fj_ct_equal(const void *a, const void *b, size_t n);
+
 /* PBKDF2-HMAC-SHA256 (RFC 2898) with the given salt and iteration count,
  * deriving a 32-byte key. Used for slow, salted password-based key
  * derivation so that a dumped flash store cannot be brute-forced offline
