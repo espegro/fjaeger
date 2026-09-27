@@ -38,6 +38,7 @@ add_executable(fjaeger
   src/fido/u2f.c
   src/fido/ctap2.c
   src/fido/cbor.c
+  src/fido/pin.c
 )
 
 target_include_directories(fjaeger PRIVATE

@@ -13,23 +13,27 @@
  * Each update erases and programs only the older copy. A generation number
  * and CRC select the newest complete record after a reset or power loss. */
 #define STORE_MAGIC   0x464A5345u /* "FJSE" */
-#define STORE_VERSION 7u
+#define STORE_VERSION 11u
 #define FLASH_OFFSET_BYTES (PICO_FLASH_SIZE_BYTES - (2 * FLASH_SECTOR_SIZE))
 
 typedef struct {
-    uint8_t  pin_hash[32];
+    uint8_t  pin_hash[32];       /* PBKDF2-SHA256(pin, pin_salt) for console */
+    uint8_t  pin_salt[16];
+    uint8_t  pin_ctap2_verifier[16]; /* LEFT(SHA-256(pin),16) for CTAP2 PIN */
+    uint8_t  pin_configured;     /* 1 once the device PIN is set */
     fj_profile_t profiles[FJ_NUM_PROFILES];
     fj_ctap2_cred_t ctap2[FJ_CTAP2_CREDS];
-    uint8_t  disk_secret_enc[32];  /* disk key, XOR-wrapped by KDF(disk PIN) */
+    uint8_t  disk_secret_enc[32];  /* disk key, XOR-wrapped by PBKDF2(disk PIN) */
     uint8_t  disk_pin_salt[16];
-    uint8_t  disk_pin_hash[32];    /* SHA-256(disk PIN + salt) for verify */
+    uint8_t  disk_pin_hash[32];    /* PBKDF2-SHA256(disk PIN, salt) for verify */
     uint8_t  disk_secret_valid;    /* 1 once the disk PIN/secret are set */
     /* Brute-force protection (v5). */
     uint8_t  pin_fail;             /* wrong device-PIN attempts */
     uint8_t  pin_blocked;          /* device PIN blocked, PUK required */
     uint8_t  disk_fail;            /* wrong disk-PIN attempts */
     uint8_t  disk_blocked;         /* disk PIN blocked, PUK required */
-    uint8_t  puk_hash[32];         /* recovery PUK (SHA-256) */
+    uint8_t  puk_hash[32];         /* recovery PUK (PBKDF2-SHA256) */
+    uint8_t  puk_salt[16];
     uint8_t  puk_configured;
     uint8_t  puk_fail;             /* wrong PUK attempts */
     /* Persistent auto-lock override (v6). */
@@ -38,6 +42,11 @@ typedef struct {
     /* Selected profile (v7). */
     uint8_t  active_profile;
     uint8_t  active_profile_valid;
+    /* Credential wrapping key (v11): wraps every CTAP2 private key at rest.
+     * cwk_enc = PBKDF2(device PIN, cwk_salt) XOR cwk. */
+    uint8_t  cwk_enc[32];
+    uint8_t  cwk_salt[16];
+    uint8_t  cwk_configured;
 } fj_store_payload_t;
 
 typedef struct {
@@ -202,21 +211,26 @@ bool fj_keys_ctap2_save(const fj_ctap2_cred_t *creds) {
     return write_store();
 }
 
-bool fj_keys_set_pin_hash(const uint8_t hash[32]) {
-    memcpy(store.pin_hash, hash, 32);
+bool fj_keys_set_pin(const uint8_t pbkdf2_hash[32], const uint8_t salt[16],
+                     const uint8_t ctap2_verifier[16]) {
+    memcpy(store.pin_hash, pbkdf2_hash, 32);
+    memcpy(store.pin_salt, salt, 16);
+    memcpy(store.pin_ctap2_verifier, ctap2_verifier, 16);
+    store.pin_configured = 1;
     store.pin_fail = 0;
     store.pin_blocked = 0;
     return write_store();
 }
 
-bool fj_keys_get_pin_hash(uint8_t hash[32]) {
-    if (!store_loaded) return false;
-    /* All-zero means unset. */
-    uint8_t acc = 0;
-    for (size_t i = 0; i < 32; i++) acc |= store.pin_hash[i];
-    if (acc == 0) return false;
-    memcpy(hash, store.pin_hash, 32);
-    return true;
+bool fj_keys_pin_configured(void) {
+    return store_loaded && store.pin_configured != 0;
+}
+
+void fj_keys_get_pin(uint8_t pbkdf2_hash[32], uint8_t salt[16],
+                     uint8_t ctap2_verifier[16]) {
+    memcpy(pbkdf2_hash, store.pin_hash, 32);
+    memcpy(salt, store.pin_salt, 16);
+    memcpy(ctap2_verifier, store.pin_ctap2_verifier, 16);
 }
 
 bool fj_keys_disk_secret_set(void) {
@@ -240,6 +254,26 @@ bool fj_keys_set_disk_secret(const uint8_t enc[32], const uint8_t salt[16],
     store.disk_fail = 0;
     store.disk_blocked = 0;
     return write_store();
+}
+
+bool fj_keys_cwk_set(void) {
+    if (!store_loaded) return false;
+    return store.cwk_configured != 0;
+}
+
+bool fj_keys_set_cwk(const uint8_t enc[32], const uint8_t salt[16]) {
+    if (!store_loaded) return false;
+    memcpy(store.cwk_enc, enc, 32);
+    memcpy(store.cwk_salt, salt, 16);
+    store.cwk_configured = 1;
+    return write_store();
+}
+
+bool fj_keys_get_cwk(uint8_t enc[32], uint8_t salt[16]) {
+    if (!store_loaded || !store.cwk_configured) return false;
+    memcpy(enc, store.cwk_enc, 32);
+    memcpy(salt, store.cwk_salt, 16);
+    return true;
 }
 
 bool fj_keys_get_security(fj_security_t *sec) {
@@ -267,18 +301,20 @@ bool fj_keys_puk_configured(void) {
     return store.puk_configured != 0;
 }
 
-bool fj_keys_set_puk_hash(const uint8_t hash[32]) {
+bool fj_keys_set_puk(const uint8_t pbkdf2_hash[32], const uint8_t salt[16]) {
     if (!store_loaded) return false;
-    memcpy(store.puk_hash, hash, 32);
+    memcpy(store.puk_hash, pbkdf2_hash, 32);
+    memcpy(store.puk_salt, salt, 16);
     store.puk_configured = 1;
     store.puk_fail = 0;
     return write_store();
 }
 
-bool fj_keys_get_puk_hash(uint8_t hash[32]) {
+bool fj_keys_get_puk(uint8_t pbkdf2_hash[32], uint8_t salt[16]) {
     if (!store_loaded) return false;
     if (!store.puk_configured) return false;
-    memcpy(hash, store.puk_hash, 32);
+    memcpy(pbkdf2_hash, store.puk_hash, 32);
+    memcpy(salt, store.puk_salt, 16);
     return true;
 }
 

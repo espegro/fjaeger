@@ -15,6 +15,7 @@
 #include "msc_disk.h"
 #include "keys.h"
 #include "crypto.h"
+#include "state.h"
 #include "rgb_led.h"
 
 #include "hardware/flash.h"
@@ -392,24 +393,13 @@ void fj_msc_init(void) {
     fs_initialised = false;
 }
 
-/* Derive a 32-byte wrap key from the disk PIN and salt via HKDF. */
-static bool disk_wrap_key(const char *pin, const uint8_t salt[16], uint8_t wrap[32]) {
-    uint8_t ikm[FJ_AES_KEY_LEN];
-    memset(ikm, 0, sizeof(ikm));
-    size_t n = strlen(pin);
-    if (n > sizeof(ikm)) n = sizeof(ikm);
-    memcpy(ikm, pin, n);
-    return fj_hkdf(ikm, "diskwrap", salt, 16, wrap);
-}
-
-/* Hash the disk PIN with its salt (SHA-256), matching the stored hash. */
-static void disk_pin_hash(const char *pin, const uint8_t salt[16], uint8_t out[32]) {
-    uint8_t buf[48];
-    size_t n = strlen(pin);
-    if (n > 32) n = 32;
-    memcpy(buf, pin, n);
-    memcpy(buf + n, salt, 16);
-    fj_sha256(buf, n + 16, out);
+/* Derive the 32-byte disk wrap/verification key from the disk PIN and salt
+ * using slow, salted PBKDF2-HMAC-SHA256. The same value is used both to wrap
+ * the disk key and to verify the PIN, so a dumped store cannot be brute-forced
+ * offline with a fast hash. */
+static bool disk_derive(const char *pin, const uint8_t salt[16], uint8_t out[32]) {
+    return fj_pbkdf2_sha256((const uint8_t *)pin, strlen(pin), salt, 16,
+                            FJ_PBKDF2_ITERATIONS, out);
 }
 
 /* Verify the disk PIN (constant-time) and unwrap the disk key into disk_key. */
@@ -417,15 +407,14 @@ static bool disk_unwrap(const char *pin) {
     uint8_t enc[32], salt[16], hash[32];
     fj_keys_get_disk_secret(enc, salt, hash);
 
-    uint8_t h[32];
-    disk_pin_hash(pin, salt, h);
+    uint8_t w[32];
+    if (!disk_derive(pin, salt, w)) return false;
+
     uint8_t acc = 0;
-    for (int i = 0; i < 32; i++) acc |= h[i] ^ hash[i];
+    for (int i = 0; i < 32; i++) acc |= w[i] ^ hash[i];
     if (acc != 0) return false;
 
-    uint8_t wrap[32];
-    if (!disk_wrap_key(pin, salt, wrap)) return false;
-    for (int i = 0; i < 32; i++) disk_key[i] = enc[i] ^ wrap[i];
+    for (int i = 0; i < 32; i++) disk_key[i] = enc[i] ^ w[i];
     return true;
 }
 
@@ -453,25 +442,30 @@ bool fj_msc_pin_blocked(void) {
 bool fj_msc_unlock(const char *pin) {
     if (!pin || !fj_keys_disk_secret_set()) return false;
 
-    /* Brute-force protection: a blocked disk PIN requires the PUK. */
+    /* Brute-force protection: a blocked disk PIN requires the PUK, and a
+     * growing delay is imposed between failed attempts. */
     fj_security_t sec;
     if (!fj_keys_get_security(&sec)) return false;
     if (sec.disk_blocked) return false;
+    if (!fj_state_brute_ok(FJ_BRUTE_DISK)) return false;
 
     if (!disk_unwrap(pin)) {
-        /* Wrong disk PIN: count it and block once the limit is reached. */
+        /* Wrong disk PIN: count it, grow the backoff delay and block once
+         * the limit is reached. */
         sec.disk_fail++;
         if (sec.disk_fail >= FJ_MAX_PIN_FAILS) sec.disk_blocked = 1;
         fj_keys_set_security(&sec);
+        fj_state_brute_failure(FJ_BRUTE_DISK);
         return false;
     }
 
-    /* Correct disk PIN resets the counter. */
+    /* Correct disk PIN resets the counter and the backoff delay. */
     if (sec.disk_fail != 0 || sec.disk_blocked) {
         sec.disk_fail = 0;
         sec.disk_blocked = 0;
         fj_keys_set_security(&sec);
     }
+    fj_state_brute_success(FJ_BRUTE_DISK);
 
     if (!fj_msc_prepare()) return false;
     disk_unlocked = true;
@@ -515,9 +509,9 @@ bool fj_msc_set_pin(const char *pin) {
         fj_random(salt, sizeof(salt));
     }
 
-    if (!disk_wrap_key(pin, salt, wrap)) return false;
+    if (!disk_derive(pin, salt, wrap)) return false;
     for (int i = 0; i < 32; i++) enc[i] = disk_key[i] ^ wrap[i];
-    disk_pin_hash(pin, salt, hash);
+    memcpy(hash, wrap, 32);   /* verification hash == wrap key (same PBKDF2) */
 
     if (!fj_keys_set_disk_secret(enc, salt, hash)) return false;
     if (!fj_msc_prepare()) return false;

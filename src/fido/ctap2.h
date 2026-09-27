@@ -38,6 +38,11 @@ void fj_ctap2_forget_all(void);
  * persistent store. */
 void fj_ctap2_forget_profile(unsigned profile_id);
 
+/* Invalidate any in-progress resident-credential discovery. Call after the
+ * active profile changes so a buffered credential selection is not reused
+ * across a profile switch. */
+void fj_ctap2_invalidate_discovery(void);
+
 /* Process one complete CTAP2 message. 'msg' is the CBOR-message payload
  * as received on the U2FHID CBOR channel (first byte is the CTAP2 command
  * byte). Writes the CBOR response into 'out' (up to out_cap bytes) and

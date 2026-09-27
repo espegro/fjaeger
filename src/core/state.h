@@ -67,6 +67,13 @@ bool fj_state_set_puk(const char *puk);
  * success. */
 bool fj_state_set_pin(const char *pin);
 
+/* The credential wrapping key (CWK), held in RAM only while the device is
+ * unlocked. ctap2.c uses it to encrypt/decrypt credential private keys at
+ * rest. Returns true and copies the 32-byte CWK into 'out' if it is
+ * currently available (device unlocked by entering the device PIN). Returns
+ * false when it is not derivable (e.g. unlocked via PUK, or no PIN set). */
+bool fj_state_cwk(uint8_t out[32]);
+
 /* Erase a profile and every credential bound to it as one consistent
  * operation: first the live CTAP2 cache is purged, then the persistent
  * store is updated and flushed. Rejects erasing the active profile. */
@@ -74,6 +81,28 @@ bool fj_state_profile_erase(unsigned profile_id);
 
 /* Called from the main loop to enforce the auto-relock timeout. */
 void fj_state_tick(void);
+
+/* Brute-force delay gate (RAM-only, monotonic, exponential backoff).
+ *
+ * A failed PIN / PUK / disk-PIN attempt imposes a growing delay before the
+ * next attempt on that input is accepted, so an online attacker cannot
+ * brute-force a passphrase rapidly. The persistent failure counters (which
+ * block after FJ_MAX_PIN_FAILS / FJ_MAX_PUK_FAILS and survive reboot) remain
+ * the hard stop; this only slows the rate of live attempts. Each context has
+ * its own independent delay, mirroring the separate persistent counters.
+ *
+ *   fj_state_brute_ok(ctx)      -> true if an attempt is currently permitted.
+ *   fj_state_brute_failure(ctx) -> record a failed attempt (grows the delay).
+ *   fj_state_brute_success(ctx) -> clear the delay on a correct passphrase. */
+typedef enum {
+    FJ_BRUTE_PIN,   /* device PIN (console UNLOCK + CTAP2 getPinToken) */
+    FJ_BRUTE_PUK,   /* recovery PUK (UNLOCKPUK) */
+    FJ_BRUTE_DISK,  /* disk PIN (DISK UNLOCK) */
+} fj_brute_ctx_t;
+
+void fj_state_brute_success(fj_brute_ctx_t ctx);
+void fj_state_brute_failure(fj_brute_ctx_t ctx);
+bool fj_state_brute_ok(fj_brute_ctx_t ctx);
 
 /* Persist an auto-relock timeout in seconds (0 disables). */
 bool fj_state_set_timeout(uint32_t seconds);

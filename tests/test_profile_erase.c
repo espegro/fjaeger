@@ -69,6 +69,15 @@ bool fj_ecdsa_generate_private(uint8_t k[32]) { memset(k, 0x42, 32); k[31] = 1; 
 bool fj_ecdsa_pubkey(const uint8_t k[32], uint8_t pub[65]) {
     (void)k; pub[0] = 4; memset(pub + 1, 0x11, 32); memset(pub + 33, 0x22, 32); return true;
 }
+bool fj_ecdh_shared_secret(const uint8_t k[32], const uint8_t p[65], uint8_t out[32]) {
+    (void)k; (void)p; memset(out, 0xAA, 32); return true;
+}
+bool fj_aes_cbc(const uint8_t key[32], const uint8_t iv[16], uint8_t *buf, size_t len, bool enc) {
+    (void)key; (void)iv; (void)buf; (void)len; (void)enc; return true;
+}
+bool fj_hmac_sha256(const uint8_t *key, size_t key_len, const uint8_t *data, size_t len, uint8_t out[32]) {
+    (void)key; (void)key_len; (void)data; (void)len; memset(out, 0xBB, 32); return true;
+}
 bool fj_ecdsa_sign(const uint8_t k[32], const uint8_t d[32], uint8_t s[64]) {
     (void)k; (void)d; memset(s, 0x33, 64); return true;
 }
@@ -82,23 +91,98 @@ bool fj_ecdsa_signature_der(const uint8_t s[64], uint8_t *out, size_t cap, size_
 absolute_time_t get_absolute_time(void) { return 0; }
 int64_t absolute_time_diff_us(absolute_time_t a, absolute_time_t b) { (void)a; return b; }
 void fj_msc_lock(void) {}
-/* Store the PIN hash so the real state.c unlock path can verify it. */
+/* Store the PIN/PUK so the real state.c unlock path can verify them. */
 static uint8_t stored_pin[32];
+static uint8_t stored_pin_salt[16];
+static uint8_t stored_puk[32];
+static uint8_t stored_puk_salt[16];
 static bool have_pin = false;
-bool fj_keys_set_pin_hash(const uint8_t h[32]) {
-    memcpy(stored_pin, h, 32); have_pin = true; return true;
+static bool have_puk = false;
+
+/* Deterministic PBKDF2 stand-in (consistent for same pw+salt). */
+bool fj_pbkdf2_sha256(const uint8_t *pw, size_t pw_len, const uint8_t *salt,
+                      size_t salt_len, uint32_t iter, uint8_t out[32]) {
+    memset(out, 0, 32);
+    size_t n = 0;
+    for (size_t i = 0; i < pw_len; i++) { out[n % 32] ^= (uint8_t)(pw[i] + i); n++; }
+    for (size_t i = 0; i < salt_len; i++) out[(n + i) % 32] ^= (uint8_t)(salt[i] + i);
+    out[0] ^= (uint8_t)iter;
+    return true;
 }
-bool fj_keys_get_pin_hash(uint8_t h[32]) {
-    if (!have_pin) return false;
-    memcpy(h, stored_pin, 32); return true;
+
+bool fj_keys_set_pin(const uint8_t pbkdf2_hash[32], const uint8_t salt[16],
+                     const uint8_t ctap2_verifier[16]) {
+    memcpy(stored_pin, pbkdf2_hash, 32);
+    memcpy(stored_pin_salt, salt, 16);
+    (void)ctap2_verifier;
+    have_pin = true;
+    return true;
 }
+bool fj_keys_pin_configured(void) { return have_pin; }
+void fj_keys_get_pin(uint8_t pbkdf2_hash[32], uint8_t salt[16], uint8_t ctap2_verifier[16]) {
+    memcpy(pbkdf2_hash, stored_pin, 32);
+    memcpy(salt, stored_pin_salt, 16);
+    (void)ctap2_verifier;
+}
+void fj_led_pin_lock(void) {}
+void fj_led_pin_unlock(void) {}
+void fj_led_sign(void) {}
 bool fj_keys_get_security(fj_security_t *s) { memset(s, 0, sizeof(*s)); return true; }
 bool fj_keys_set_security(const fj_security_t *s) { (void)s; return true; }
-bool fj_keys_set_puk_hash(const uint8_t h[32]) { (void)h; return true; }
-bool fj_keys_get_puk_hash(uint8_t h[32]) { (void)h; return false; }
-void fj_keys_wipe(void) { have_pin = false; memset(stored_pin, 0, sizeof(stored_pin)); }
+bool fj_keys_set_puk(const uint8_t pbkdf2_hash[32], const uint8_t salt[16]) {
+    memcpy(stored_puk, pbkdf2_hash, 32);
+    memcpy(stored_puk_salt, salt, 16);
+    have_puk = true;
+    return true;
+}
+bool fj_keys_get_puk(uint8_t pbkdf2_hash[32], uint8_t salt[16]) {
+    if (!have_puk) return false;
+    memcpy(pbkdf2_hash, stored_puk, 32);
+    memcpy(salt, stored_puk_salt, 16);
+    return true;
+}
+void fj_keys_wipe(void) {
+    have_pin = false; have_puk = false;
+    memset(stored_pin, 0, sizeof(stored_pin));
+    memset(stored_pin_salt, 0, sizeof(stored_pin_salt));
+    memset(stored_puk, 0, sizeof(stored_puk));
+    memset(stored_puk_salt, 0, sizeof(stored_puk_salt));
+}
 bool fj_keys_get_timeout(uint32_t *s) { *s = 900; return true; }
 bool fj_keys_set_timeout(uint32_t s) { (void)s; return true; }
+
+/* Credential wrapping key stubs (state.c + ctap2.c dependencies). */
+static uint8_t stored_cwk_enc[32];
+static uint8_t stored_cwk_salt[16];
+static bool have_cwk = false;
+bool fj_keys_cwk_set(void) { return have_cwk; }
+bool fj_keys_set_cwk(const uint8_t enc[32], const uint8_t salt[16]) {
+    memcpy(stored_cwk_enc, enc, 32);
+    memcpy(stored_cwk_salt, salt, 16);
+    have_cwk = true;
+    return true;
+}
+bool fj_keys_get_cwk(uint8_t enc[32], uint8_t salt[16]) {
+    if (!have_cwk) return false;
+    memcpy(enc, stored_cwk_enc, 32);
+    memcpy(salt, stored_cwk_salt, 16);
+    return true;
+}
+bool fj_aes_gcm_encrypt(const uint8_t key[32], const uint8_t nonce[12],
+                        const uint8_t *in, size_t len,
+                        uint8_t *out, uint8_t tag[16]) {
+    (void)key; (void)nonce;
+    memcpy(out, in, len);
+    memset(tag, 0, 16);
+    return true;
+}
+bool fj_aes_gcm_decrypt(const uint8_t key[32], const uint8_t nonce[12],
+                        const uint8_t tag[16],
+                        const uint8_t *in, size_t len, uint8_t *out) {
+    (void)key; (void)nonce; (void)tag;
+    memcpy(out, in, len);
+    return true;
+}
 
 /* --- helpers --------------------------------------------------------- */
 static unsigned count_profile(unsigned profile) {

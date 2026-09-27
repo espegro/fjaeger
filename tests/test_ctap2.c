@@ -15,6 +15,10 @@ static uint8_t random_byte = 1;
 
 fj_state_t fj_state_get(void) { return FJ_STATE_UNLOCKED; }
 
+void fj_state_brute_success(fj_brute_ctx_t ctx) { (void)ctx; }
+void fj_state_brute_failure(fj_brute_ctx_t ctx) { (void)ctx; }
+bool fj_state_brute_ok(fj_brute_ctx_t ctx) { (void)ctx; return true; }
+
 unsigned fj_keys_active_profile(void) { return 0; }
 
 void fj_keys_ctap2_load(fj_ctap2_cred_t *out) {
@@ -49,6 +53,57 @@ bool fj_ecdsa_pubkey(const uint8_t private_key[32], uint8_t pub[65]) {
     memset(pub + 33, 0x22, 32);
     return true;
 }
+
+bool fj_ecdh_shared_secret(const uint8_t private_key[32], const uint8_t peer_pub[65],
+                           uint8_t out[32]) {
+    (void)private_key; (void)peer_pub;
+    memset(out, 0xAA, 32);
+    return true;
+}
+
+bool fj_aes_cbc(const uint8_t key[32], const uint8_t iv[16],
+                uint8_t *buf, size_t len, bool encrypt) {
+    (void)key; (void)iv; (void)buf; (void)len; (void)encrypt;
+    return true;
+}
+
+bool fj_state_cwk(uint8_t out[32]) {
+    memset(out, 0x5A, 32);
+    return true;
+}
+
+bool fj_aes_gcm_encrypt(const uint8_t key[32], const uint8_t nonce[12],
+                        const uint8_t *in, size_t len,
+                        uint8_t *out, uint8_t tag[16]) {
+    (void)key; (void)nonce;
+    memcpy(out, in, len);
+    memset(tag, 0, 16);
+    return true;
+}
+
+bool fj_aes_gcm_decrypt(const uint8_t key[32], const uint8_t nonce[12],
+                        const uint8_t tag[16],
+                        const uint8_t *in, size_t len, uint8_t *out) {
+    (void)key; (void)nonce; (void)tag;
+    memcpy(out, in, len);
+    return true;
+}
+
+bool fj_hmac_sha256(const uint8_t *key, size_t key_len,
+                    const uint8_t *data, size_t len,
+                    uint8_t out[32]) {
+    (void)key; (void)key_len; (void)data; (void)len;
+    memset(out, 0xBB, 32);
+    return true;
+}
+
+bool fj_keys_get_security(fj_security_t *s) { memset(s, 0, sizeof(*s)); return true; }
+bool fj_keys_set_security(const fj_security_t *s) { (void)s; return true; }
+bool fj_keys_pin_configured(void) { return false; }
+void fj_keys_get_pin(uint8_t pbkdf2[32], uint8_t salt[16], uint8_t verifier[16]) {
+    (void)pbkdf2; (void)salt; (void)verifier;
+}
+void fj_led_sign(void) {}
 
 bool fj_ecdsa_sign(const uint8_t private_key[32], const uint8_t digest[32],
                    uint8_t signature[64]) {
@@ -130,7 +185,7 @@ int main(void) {
 
     request[0] = 0x04;
     len = fj_ctap2_dispatch(request, 1, response, sizeof(response));
-    assert_response_map(response, len, 5);
+    assert_response_map(response, len, 6);
 
     size_t request_len = make_request(request, sizeof(request));
     len = fj_ctap2_dispatch(request, request_len, response, sizeof(response));

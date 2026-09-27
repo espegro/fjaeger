@@ -1,161 +1,240 @@
-# TODO: profiler for SSH/FIDO-credentials
+# TODO: Profiles, SSH/FIDO credentials and storage hardening
 
-## Mål
+## Goal
 
-Gjør dagens konsoll-slots om til navngitte profiler, for eksempel «Privat»,
-«Jobb» og «Administrasjon». Hver profil skal ha flere selvstendige
-SSH/FIDO-credentials. Bare credentials i valgt profil skal kunne brukes eller
-oppdages. Enrollment skal automatisk knytte nye credentials til valgt profil.
+Turn the original console slots into named profiles such as "Private", "Work"
+and "Administration". Each profile has several independent SSH/FIDO
+credentials. Only the credentials in the selected profile can be used or
+discovered. Enrollment automatically binds new credentials to the selected
+profile.
 
-Dette dokumentet er implementeringsgrunnlag for OpenCode. Profilfunksjonen er
-ikke implementert ennå.
+> **Status:** profiles, resident/discoverable credentials, CTAP2 PIN +
+> credential management, PBKDF2 storage hardening and the LED security pulses
+> are **implemented and physically verified**. This document is the working plan
+> and record. Completed items are marked `[x]`; open items are `[ ]`.
 
-## Dagens situasjon
+## Current situation
 
-- `KEY PROVISION`, `KEY SELECT`, `KEY LIST` og `KEY ERASE` håndterer åtte
-  konsoll-slots med egne ECDSA-/AES-nøkler i `src/core/keys.c`.
-- CTAP2 har et separat lager med åtte credentials. Hvert credential har sin
-  egen private P-256-nøkkel og credential-ID.
-- CTAP2 bruker ikke valgt konsoll-slot. Alle credentials kan brukes når
-  enheten er ulåst, uansett `KEY SELECT`.
-- Den krypterte MSC-disken har en separat disknøkkel og disk-PIN.
-- Aktiv slot er foreløpig bare en RAM-verdi og starter på slot 0 ved boot.
-- Auto-lock er 900 sekunder som standard. `TIMEOUT` lagres permanent;
-  `TIMEOUT 0` deaktiverer auto-lock. Enhetslås lukker også disken.
+- `PROFILE LIST / CREATE / SELECT / RENAME / ERASE` manage up to eight named
+  profiles in `src/core/keys.c`. A profile is metadata plus an access filter.
+- CTAP2 has a store of eight credentials. Each credential has its own random
+  P-256 key, credential ID and RP binding, plus a `profile_id` tying it to one
+  profile.
+- CTAP2 uses the selected profile: only credentials in the active profile can be
+  used or discovered, and new credentials are bound to the active profile.
+- The encrypted MSC drive has a separate disk key and disk PIN.
+- Auto-lock defaults to 900 seconds. `TIMEOUT` is stored persistently;
+  `TIMEOUT 0` disables auto-lock. The device lock also closes the drive.
 
-Relevante filer: `src/core/keys.h/.c`, `src/core/state.h/.c`,
-`src/fido/ctap2.h/.c` og `src/usb/cdc_console.c`.
+Relevant files: `src/core/keys.h/.c`, `src/core/state.h/.c`,
+`src/core/crypto.h/.c`, `src/fido/ctap2.h/.c`, `src/fido/pin.h/.c`,
+`src/led/rgb_led.h/.c` and `src/usb/cdc_console.c`.
 
-## Foreslått modell
+## Model
 
-1. Behold opptil åtte profiler, identifisert med ID 0–7 og et navn.
-2. En profil er metadata og et tilgangsfilter. Den skal ikke generere en felles
-   privatnøkkel for alle sine credentials.
-3. Hvert CTAP2-credential får en `profile_id`, men beholder sin egen tilfeldig
-   genererte private nøkkel, credential-ID og RP-binding.
-4. Behold foreløpig åtte credentials totalt, fordelt fritt mellom profilene.
-   Åtte profiler betyr ikke åtte credentials per profil. En større kapasitet
-   kan vurderes separat; A/B-recorden må fortsatt passe i én 4 KiB-sektor.
-5. På et tomt lager opprettes profil 0 med navnet «Default», og denne velges.
-6. Lagre valgt profil permanent. Ved boot skal den valgte profilen finnes;
-   ellers velges en gyldig profil med en tydelig definert fallback.
-7. Enhets-PIN og recovery-PUK er fortsatt felles for hele donglen.
-8. MSC-disken er fortsatt felles og uavhengig av profilvalg. Profilbytte eller
-   profilsletting skal ikke endre disk-PIN, disknøkkel eller diskdata.
+1. Keep up to eight profiles, identified by ID 0–7 and a name.
+2. A profile is metadata and an access filter. It does not generate a shared
+   private key for all its credentials.
+3. Each CTAP2 credential has a `profile_id`, but keeps its own randomly
+   generated private key, credential ID and RP binding.
+4. Keep eight credentials total for now, distributed freely among the profiles.
+   Eight profiles does not mean eight credentials per profile. A larger
+   capacity can be considered separately; the A/B record must still fit in one
+   4 KiB sector.
+5. On an empty store, profile 0 is created with the name "Default" and
+   selected.
+6. Store the selected profile permanently. On boot the stored profile must
+   exist; otherwise a valid profile with a clearly defined fallback is chosen.
+7. The device PIN and recovery PUK remain shared for the whole dongle.
+8. The MSC drive remains shared and independent of the profile selection.
+   Profile switching or deletion must not change the disk PIN, disk key or
+   drive data.
 
-Eksempel:
+Example:
 
-| Profil | Credentials |
+| Profile | Credentials |
 |---|---|
-| 0: Privat | Privat server, GitHub |
-| 1: Jobb | Jobbserver, GitLab |
-| 2: Administrasjon | Driftsserver |
+| 0: Private | Private server, GitHub |
+| 1: Work | Work server, GitLab |
+| 2: Administration | Ops server |
 
-Når profil 1 er valgt, skal en signeringsforespørsel med credential-ID fra
-profil 0 avvises. SSH-filen på PC-en peker fortsatt på samme credential-ID;
-brukeren må velge riktig profil før den kan brukes.
+When profile 1 is selected, a signing request with a credential ID from
+profile 0 is rejected. The SSH file on the PC still points at the same
+credential ID; the user must select the right profile before it can be used.
 
-Profilene gir organisering og tilgangsstyring i fastvaren. Med felles PIN og
-fri profilvelging er de ikke separate sikkerhetsdomener med egne brukere.
+Profiles provide organization and access control in the firmware. With a shared
+PIN and free profile selection they are not separate security domains with their
+own users.
 
-## Konsollkommandoer
+## Console commands
 
-Bruk tydelige `PROFILE`-kommandoer som hovedgrensesnitt:
+Use clear `PROFILE` commands as the main interface:
 
-| Kommando | Foreslått oppførsel |
+| Command | Behavior |
 |---|---|
-| `PROFILE LIST` | Vis ID, navn, aktiv markering og antall credentials |
-| `PROFILE CREATE <id> <name>` | Opprett en tom profil; avvis eksisterende ID |
-| `PROFILE SELECT <id>` | Velg og lagre aktiv profil; avvis ukjent ID |
-| `PROFILE RENAME <id> <name>` | Endre navn uten å endre credentials |
-| `PROFILE ERASE <id>` | Slett profilen og alle dens credentials |
+| `PROFILE LIST` | Show ID, name, active marker and credential count |
+| `PROFILE CREATE <id> <name>` | Create an empty profile; reject an existing ID |
+| `PROFILE SELECT <id>` | Select and persist the active profile; reject an unknown ID |
+| `PROFILE RENAME <id> <name>` | Rename without changing credentials |
+| `PROFILE ERASE <id>` | Delete the profile and all its credentials |
 
-- Muterende kommandoer krever ulåst enhet, som dagens `KEY`-kommandoer.
-- `STATUS` skal vise aktiv profil og relevant credential-antall.
-- Avvis sletting av aktiv profil; brukeren må velge en annen først. Dermed
-  finnes alltid minst én profil og aktiv profil forblir gyldig.
-- Ikke la `CREATE` eller `RENAME` overskrive en profil eller dens credentials.
-- Definer og dokumenter grenser for navn og ID. Enkle navn uten mellomrom er
-  tilstrekkelig i første versjon.
-- Fjern eller avvikle de gamle `KEY`-kommandoene tydelig. Ikke behold en
-  misvisende `KEY PROVISION` som genererer nøkler CTAP2 aldri bruker.
+- Mutating commands require an unlocked device, like the old `KEY` commands.
+- `STATUS` shows the active profile and the relevant credential count.
+- Refuse deleting the active profile; the user must select another first. This
+  means at least one profile always exists and the active profile stays valid.
+- Do not let `CREATE` or `RENAME` overwrite a profile or its credentials.
+- Define and document limits for names and IDs. Simple names without spaces are
+  sufficient in the first version.
+- The old `KEY` commands are gone (a misleading `KEY PROVISION` that generated
+  keys CTAP2 never used would have been confusing).
+- `RESET BOOTSEL` reboots into the ROM USB bootloader for re-flashing (not
+  listed in HELP).
 
-## CTAP2-endringer
+## CTAP2 changes
 
-- [ ] `makeCredential` knytter credentialet til aktiv profil.
-- [ ] `getAssertion` med `allowList` godtar bare credentials i aktiv profil.
-- [ ] Credential-ID og RP-hash skal begge valideres før signering.
-- [ ] Søk uten `allowList` skal også filtrere på aktiv profil.
-- [ ] `excludeList` må håndteres korrekt. Kontroller eksisterende ID/RP-binding
-      på tvers av profiler og avvis dublettregistrering uten å røpe profilnavn.
-- [ ] Profilbytte/sletting ugyldiggjør eventuell pågående assertion-enumerering
-      og annen bufret credential-seleksjon.
-- [ ] Låst enhet avviser fortsatt enrollment og signering.
+- [x] `makeCredential` binds the credential to the active profile.
+- [x] `getAssertion` with an `allowList` accepts only credentials in the active
+      profile.
+- [x] Credential ID and RP hash are both validated before signing.
+- [x] A search without an `allowList` also filters on the active profile.
+- [x] `excludeList` is handled correctly. Existing ID/RP bindings are checked
+      across profiles and duplicate registration is rejected without revealing
+      profile names.
+- [x] Profile switching/deletion invalidates any in-progress assertion
+      enumeration and other buffered credential selection.
+- [x] A locked device still rejects enrollment and signing.
 
-I første versjon beholdes ECDSA P-256/ES256. Ed25519 er ikke en del av denne
-oppgaven.
+ECDSA P-256 / ES256 is kept in the first version. Ed25519 is not part of this
+task.
 
-## Lagring og sletting
+## Storage and deletion
 
-- [ ] Erstatt de gamle slot-nøklene med profilmetadata; ikke behold ubrukt
-      privat-/AES-nøkkelmateriale.
-- [ ] Utvid credentialformatet med profil-ID og lagre aktiv profil.
-- [ ] Bump flashformatversjonen. Utviklingsdata kan tapes; migrering er ikke
-      nødvendig. Dokumenter at eksisterende credentials må enrolles på nytt.
-- [ ] Behold A/B-format, generasjonsteller, CRC og størrelsessjekk for 4 KiB.
-- [ ] Profilsletting oppdaterer både persistent lager og CTAP2-cachen med én
-      konsistent operasjon. En gammel cache må ikke kunne skrive slettede
-      credentials tilbake til flash via en utsatt flush.
-- [ ] Dokumenter at vanlig A/B-sletting kan etterlate nøkkelmateriale i den
-      eldre flashkopien frem til den overskrives. Ikke påstå fysisk sikker
-      sletting av enkeltprofiler uten å implementere og teste dette.
-- [ ] Factory-wipe sletter fortsatt begge flashkopier og alt live
-      nøkkelmateriale, inkludert profil- og credential-tilstand.
+- [x] The old slot keys were replaced with profile metadata; unused
+      private/AES key material is not retained.
+- [x] The credential format was extended with a profile ID and the active
+      profile is stored.
+- [x] The flash format version was bumped. Development data may be lost;
+      migration is not required. Document that existing credentials must be
+      re-enrolled.
+- [x] The A/B format, generation counter, CRC and the 4 KiB size check are kept.
+- [x] Profile deletion updates both the persistent store and the CTAP2 cache in
+      one consistent operation. A stale cache cannot write deleted credentials
+      back to flash via a deferred flush.
+- [x] Document that ordinary A/B deletion can leave key material in the older
+      flash copy until it is overwritten. Do not claim physical secure deletion
+      of individual profiles without implementing and testing it.
+- [x] Factory wipe still deletes both flash copies and all live key material,
+      including profile and credential state.
 
-## Resident credentials: egen oppfølgingsoppgave
+## Resident credentials (implemented and verified)
 
-Profiler skal utformes slik at resident/discoverable credentials senere kan
-brukes innenfor aktiv profil. Dette krever mer enn å annonsere `rk: true`:
+Profiles were designed so that resident/discoverable credentials can be used
+within the active profile. This required more than advertising `rk: true`:
 
-- Lagre resident-markering, RP-informasjon og user-ID/metadata korrekt.
-- Implementere korrekt user-entity i assertion-responsen.
-- Håndtere flere treff med `numberOfCredentials` og `getNextAssertion`.
-- Implementere nødvendige credential-management- og autentiseringsfunksjoner
-  for at OpenSSH/libfido2 faktisk kan hente nøkler med `ssh-keygen -K`.
-- Oppdagelse og eksport av credential-håndtak skal bare vise aktiv profil.
-- Teste `ssh-keygen -t ecdsa-sk -O resident` og `ssh-keygen -K` ende til ende.
+- [x] Store the resident marker, RP information and user ID/metadata correctly.
+- [x] Implement the correct user entity in the assertion response.
+- [x] Handle multiple matches with `numberOfCredentials` and
+      `getNextAssertion`.
+- [x] Implement the credential-management and PIN/UV-authentication functions
+      so OpenSSH/libfido2 can actually download keys with `ssh-keygen -K`.
+- [x] Discovery and export of credential handles only shows the active profile.
+- [x] Test `ssh-keygen -t ecdsa-sk -O resident` and `ssh-keygen -K` end to end.
 
-Dagens søk etter RP-hash alene er ikke full resident-støtte. Privatnøkler skal
-aldri eksporteres; det som kan hentes til PC-en er credential-håndtak og public
-key. Resident-støtte kan implementeres etter at profilisolasjonen fungerer.
+Implemented and physically verified on the RP2350 dongle:
+`authenticatorClientPIN` (0x06, PIN/UV auth protocol 1 with ECDH/HKDF/AES-CBC/
+HMAC), `authenticatorCredentialManagement` (0x0A) and
+`authenticatorGetNextAssertion` (0x08). `ssh-keygen -t ecdsa-sk -O resident`,
+`ssh-keygen -K`, signing and verification work end to end with profile
+isolation (active profile only). The CTAP2 PIN reuses the device's global PIN:
+no PIN set → accepts anything (dummy); PIN set → verified against the stored
+verifier. Note: CTAP2 requires canonical CBOR key ordering (ascending length) —
+`credMgmt` must precede `clientPin` in the getInfo options.
 
-## Akseptansetester
+A search by RP hash alone is not full resident support. Private keys are never
+exported; what can be fetched to the PC is the credential handle and public
+key.
 
-- [ ] Tom enhet starter låst med profil 0 «Default» og timeout 900 sekunder.
-- [ ] Opprett profil A og B, enroll minst to credentials i A og ett i B.
-- [ ] Alle A-credentials signerer når A er valgt; B-credentialet avvises.
-- [ ] Etter bytte til B er resultatet motsatt.
-- [ ] Feil profil, feil RP og ukjent credential-ID returnerer ingen signatur.
-- [ ] Profilvalg, navn og credential-binding overlever reset og kaldstart.
-- [ ] Sletting av en inaktiv profil gjør dens credentials ubrukelige
-      umiddelbart og etter omstart. Andre profiler fungerer fortsatt.
-- [ ] Sletting av aktiv profil og overskriving via `CREATE` avvises.
-- [ ] Fullt credentiallager avvises uten å endre eksisterende credentials.
-- [ ] Lås/auto-lock avviser signering og lukker MSC uansett valgt profil.
-- [ ] Profilbytte og profilsletting påvirker ikke diskdata.
-- [ ] Factory-wipe etter fem feil PUK-forsøk tømmer alle profiler og
-      credentials; ved neste oppstart opprettes tom «Default»-profil.
-- [ ] Eksisterende hosttester og firmwarebygg består. Legg til hosttester som
-      spesielt dekker profilfilter og cache-/persistenssamspill.
-- [ ] Fysisk OpenSSH-regresjon: enroll, sign, verify og reell SSH-innlogging
-      med credentials fra minst to profiler.
+## Storage hardening: slow salted KDF (implemented and verified)
 
-## Foreslått implementeringsrekkefølge
+The device PIN, disk PIN and recovery PUK are no longer stored with fast
+SHA-256 / HKDF hashes that could be brute-forced offline from a flash dump.
 
-1. Modell og persistent profilmetadata, inkludert tom Default-profil.
-2. Profilkommandoer og validering i konsollen.
-3. Profilbinding ved enrollment og filtrering av alle credential-oppslag.
-4. Konsistent profilsletting og håndtering av live CTAP2-cache.
-5. Hosttester, firmwarebygg og fysisk OpenSSH-regresjon.
-6. Oppdater README.md og STATUS.md med faktisk testet oppførsel.
-7. Resident credentials som separat utvidelse.
+- [x] Added `fj_pbkdf2_sha256()` (PBKDF2-HMAC-SHA256) to `crypto.c`, validated
+      against RFC 6070 test vectors.
+- [x] Device PIN: stored as a salted PBKDF2 hash + a separate
+      `LEFT(SHA-256(pin),16)` CTAP2 client-PIN verifier (the CTAP2 protocol only
+      transmits that value). Verified in constant time.
+- [x] Disk PIN: the disk key is wrapped with the PBKDF2-derived disk-PIN key;
+      the stored verification hash is the same PBKDF2 output.
+- [x] Recovery PUK: stored as a salted PBKDF2 hash.
+- [x] Per-field random salt (16 bytes) persisted in the store; store version
+      bumped.
+- [x] Wrong-PIN / wrong-PUK / wrong-disk-PIN counters are reset on success and
+      block after `FJ_MAX_*_FAILS`; five wrong PUKs trigger a factory wipe.
+- [x] Physically verified: PIN unlock/lockout/PUK-recovery, disk set/unlock/
+      mount/read-write, locked-disk inaccessible to the host, and reboot
+      persistence of PIN/PUK/disk key.
+
+Open items:
+- [ ] Add a time delay on failed attempts in addition to the persistent
+      counters.
+- [ ] Consider whether the RP2350 can afford more PBKDF2 iterations or a
+      memory-hard KDF (PBKDF2 at 100k runs in the main loop and takes a couple
+      of seconds).
+- [ ] The SSH/CTAP2 credential private keys are stored in flash in clear; only
+      the disk key is wrapped. Protecting them (e.g. wrapping all key material)
+      is a larger security change.
+
+## LED security pulses (implemented)
+
+The RGB status LED now shows distinct brief pulses for security events in
+addition to the steady lock/USB state:
+
+- [x] Green flash on a successful PIN unlock.
+- [x] Red flash on lock.
+- [x] Cyan flash when an SSH key signs (after a successful ECDSA signature).
+- [x] Steady states unchanged: green = unlocked, red blink = locked,
+      amber = not enumerated, blue = USB activity / suspended.
+- [ ] Visually confirm the cyan blink on the dongle during an SSH signing
+      (the signing path that calls `fj_led_sign()` is verified to run, but the
+      physical blink needs a human observer).
+
+## Acceptance tests
+
+- [x] An empty device starts locked with profile 0 "Default" and a 900-second
+      timeout.
+- [x] Create profile A and B, enroll at least two credentials in A and one in B.
+- [x] All A credentials sign when A is selected; the B credential is rejected.
+- [x] After switching to B the result is reversed.
+- [x] Wrong profile, wrong RP and unknown credential ID return no signature.
+- [x] Profile selection, name and credential binding survive reset and cold
+      start.
+- [x] Deleting an inactive profile makes its credentials unusable immediately
+      and after reboot. Other profiles still work.
+- [x] Deleting the active profile and overwriting via `CREATE` are rejected.
+- [x] A full credential store is rejected without changing existing
+      credentials.
+- [x] Lock/auto-lock rejects signing and closes the MSC regardless of the
+      selected profile.
+- [x] Profile switching and deletion do not affect drive data.
+- [x] Factory wipe after five wrong PUK attempts clears all profiles and
+      credentials; on the next boot an empty "Default" profile is created.
+- [x] Existing host tests and firmware builds pass. Host tests were added that
+      specifically cover the profile filter and cache/persistence interplay.
+- [ ] Physical OpenSSH regression: enroll, sign, verify and real SSH login with
+      credentials from at least two profiles (enroll/sign/verify with one
+      profile and `ssh-keygen -K` are verified; two profiles and real SSH login
+      remain).
+- [ ] Real SSH login against an external (non-local) host.
+
+## Implementation order
+
+1. Model and persistent profile metadata, including an empty Default profile.
+2. Profile commands and validation in the console.
+3. Profile binding on enrollment and filtering of all credential lookups.
+4. Consistent profile deletion and live CTAP2 cache handling.
+5. Host tests, firmware builds and physical OpenSSH regression.
+6. Update README.md and STATUS.md with the actually tested behavior.
+7. Resident credentials as a separate extension (now implemented and verified).
+8. PBKDF2 storage hardening for PIN/PUK/disk key (now implemented and verified).
+9. LED security pulses (now implemented).

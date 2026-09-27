@@ -23,10 +23,12 @@
 
 #include "tusb.h"
 #include "pico/time.h"
+#include "pico/bootrom.h"
 #include "hardware/watchdog.h"
 
 #include "state.h"
 #include "keys.h"
+#include "ctap2.h"
 #include "msc_disk.h"
 #include "rgb_led.h"
 
@@ -316,6 +318,9 @@ static void cmd_profile_select(const char *arg) {
     }
     unsigned n = (unsigned)parsed;
     if (fj_keys_profile_select(n)) {
+        /* A new active profile invalidates any buffered discovery so the
+         * next assertion cannot reuse a credential from the old profile. */
+        fj_ctap2_invalidate_discovery();
         char buf[64];
         snprintf(buf, sizeof(buf), "OK active profile = %u", n);
         outln(buf);
@@ -408,7 +413,15 @@ static void cmd_timeout(const char *arg) {
     outln(buf);
 }
 
-static void cmd_reset(void) {
+static void cmd_reset(const char *arg) {
+    /* RESET BOOTSEL reboots into the ROM USB bootloader for re-flashing. */
+    if (arg && strcasecmp(arg, "bootsel") == 0) {
+        outln("OK resetting device to bootsel");
+        fflush(NULL);
+        tight_loop_contents();
+        rom_reset_usb_boot(0, 0);
+        while (1) tight_loop_contents();
+    }
     outln("OK resetting device");
     fflush(NULL);
     tight_loop_contents();
@@ -460,7 +473,7 @@ static void dispatch(char *cmdline) {
     } else if (strcasecmp(tok, "timeout") == 0) {
         cmd_timeout(next_token(&p));
     } else if (strcasecmp(tok, "reset") == 0) {
-        cmd_reset();
+        cmd_reset(next_token(&p));
     } else {
         outln("ERR unknown command (try HELP)");
     }

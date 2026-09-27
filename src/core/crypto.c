@@ -9,8 +9,10 @@
 #include "mbedtls/aes.h"
 #include "mbedtls/asn1write.h"
 #include "mbedtls/bignum.h"
+#include "mbedtls/ecdh.h"
 #include "mbedtls/ecdsa.h"
 #include "mbedtls/ecp.h"
+#include "mbedtls/gcm.h"
 #include "mbedtls/hkdf.h"
 #include "mbedtls/md.h"
 #include "mbedtls/sha256.h"
@@ -223,4 +225,131 @@ bool fj_xts_sector(const uint8_t data_key[32], const uint8_t tweak[16],
                                 512, tweak, buf, buf);
     mbedtls_aes_xts_free(&ctx);
     return ret == 0;
+}
+
+bool fj_ecdh_shared_secret(const uint8_t private_key[32],
+                           const uint8_t peer_pub[65],
+                           uint8_t out[32]) {
+    mbedtls_ecp_group grp;
+    mbedtls_mpi d, z;
+    mbedtls_ecp_point q;
+    int ret = -1;
+
+    mbedtls_ecp_group_init(&grp);
+    mbedtls_mpi_init(&d);
+    mbedtls_mpi_init(&z);
+    mbedtls_ecp_point_init(&q);
+
+    if (mbedtls_ecp_group_load(&grp, MBEDTLS_ECP_DP_SECP256R1) != 0)
+        goto done;
+    if (mbedtls_mpi_read_binary(&d, private_key, 32) != 0)
+        goto done;
+    if (mbedtls_ecp_point_read_binary(&grp, &q, peer_pub, 65) != 0)
+        goto done;
+
+    /* z = d * q; mbedtls_ecdh_compute_shared exports the X coordinate. */
+    if (mbedtls_ecdh_compute_shared(&grp, &z, &q, &d,
+                                    crypto_rng, NULL) != 0)
+        goto done;
+    if (mbedtls_mpi_write_binary(&z, out, 32) != 0)
+        goto done;
+
+    ret = 0;
+done:
+    mbedtls_mpi_free(&z);
+    mbedtls_ecp_point_free(&q);
+    mbedtls_mpi_free(&d);
+    mbedtls_ecp_group_free(&grp);
+    return ret == 0;
+}
+
+bool fj_aes_cbc(const uint8_t key[32], const uint8_t iv[16],
+                uint8_t *buf, size_t len, bool encrypt) {
+    mbedtls_aes_context ctx;
+    int ret;
+
+    mbedtls_aes_init(&ctx);
+    if (encrypt)
+        ret = mbedtls_aes_setkey_enc(&ctx, key, 256);
+    else
+        ret = mbedtls_aes_setkey_dec(&ctx, key, 256);
+    if (ret != 0) {
+        mbedtls_aes_free(&ctx);
+        return false;
+    }
+
+    uint8_t iv_copy[16];
+    memcpy(iv_copy, iv, 16);
+    ret = mbedtls_aes_crypt_cbc(&ctx, encrypt ? MBEDTLS_AES_ENCRYPT
+                                              : MBEDTLS_AES_DECRYPT,
+                                len, iv_copy, buf, buf);
+    mbedtls_aes_free(&ctx);
+    return ret == 0;
+}
+
+bool fj_hmac_sha256(const uint8_t *key, size_t key_len,
+                    const uint8_t *data, size_t len,
+                    uint8_t out[32]) {
+    const mbedtls_md_info_t *md = mbedtls_md_info_from_type(MBEDTLS_MD_SHA256);
+    return mbedtls_md_hmac(md, key, key_len, data, len, out) == 0;
+}
+
+bool fj_pbkdf2_sha256(const uint8_t *password, size_t pw_len,
+                      const uint8_t *salt, size_t salt_len,
+                      uint32_t iterations, uint8_t out[32]) {
+    if (iterations == 0 || salt_len > 60) return false;
+
+    /* U_1 = HMAC(password, salt || INT(1)). */
+    uint8_t block[64];
+    memcpy(block, salt, salt_len);
+    block[salt_len] = 0;
+    block[salt_len + 1] = 0;
+    block[salt_len + 2] = 0;
+    block[salt_len + 3] = 1;
+
+    uint8_t u[32];
+    if (!fj_hmac_sha256(password, pw_len, block, salt_len + 4, u))
+        return false;
+    memcpy(out, u, 32);
+
+    /* T_1 = U_1 XOR U_2 XOR ... XOR U_iterations. */
+    for (uint32_t i = 1; i < iterations; i++) {
+        if (!fj_hmac_sha256(password, pw_len, u, 32, u)) return false;
+        for (int j = 0; j < 32; j++) out[j] ^= u[j];
+    }
+    return true;
+}
+
+bool fj_aes_gcm_encrypt(const uint8_t key[32], const uint8_t nonce[12],
+                        const uint8_t *in, size_t len,
+                        uint8_t *out, uint8_t tag[16]) {
+    mbedtls_gcm_context ctx;
+    mbedtls_gcm_init(&ctx);
+    int ret = mbedtls_gcm_setkey(&ctx, MBEDTLS_CIPHER_ID_AES, key, 256);
+    if (ret != 0) { mbedtls_gcm_free(&ctx); return false; }
+    /* No AAD. The ciphertext is written in place of the plaintext. */
+    ret = mbedtls_gcm_crypt_and_tag(&ctx, MBEDTLS_GCM_ENCRYPT, len,
+                                    nonce, 12, NULL, 0,
+                                    in, out, 16, tag);
+    mbedtls_gcm_free(&ctx);
+    return ret == 0;
+}
+
+bool fj_aes_gcm_decrypt(const uint8_t key[32], const uint8_t nonce[12],
+                        const uint8_t tag[16],
+                        const uint8_t *in, size_t len, uint8_t *out) {
+    mbedtls_gcm_context ctx;
+    mbedtls_gcm_init(&ctx);
+    int ret = mbedtls_gcm_setkey(&ctx, MBEDTLS_CIPHER_ID_AES, key, 256);
+    if (ret != 0) { mbedtls_gcm_free(&ctx); return false; }
+    uint8_t check_tag[16];
+    ret = mbedtls_gcm_crypt_and_tag(&ctx, MBEDTLS_GCM_DECRYPT, len,
+                                    nonce, 12, NULL, 0,
+                                    in, out, 16, check_tag);
+    if (ret != 0) { mbedtls_gcm_free(&ctx); return false; }
+    /* Authenticate the supplied tag in constant time. */
+    uint8_t acc = 0;
+    for (int i = 0; i < 16; i++) acc |= check_tag[i] ^ tag[i];
+    mbedtls_gcm_free(&ctx);
+    return acc == 0;
 }

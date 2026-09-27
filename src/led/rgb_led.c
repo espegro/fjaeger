@@ -15,7 +15,8 @@ static uint led_sm;
 static bool usb_mounted;
 static bool usb_suspended;
 static uint32_t last_grb = 0xffffffffu;
-static uint32_t activity_until_ms;
+static uint32_t pulse_until_ms;
+static uint8_t pulse_r, pulse_g, pulse_b;
 
 static void put_rgb(uint8_t red, uint8_t green, uint8_t blue) {
     /* WS2812 wire order is GRB, MSB first. Keep brightness deliberately low
@@ -35,7 +36,8 @@ void fj_led_init(void) {
                                 FJ_LED_FREQ);
     usb_mounted = false;
     usb_suspended = false;
-    activity_until_ms = 0;
+    pulse_until_ms = 0;
+    pulse_r = pulse_g = pulse_b = 0;
     put_rgb(0, 0, 0);
 }
 
@@ -47,15 +49,21 @@ void fj_led_set_suspended(bool suspended) {
     usb_suspended = suspended;
 }
 
-void fj_led_activity(void) {
-    activity_until_ms = to_ms_since_boot(get_absolute_time()) + 100u;
+static void led_pulse(uint8_t r, uint8_t g, uint8_t b, uint32_t ms) {
+    pulse_r = r; pulse_g = g; pulse_b = b;
+    pulse_until_ms = to_ms_since_boot(get_absolute_time()) + ms;
 }
+
+void fj_led_activity(void) { led_pulse(0, 0, 28, 100); }   /* blue: USB */
+void fj_led_pin_unlock(void) { led_pulse(0, 40, 0, 250); } /* green flash */
+void fj_led_pin_lock(void)   { led_pulse(40, 0, 0, 200); } /* red flash */
+void fj_led_sign(void)       { led_pulse(0, 30, 30, 150); }/* cyan flash */
 
 void fj_led_task(void) {
     uint32_t now = to_ms_since_boot(get_absolute_time());
 
-    if ((int32_t)(activity_until_ms - now) > 0) {
-        put_rgb(0, 0, 28);       /* blue pulse: USB activity */
+    if ((int32_t)(pulse_until_ms - now) > 0) {
+        put_rgb(pulse_r, pulse_g, pulse_b);   /* event pulse */
         return;
     }
 
