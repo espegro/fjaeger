@@ -1,10 +1,9 @@
 /*
- * Fjaeger - key slots / profiles, persisted to flash.
+ * Fjaeger - profiles and persisted state, stored in flash.
  */
 #include <string.h>
 
 #include "keys.h"
-#include "crypto.h"
 
 #include "hardware/flash.h"
 #include "hardware/sync.h"
@@ -14,25 +13,12 @@
  * Each update erases and programs only the older copy. A generation number
  * and CRC select the newest complete record after a reset or power loss. */
 #define STORE_MAGIC   0x464A5345u /* "FJSE" */
-#define STORE_VERSION 6u
+#define STORE_VERSION 7u
 #define FLASH_OFFSET_BYTES (PICO_FLASH_SIZE_BYTES - (2 * FLASH_SECTOR_SIZE))
 
 typedef struct {
     uint8_t  pin_hash[32];
-    fj_slot_t slots[FJ_NUM_SLOTS];
-    fj_ctap2_cred_t ctap2[FJ_CTAP2_CREDS];
-} fj_store_v2_payload_t;
-
-typedef struct {
-    uint8_t  pin_hash[32];
-    fj_slot_t slots[FJ_NUM_SLOTS];
-    fj_ctap2_cred_t ctap2[FJ_CTAP2_CREDS];
-    uint8_t  disk_key[FJ_AES_KEY_BYTES];
-} fj_store_v3_payload_t;
-
-typedef struct {
-    uint8_t  pin_hash[32];
-    fj_slot_t slots[FJ_NUM_SLOTS];
+    fj_profile_t profiles[FJ_NUM_PROFILES];
     fj_ctap2_cred_t ctap2[FJ_CTAP2_CREDS];
     uint8_t  disk_secret_enc[32];  /* disk key, XOR-wrapped by KDF(disk PIN) */
     uint8_t  disk_pin_salt[16];
@@ -49,6 +35,9 @@ typedef struct {
     /* Persistent auto-lock override (v6). */
     uint32_t timeout_sec;
     uint8_t  timeout_configured;   /* distinguishes TIMEOUT 0 from default */
+    /* Selected profile (v7). */
+    uint8_t  active_profile;
+    uint8_t  active_profile_valid;
 } fj_store_payload_t;
 
 typedef struct {
@@ -59,13 +48,6 @@ typedef struct {
     fj_store_payload_t payload;
     uint32_t crc32;
 } fj_store_record_t;
-
-/* Original on-flash format, accepted once for a non-destructive migration. */
-typedef struct {
-    uint32_t magic;
-    uint32_t version;
-    fj_store_v2_payload_t payload;
-} fj_store_v1_t;
 
 #define PROGRAM_SIZE \
     (((sizeof(fj_store_record_t) + FLASH_PAGE_SIZE - 1) / FLASH_PAGE_SIZE) * \
@@ -80,8 +62,10 @@ static int active_copy = -1;
 static uint32_t active_generation = 0;
 static uint8_t program_buf[PROGRAM_SIZE] __attribute__((aligned(4)));
 
-/* In-RAM shadow of the active slot. */
-static int active_slot = 0;
+/* In-RAM shadow of the active profile index. */
+static int active_profile = 0;
+
+static bool write_store(void);
 
 static const fj_store_record_t *flash_record(unsigned copy) {
     return (const fj_store_record_t *)(XIP_BASE + FLASH_OFFSET_BYTES +
@@ -132,41 +116,51 @@ static void load_from_flash(void) {
         return;
     }
 
-    /* Migrate an older single-copy version if one was written. Version 2
-     * predates the dedicated MSC disk key; the key is left unset so it is
-     * generated on first disk init. */
-    const fj_store_v1_t *legacy = (const fj_store_v1_t *)
-        (XIP_BASE + FLASH_OFFSET_BYTES);
-    if (legacy->magic == STORE_MAGIC &&
-        (legacy->version == 1 || legacy->version == 2 || legacy->version == 3)) {
-        memcpy(&store.pin_hash, &legacy->payload.pin_hash, sizeof(store.pin_hash));
-        memcpy(&store.slots, &legacy->payload.slots, sizeof(store.slots));
-        memcpy(&store.ctap2, &legacy->payload.ctap2, sizeof(store.ctap2));
-        /* Disk secret was previously stored in clear; it now requires a
-         * dedicated disk PIN. A fresh disk PIN/secret must be set with
-         * DISK SETPIN before the drive can be used again. */
-        memset(store.disk_secret_enc, 0, sizeof(store.disk_secret_enc));
-        memset(store.disk_pin_salt, 0, sizeof(store.disk_pin_salt));
-        memset(store.disk_pin_hash, 0, sizeof(store.disk_pin_hash));
-        store.disk_secret_valid = 0;
-        /* No PUK or brute-force state yet. */
-        store.pin_fail = 0; store.pin_blocked = 0;
-        store.disk_fail = 0; store.disk_blocked = 0;
-        memset(store.puk_hash, 0, sizeof(store.puk_hash));
-        store.puk_configured = 0; store.puk_fail = 0;
-        store.timeout_sec = 0; store.timeout_configured = 0;
-        active_copy = 0;
-    } else {
-        memset(&store, 0, sizeof(store));
-        active_copy = -1;
-    }
+    /* No migration: the flash format version was bumped and development
+     * data may be lost. A fresh store is started. */
+    memset(&store, 0, sizeof(store));
+    active_copy = -1;
     active_generation = 0;
     store_loaded = true;
 }
 
 void fj_keys_init(void) {
     load_from_flash();
-    active_slot = 0;
+    active_profile = 0;
+
+    /* Ensure a Default profile always exists and the active profile is
+     * valid. On an empty store (or after a factory wipe) this creates and
+     * persists profile 0 named "Default" and selects it. */
+    bool have_profile = false;
+    for (unsigned i = 0; i < FJ_NUM_PROFILES; i++) {
+        if (store.profiles[i].in_use) { have_profile = true; break; }
+    }
+    if (!have_profile) {
+        strncpy(store.profiles[0].name, "Default", sizeof(store.profiles[0].name) - 1);
+        store.profiles[0].name[sizeof(store.profiles[0].name) - 1] = '\0';
+        store.profiles[0].in_use = true;
+        store.active_profile = 0;
+        store.active_profile_valid = 1;
+        active_profile = 0;
+        write_store();
+    } else {
+        /* The persisted active profile may no longer exist (e.g. an older
+         * record with a stale selection); fall back to the first profile. */
+        unsigned target = store.active_profile;
+        if (store.active_profile_valid && target < FJ_NUM_PROFILES &&
+            store.profiles[target].in_use) {
+            active_profile = (int)target;
+        } else {
+            active_profile = -1;
+            for (unsigned i = 0; i < FJ_NUM_PROFILES; i++) {
+                if (store.profiles[i].in_use) { active_profile = (int)i; break; }
+            }
+            if (active_profile < 0) active_profile = 0;
+            store.active_profile = (uint8_t)active_profile;
+            store.active_profile_valid = 1;
+            write_store();
+        }
+    }
 }
 
 static bool write_store(void) {
@@ -311,34 +305,81 @@ void fj_keys_wipe(void) {
         flash_range_erase(FLASH_OFFSET_BYTES, 2 * FLASH_SECTOR_SIZE);
         restore_interrupts(ints);
     }
-    active_slot = 0;
+    active_profile = 0;
     active_copy = -1;
     active_generation = 0;
 }
 
-unsigned fj_keys_count(void) {
+unsigned fj_keys_profile_count(void) {
     unsigned n = 0;
-    for (unsigned i = 0; i < FJ_NUM_SLOTS; i++) {
-        if (store.slots[i].initialized) n++;
+    for (unsigned i = 0; i < FJ_NUM_PROFILES; i++) {
+        if (store.profiles[i].in_use) n++;
     }
     return n;
 }
 
-unsigned fj_keys_active_slot(void) {
-    return (unsigned)active_slot;
+unsigned fj_keys_active_profile(void) {
+    return (unsigned)active_profile;
 }
 
-bool fj_keys_set_active_slot(unsigned slot) {
-    if (slot >= FJ_NUM_SLOTS) return false;
-    if (!store.slots[slot].initialized) return false;
-    active_slot = (int)slot;
-    return true;
+const fj_profile_t *fj_keys_profile_get(unsigned profile) {
+    if (profile >= FJ_NUM_PROFILES) return NULL;
+    if (!store.profiles[profile].in_use) return NULL;
+    return &store.profiles[profile];
 }
 
-const fj_slot_t *fj_keys_get(unsigned slot) {
-    if (slot >= FJ_NUM_SLOTS) return NULL;
-    if (!store.slots[slot].initialized) return NULL;
-    return &store.slots[slot];
+bool fj_keys_profile_create(unsigned profile, const char *name) {
+    if (profile >= FJ_NUM_PROFILES) return false;
+    if (store.profiles[profile].in_use) return false;
+    if (!name || name[0] == '\0') return false;
+
+    fj_profile_t *p = &store.profiles[profile];
+    strncpy(p->name, name, sizeof(p->name) - 1);
+    p->name[sizeof(p->name) - 1] = '\0';
+    p->in_use = true;
+
+    return write_store();
+}
+
+bool fj_keys_profile_select(unsigned profile) {
+    if (profile >= FJ_NUM_PROFILES) return false;
+    if (!store.profiles[profile].in_use) return false;
+
+    store.active_profile = (uint8_t)profile;
+    store.active_profile_valid = 1;
+    active_profile = (int)profile;
+    return write_store();
+}
+
+bool fj_keys_profile_rename(unsigned profile, const char *name) {
+    if (profile >= FJ_NUM_PROFILES) return false;
+    if (!store.profiles[profile].in_use) return false;
+    if (!name || name[0] == '\0') return false;
+
+    fj_profile_t *p = &store.profiles[profile];
+    strncpy(p->name, name, sizeof(p->name) - 1);
+    p->name[sizeof(p->name) - 1] = '\0';
+
+    return write_store();
+}
+
+bool fj_keys_profile_erase(unsigned profile) {
+    if (profile >= FJ_NUM_PROFILES) return false;
+    if (!store.profiles[profile].in_use) return false;
+    /* The active profile must not be erased so the device always has a
+     * valid active profile and at least one profile remains. */
+    if (profile == (unsigned)active_profile) return false;
+
+    memset(&store.profiles[profile], 0, sizeof(fj_profile_t));
+
+    /* Remove every credential bound to the erased profile so it can never
+     * be used again, now or after a reboot. */
+    for (unsigned i = 0; i < FJ_CTAP2_CREDS; i++) {
+        if (store.ctap2[i].in_use && store.ctap2[i].profile_id == profile)
+            memset(&store.ctap2[i], 0, sizeof(fj_ctap2_cred_t));
+    }
+
+    return write_store();
 }
 
 void fj_random(void *buf, size_t len) {
@@ -351,46 +392,4 @@ void fj_random(void *buf, size_t len) {
         memcpy(out + done, &r, n);
         done += n;
     }
-}
-
-bool fj_keys_provision(unsigned slot, const char *name, bool gen) {
-    if (slot >= FJ_NUM_SLOTS) return false;
-
-    fj_slot_t *s = &store.slots[slot];
-    if (name) {
-        strncpy(s->name, name, sizeof(s->name) - 1);
-        s->name[sizeof(s->name) - 1] = '\0';
-    }
-
-    if (gen) {
-        /* Fresh P-256 scalar + two AES-128 keys for XTS. */
-        if (!fj_ecdsa_generate_private(s->private_key)) return false;
-        fj_random(s->aes_key, FJ_AES_KEY_BYTES);
-        s->initialized = true;
-    }
-    /* Imported keys are set by the caller before calling provision() with
-     * gen=false; here we just mark it initialised. */
-    s->initialized = true;
-
-    if (active_slot < 0 || active_slot >= FJ_NUM_SLOTS ||
-        !store.slots[active_slot].initialized)
-        active_slot = (int)slot;
-
-    return write_store();
-}
-
-bool fj_keys_erase(unsigned slot) {
-    if (slot >= FJ_NUM_SLOTS) return false;
-    memset(&store.slots[slot], 0, sizeof(fj_slot_t));
-
-    if (active_slot == (int)slot) {
-        active_slot = 0;
-        for (unsigned i = 0; i < FJ_NUM_SLOTS; i++) {
-            if (store.slots[i].initialized) {
-                active_slot = (int)i;
-                break;
-            }
-        }
-    }
-    return write_store();
 }

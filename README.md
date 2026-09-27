@@ -5,8 +5,8 @@ Sikkerhetsnøkkel (USB-dongle) bygget på **RP2350** (16 MB flash). Prosjektet g
 ## Funksjoner
 
 - **CTAP2 (FIDO2) over HID** — `authenticatorGetInfo`, `makeCredential` og `getAssertion` med CBOR, for WebAuthn og OpenSSH `sk-ecdsa`-nøkler. Attestasjon bruker formatet `none`.
-- **Flere nøkkelprofiler ("slots")** — opptil 8 uavhengige profiler, hver med egen ECDSA-nøkkel og XTS-nøkkel. Velg aktiv profil over serial med `KEY SELECT <n>`.
-- **Kryptert USB-stasjon (MSC)** — en **12 MiB vedvarende** FAT16-partisjon i on-board-flash, AES-XTS-kryptert med en **dedikert disknøkkel** som er uavhengig av keyslots. Mountes bare når enheten er ulåst. Data overlever reboot.
+- **Profiler** — opptil 8 navngitte profiler. Hver profil er et tilgangsfilter over CTAP2-credentials: bare credentials i valgt profil kan oppdages eller brukes, og nye credentials knyttes automatisk til valgt profil. Velg profil over serial med `PROFILE SELECT <id>`.
+- **Kryptert USB-stasjon (MSC)** — en **12 MiB vedvarende** FAT16-partisjon i on-board-flash, AES-XTS-kryptert med en **dedikert disknøkkel** som er uavhengig av profiler. Mountes bare når enheten er ulåst. Data overlever reboot.
 - **Lås/ulås-modell** — når låst nektes signering, avkryptering og skriving. Ulåsing krever PIN over serial.
 - **Brute-force-beskyttelse** — enhets-PIN og disk-PIN sperres etter fem feil. En felles recovery-PUK kan fjerne sperren; fem feil PUK-forsøk utfører factory-wipe.
 - **Serial-konsoll (USB CDC)** — `LOCK`, `UNLOCK`, `RESET`, `TIMEOUT`, nøkkelhåndtering, m.m.
@@ -24,7 +24,7 @@ src/
 ├── main.c                  Inngangspunkt, init, main-loop
 ├── core/
 │   ├── state.h/.c          Tilstandsmaskin (LOCKED/UNLOCKED), PIN, auto-relock
-│   ├── keys.h/.c           Nøkkelprofiler/slots i flash, aktiv slot
+│   ├── keys.h/.c           Profiler og lagring i flash, aktiv profil
 │   └── crypto.h/.c         mbedTLS-innpakninger: ECDSA, SHA-256, HKDF, AES-XTS
 ├── fido/
 │   ├── u2f.h/.c            CTAPHID-transport (legacy CTAP1/MSG deaktivert)
@@ -45,7 +45,7 @@ src/
 - Private nøkler lagres i RP2350-flash og brukes kun for signering i fastvaren; de eksporteres aldri over serial.
 - **Enhetslås** (`LOCK`/`UNLOCK`): når låst er det ingen ECDSA-signering. Låses opp med PIN over serial.
 - **Disk-lås** (`DISK LOCK`/`DISK UNLOCK`): den krypterte MSC-en er kun mountet/lesbar/skrivbar når `DISK UNLOCK` er gitt. `DISK UNLOCK` krever at enheten er ulåst; `LOCK` og auto-relåsing lukker også disken.
-- MSC-disken bruker en **dedikert permanent XTS-nøkkel** lagret i flash-lageret, uavhengig av keyslots. Bytte eller sletting av keyslots endrer ikke diskdata.
+- MSC-disken bruker en **dedikert permanent XTS-nøkkel** lagret i flash-lageret, uavhengig av profiler. Bytte eller sletting av profiler endrer ikke diskdata.
 - PIN-en lagres foreløpig som en SHA-256-hash og sammenlignes i konstant tid. Dette er ikke tilstrekkelig beskyttelse mot offline-angrep på en flashdump og skal erstattes med saltet, treg nøkkelavledning.
 - Enhets-PIN og disk-PIN har separate, vedvarende feiltellere. PUK fjerner en disk-PIN-sperre, men erstatter ikke disk-PIN: disknøkkelen er fortsatt pakket med den riktige disk-PIN-en.
 
@@ -76,7 +76,7 @@ Koble til konsollen (f.eks. `screen /dev/ttyACM0 115200`):
 | Kommando | Beskrivelse |
 |----------|-------------|
 | `HELP` | Liste kommandoer |
-| `STATUS` | Vis enhet + disk-tilstand, aktiv slot, slots, timeout |
+| `STATUS` | Vis enhet + disk-tilstand, aktiv profil, profiler, timeout |
 | `LOCK` | Lås enheten (og lukk disken) |
 | `UNLOCK <pin>` | Lås opp **enheten** for nøkkeloperasjoner (ikke disken) |
 | `SETPIN <pin>` | Sett/endre PIN |
@@ -87,10 +87,11 @@ Koble til konsollen (f.eks. `screen /dev/ttyACM0 115200`):
 | `DISK UNBLOCK <puk>` | Fjern disk-PIN-sperre; korrekt disk-PIN kreves etterpå |
 | `DISK LOCK` | Lås/unmount disken |
 | `DISK STATUS` | Vis disk-tilstand |
-| `KEY LIST` | Vis alle slots |
-| `KEY SELECT <n>` | Velg aktiv profil |
-| `KEY PROVISION <n> [name]` | Opprett ny nøkkel i slot `n` |
-| `KEY ERASE <n>` | Slett slot `n` |
+| `PROFILE LIST` | Vis alle profiler, aktiv markering og credential-antall |
+| `PROFILE CREATE <id> <name>` | Opprett en ny tom profil |
+| `PROFILE SELECT <id>` | Velg og lagre aktiv profil |
+| `PROFILE RENAME <id> <name>` | Endre navn uten å endre credentials |
+| `PROFILE ERASE <id>` | Slett profilen og alle dens credentials |
 | `TIMEOUT <seconds>` | Lagre auto-relåsing (standard 900 sekunder; 0 = av) |
 | `RESET` | Tilbakestill enheten |
 
@@ -125,11 +126,11 @@ CTAP2-credentials lagres i donglens flash (opptil 8). Attestasjonen er `none`, s
   - Kun **ECDSA P-256 / ES256** støttes (ingen EdDSA/ed25519-sk).
   - Enheten må være ulåst (PIN) for at `makeCredential`/`getAssertion` skal aksepteres.
   - Credentials er flash-persistente (opptil 8) i et kontrollsummert A/B-format, skrevet deferert fra main-loop.
-- MSC-disken er en **12 MiB vedvarende FAT16-partisjon** i on-board-flash, AES-XTS-kryptert i farten med en **dedikert disknøkkel** (uavhengig av keyslots). Metadata (boot, FAT, rot) initialiseres én gang ved første oppstart; dataregionen skrives lazy. Data overlever reboot.
+- MSC-disken er en **12 MiB vedvarende FAT16-partisjon** i on-board-flash, AES-XTS-kryptert i farten med en **dedikert disknøkkel** (uavhengig av profiler). Metadata (boot, FAT, rot) initialiseres én gang ved første oppstart; dataregionen skrives lazy. Data overlever reboot.
   - **Deferred write-behind:** USB MSC-callbacker køer sektor-skriver; selve flash-erase/program gjøres i main-loop (`fj_msc_task`), aldri inne i en USB-transaksjon. Data flusher ved `LOCK`/unmount og kontinuerlig.
   - **Integritet:** en vedvarende CRC-32-tabell (én per 4 KiB-blokk, lagret i klartekst i de siste blokkene av partisjonen) verifiseres ved mount. Korrupsjon fra strømbrudd eller tukling oppdages og disken re-initialiseres i stedet for å serve korrupte data.
   - Skriving av store filer er treg og sliter på flash fordi hver sektoroppdatering krever flash-erase.
-- **Flash-layout:** firmware ~128 KB fra `0x10000000`, disk-partisjon 12 MiB fra `0x10100000` (offset `0x00100000`), lager (PIN/slots/CTAP2/disknøkkel) i de siste 8 KiB.
+- **Flash-layout:** firmware ~128 KB fra `0x10000000`, disk-partisjon 12 MiB fra `0x10100000` (offset `0x00100000`), lager (PIN/profiler/CTAP2/disknøkkel) i de siste 8 KiB.
 
 ## Lisens
 

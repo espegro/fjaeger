@@ -7,10 +7,11 @@
  *   LOCK
  *   UNLOCK <pin>
  *   SETPIN <pin>
- *   KEY LIST
- *   KEY SELECT <n>
- *   KEY PROVISION <n> [name]     (generates fresh keys)
- *   KEY ERASE <n>
+ *   PROFILE LIST
+ *   PROFILE CREATE <id> <name>
+ *   PROFILE SELECT <id>
+ *   PROFILE RENAME <id> <name>
+ *   PROFILE ERASE <id>
  *   TIMEOUT <seconds>
  *   RESET
  */
@@ -109,10 +110,11 @@ static void cmd_help(void) {
     outln("  DISK LOCK                  lock/unmount the drive");
     outln("  TIMEOUT <sec>              save auto-lock delay (default 900; 0 = off)");
     outln("  RESET                      reboot the device");
-    outln("  KEY LIST                   list all 8 slots");
-    outln("  KEY SELECT <n>             set active slot (0-7)");
-    outln("  KEY PROVISION <n> [name]   generate fresh key in slot n");
-    outln("  KEY ERASE <n>              erase slot n");
+    outln("  PROFILE LIST               list all profiles, active flag & credential count");
+    outln("  PROFILE CREATE <id> <name> create a new empty profile (0-7)");
+    outln("  PROFILE SELECT <id>        set & save the active profile");
+    outln("  PROFILE RENAME <id> <name> rename a profile");
+    outln("  PROFILE ERASE <id>         erase a profile and its credentials");
 }
 
 static void cmd_status(void) {
@@ -127,15 +129,15 @@ static void cmd_status(void) {
              "disk_fail: %u\r\n"
              "puk: %s\r\n"
              "puk_fail: %u\r\n"
-             "active_slot: %u\r\n"
-             "provisioned_slots: %u\r\n"
+             "active_profile: %u\r\n"
+             "profiles: %u\r\n"
              "timeout: %lus",
              fj_state_get() == FJ_STATE_UNLOCKED ? "unlocked" : "locked",
              fj_msc_is_ready() ? "unlocked" : "locked",
              (have_sec && sec.pin_blocked) ? "yes" : "no", (unsigned)sec.pin_fail,
              (have_sec && sec.disk_blocked) ? "yes" : "no", (unsigned)sec.disk_fail,
              fj_keys_puk_configured() ? "set" : "unset", (unsigned)sec.puk_fail,
-             fj_keys_active_slot(), fj_keys_count(),
+             fj_keys_active_profile(), fj_keys_profile_count(),
              (unsigned long)fj_state_timeout());
     outln(buf);
 }
@@ -283,84 +285,105 @@ static bool require_unlocked(void) {
     return false;
 }
 
-static void cmd_key_list(void) {
+static void cmd_profile_list(void) {
     char buf[96];
-    unsigned count = fj_keys_count();
-    for (unsigned i = 0; i < FJ_NUM_SLOTS; i++) {
-        const fj_slot_t *s = fj_keys_get(i);
-        snprintf(buf, sizeof(buf), "slot %u: %s",
-                 i, s ? s->name : "(empty)");
-        outln(buf);
-    }
-    (void)count;
-}
-
-static void cmd_key_select(const char *arg) {
-    if (!require_unlocked()) return;
-    if (!arg) {
-        outln("ERR usage: KEY SELECT <n>");
-        return;
-    }
-    unsigned long parsed;
-    if (!parse_uint(arg, &parsed) || parsed >= FJ_NUM_SLOTS) {
-        outln("ERR invalid slot");
-        return;
-    }
-    unsigned n = (unsigned)parsed;
-    if (fj_keys_set_active_slot(n)) {
-        char buf[64];
-        snprintf(buf, sizeof(buf), "OK active slot = %u", n);
-        outln(buf);
-    } else {
-        outln("ERR slot not provisioned or out of range");
-    }
-}
-
-static void cmd_key_provision(const char *arg, const char *name) {
-    if (!require_unlocked()) return;
-    unsigned n;
-    if (!arg) {
-        outln("ERR usage: KEY PROVISION <n> [name]");
-        return;
-    }
-    unsigned long parsed;
-    if (!parse_uint(arg, &parsed) || parsed >= FJ_NUM_SLOTS) {
-        outln("ERR invalid slot");
-        return;
-    }
-    n = (unsigned)parsed;
-
-    if (fj_keys_provision(n, name ? name : "key", true)) {
-        char buf[64];
-        snprintf(buf, sizeof(buf), "OK provisioned slot %u", n);
-        outln(buf);
-    } else {
-        outln("ERR provision failed");
-    }
-}
-
-static void cmd_key_erase(const char *arg) {
-    if (!require_unlocked()) return;
-    if (!arg) {
-        outln("ERR usage: KEY ERASE <n>");
-        return;
-    }
-    unsigned long parsed;
-    if (!parse_uint(arg, &parsed) || parsed >= FJ_NUM_SLOTS) {
-        outln("ERR invalid slot");
-        return;
-    }
-    unsigned n = (unsigned)parsed;
-    bool was_active = n == fj_keys_active_slot();
-    if (fj_keys_erase(n)) {
-        if (was_active) {
-            fj_state_lock();
+    fj_ctap2_cred_t creds[FJ_CTAP2_CREDS];
+    fj_keys_ctap2_load(creds);
+    for (unsigned i = 0; i < FJ_NUM_PROFILES; i++) {
+        const fj_profile_t *p = fj_keys_profile_get(i);
+        if (!p) continue;
+        unsigned n = 0;
+        for (unsigned j = 0; j < FJ_CTAP2_CREDS; j++) {
+            if (creds[j].in_use && creds[j].profile_id == i) n++;
         }
+        snprintf(buf, sizeof(buf), "profile %u: %s [%u]%s",
+                 i, p->name, n,
+                 i == fj_keys_active_profile() ? " (active)" : "");
+        outln(buf);
+    }
+}
+
+static void cmd_profile_select(const char *arg) {
+    if (!require_unlocked()) return;
+    if (!arg) {
+        outln("ERR usage: PROFILE SELECT <id>");
+        return;
+    }
+    unsigned long parsed;
+    if (!parse_uint(arg, &parsed) || parsed >= FJ_NUM_PROFILES) {
+        outln("ERR invalid profile id");
+        return;
+    }
+    unsigned n = (unsigned)parsed;
+    if (fj_keys_profile_select(n)) {
         char buf[64];
-        snprintf(buf, sizeof(buf), "OK erased slot %u", n);
+        snprintf(buf, sizeof(buf), "OK active profile = %u", n);
         outln(buf);
     } else {
-        outln("ERR erase failed");
+        outln("ERR profile does not exist or out of range");
+    }
+}
+
+static void cmd_profile_create(const char *arg, const char *name) {
+    if (!require_unlocked()) return;
+    if (!arg || !name) {
+        outln("ERR usage: PROFILE CREATE <id> <name>");
+        return;
+    }
+    unsigned long parsed;
+    if (!parse_uint(arg, &parsed) || parsed >= FJ_NUM_PROFILES) {
+        outln("ERR invalid profile id");
+        return;
+    }
+    unsigned n = (unsigned)parsed;
+    if (fj_keys_profile_create(n, name)) {
+        char buf[64];
+        snprintf(buf, sizeof(buf), "OK created profile %u", n);
+        outln(buf);
+    } else {
+        outln("ERR profile already exists, empty name, or out of range");
+    }
+}
+
+static void cmd_profile_rename(const char *arg, const char *name) {
+    if (!require_unlocked()) return;
+    if (!arg || !name) {
+        outln("ERR usage: PROFILE RENAME <id> <name>");
+        return;
+    }
+    unsigned long parsed;
+    if (!parse_uint(arg, &parsed) || parsed >= FJ_NUM_PROFILES) {
+        outln("ERR invalid profile id");
+        return;
+    }
+    unsigned n = (unsigned)parsed;
+    if (fj_keys_profile_rename(n, name)) {
+        char buf[64];
+        snprintf(buf, sizeof(buf), "OK renamed profile %u", n);
+        outln(buf);
+    } else {
+        outln("ERR profile does not exist or empty name");
+    }
+}
+
+static void cmd_profile_erase(const char *arg) {
+    if (!require_unlocked()) return;
+    if (!arg) {
+        outln("ERR usage: PROFILE ERASE <id>");
+        return;
+    }
+    unsigned long parsed;
+    if (!parse_uint(arg, &parsed) || parsed >= FJ_NUM_PROFILES) {
+        outln("ERR invalid profile id");
+        return;
+    }
+    unsigned n = (unsigned)parsed;
+    if (fj_state_profile_erase(n)) {
+        char buf[64];
+        snprintf(buf, sizeof(buf), "OK erased profile %u", n);
+        outln(buf);
+    } else {
+        outln("ERR cannot erase active profile or profile does not exist");
     }
 }
 
@@ -419,17 +442,21 @@ static void dispatch(char *cmdline) {
         cmd_setpin(next_token(&p));
     } else if (strcasecmp(tok, "disk") == 0) {
         cmd_disk(next_token(&p), p);
-    } else if (strcasecmp(tok, "key") == 0) {
+    } else if (strcasecmp(tok, "profile") == 0) {
         char *sub = next_token(&p);
-        if (!sub) { outln("ERR KEY requires subcommand"); return; }
-        if (strcasecmp(sub, "list") == 0) cmd_key_list();
-        else if (strcasecmp(sub, "select") == 0) cmd_key_select(next_token(&p));
-        else if (strcasecmp(sub, "provision") == 0) {
-            char *slot = next_token(&p);
-            cmd_key_provision(slot, next_token(&p));
+        if (!sub) { outln("ERR PROFILE requires subcommand"); return; }
+        if (strcasecmp(sub, "list") == 0) cmd_profile_list();
+        else if (strcasecmp(sub, "select") == 0) cmd_profile_select(next_token(&p));
+        else if (strcasecmp(sub, "create") == 0) {
+            char *id = next_token(&p);
+            cmd_profile_create(id, next_token(&p));
         }
-        else if (strcasecmp(sub, "erase") == 0) cmd_key_erase(next_token(&p));
-        else outln("ERR unknown KEY subcommand");
+        else if (strcasecmp(sub, "rename") == 0) {
+            char *id = next_token(&p);
+            cmd_profile_rename(id, next_token(&p));
+        }
+        else if (strcasecmp(sub, "erase") == 0) cmd_profile_erase(next_token(&p));
+        else outln("ERR unknown PROFILE subcommand");
     } else if (strcasecmp(tok, "timeout") == 0) {
         cmd_timeout(next_token(&p));
     } else if (strcasecmp(tok, "reset") == 0) {

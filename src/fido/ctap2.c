@@ -111,19 +111,49 @@ void fj_ctap2_forget_all(void) {
     ctap2_dirty = false;
 }
 
-static fj_ctap2_cred_t *find_cred_by_id(const uint8_t *id) {
+void fj_ctap2_forget_profile(unsigned profile_id) {
+    bool removed = false;
+    for (unsigned i = 0; i < FJ_CTAP2_CREDS; i++) {
+        if (creds[i].in_use && creds[i].profile_id == profile_id) {
+            memset(&creds[i], 0, sizeof(fj_ctap2_cred_t));
+            removed = true;
+        }
+    }
+    /* Persist the purge so a stale deferred flush cannot resurrect the
+     * erased credentials; the persistent store was already updated by the
+     * profile erase. */
+    if (removed) ctap2_dirty = true;
+}
+
+static fj_ctap2_cred_t *find_cred_by_id_active(const uint8_t *id) {
+    unsigned active = fj_keys_active_profile();
     for (unsigned i = 0; i < FJ_CTAP2_CREDS; i++) {
         if (creds[i].in_use &&
+            creds[i].profile_id == active &&
             memcmp(creds[i].credential_id, id, FJ_CRED_ID_LEN) == 0)
             return &creds[i];
     }
     return NULL;
 }
 
-static fj_ctap2_cred_t *find_cred_by_rp(const uint8_t rp_id_hash[FJ_HASH_LEN]) {
+static fj_ctap2_cred_t *find_cred_by_rp_active(const uint8_t rp_id_hash[FJ_HASH_LEN]) {
+    unsigned active = fj_keys_active_profile();
     for (unsigned i = 0; i < FJ_CTAP2_CREDS; i++) {
         if (creds[i].in_use &&
+            creds[i].profile_id == active &&
             memcmp(creds[i].rp_id_hash, rp_id_hash, FJ_HASH_LEN) == 0)
+            return &creds[i];
+    }
+    return NULL;
+}
+
+/* Match a credential-ID against every credential, regardless of profile.
+ * Used for excludeList so a duplicate registration is rejected across all
+ * profiles without revealing which profile owns the existing credential. */
+static fj_ctap2_cred_t *find_cred_by_id_any(const uint8_t *id) {
+    for (unsigned i = 0; i < FJ_CTAP2_CREDS; i++) {
+        if (creds[i].in_use &&
+            memcmp(creds[i].credential_id, id, FJ_CRED_ID_LEN) == 0)
             return &creds[i];
     }
     return NULL;
@@ -257,7 +287,7 @@ static size_t make_credential(const uint8_t *req, size_t len,
     uint8_t client_data_hash[FJ_HASH_LEN];
     uint8_t rp_id[64]; size_t rp_id_len = 0;
     bool have_client_hash = false, have_rp = false;
-    bool resident = false;
+    bool resident = false, excluded = false;
     int alg = 0;
 
     for (size_t i = 0; i < pairs; i++) {
@@ -330,8 +360,36 @@ static size_t make_credential(const uint8_t *req, size_t len,
                 break;
             }
             case K_EXCLUDE_LIST: {
+                /* An excludeList entry prevents re-registering a credential
+                 * for the same RP. Detect any existing credential with a
+                 * matching credential-ID or RP binding across all profiles,
+                 * but without exposing which profile owns it. */
                 if (val.type != FJ_CBOR_ARRAY) goto bad_param;
-                if (!fj_cbor_skip(&r, &val)) goto bad_param;
+                size_t xn = (size_t)val.val;
+                for (size_t j = 0; j < xn; j++) {
+                    fj_cbor_item entry;
+                    if (!fj_cbor_next(&r, &entry) || entry.type != FJ_CBOR_MAP)
+                        goto bad_param;
+                    size_t ep = (size_t)entry.val;
+                    for (size_t k = 0; k < ep; k++) {
+                        fj_cbor_item ek, ev;
+                        if (!fj_cbor_next(&r, &ek)) goto bad_param;
+                        char key_name[16];
+                        if (!read_text(&r, &ek, key_name, sizeof(key_name)))
+                            goto bad_param;
+                        if (!fj_cbor_next(&r, &ev)) goto bad_param;
+                        if (strcmp(key_name, "id") == 0 && ev.type == FJ_CBOR_BSTR) {
+                            uint8_t xid[FJ_CRED_ID_LEN];
+                            size_t n2 = 0;
+                            if (fj_cbor_read_bytes(&r, &ev, xid, FJ_CRED_ID_LEN, &n2) &&
+                                n2 == FJ_CRED_ID_LEN &&
+                                find_cred_by_id_any(xid) != NULL)
+                                excluded = true;
+                        } else {
+                            if (!fj_cbor_skip(&r, &ev)) goto bad_param;
+                        }
+                    }
+                }
                 break;
             }
             case K_OPTIONS: {
@@ -368,6 +426,10 @@ static size_t make_credential(const uint8_t *req, size_t len,
     uint8_t rp_id_hash[FJ_HASH_LEN];
     fj_sha256(rp_id, rp_id_len, rp_id_hash);
 
+    /* Duplicate registration (matching credential-ID or RP binding) is
+     * rejected across all profiles without revealing which one owns it. */
+    if (excluded) return ctap_error(out, cap, ERR_CREDENTIAL_EXCLUDED);
+
     /* Allocate a credential slot. */
     fj_ctap2_cred_t *cr = NULL;
     for (unsigned i = 0; i < FJ_CTAP2_CREDS; i++) {
@@ -378,6 +440,7 @@ static size_t make_credential(const uint8_t *req, size_t len,
     }
 
     memset(cr, 0, sizeof(*cr));
+    cr->profile_id = (uint8_t)fj_keys_active_profile();
     fj_random(cr->credential_id, FJ_CRED_ID_LEN);
     if (!fj_ecdsa_generate_private(cr->private_key)) {
         cr->in_use = false;
@@ -511,12 +574,14 @@ static size_t get_assertion(const uint8_t *req, size_t len,
     uint8_t rp_id_hash[FJ_HASH_LEN];
     fj_sha256(rp_id, rp_id_len, rp_id_hash);
 
-    /* Resolve the credential: by allowList id, else by rpIdHash. */
+    /* Resolve the credential: by allowList id, else by rpIdHash. Both lookups
+     * are restricted to the active profile, so a credential from another
+     * profile is never resolved. */
     fj_ctap2_cred_t *cr = NULL;
     if (have_allow)
-        cr = find_cred_by_id(allow_id);
+        cr = find_cred_by_id_active(allow_id);
     else
-        cr = find_cred_by_rp(rp_id_hash);
+        cr = find_cred_by_rp_active(rp_id_hash);
     if (!cr) {
         return ctap_error(out, cap, ERR_NOT_ALLOWED);
     }

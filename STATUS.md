@@ -1,13 +1,13 @@
 # Fjaeger — status og overlevering
 
-Oppdatert: 2026-09-27 (dedikert disk-PIN, PUK og brute-force-beskyttelse)
+Oppdatert: 2026-09-27 (navngitte profiler; dedikert disk-PIN, PUK og brute-force-beskyttelse)
 
 ## Kort status
 
 Fjaeger kjører nå som en sammensatt USB-enhet på en **TENSTAR RP2350-USB med
 16 MB flash**:
 
-- USB CDC-konsoll for PIN, låsing og nøkkelprofiler.
+- USB CDC-konsoll for PIN, låsing og profiler.
 - CTAP2/FIDO2 over HID for OpenSSH `sk-ecdsa`.
 - Kryptert MSC-prototype som bare er tilgjengelig når enheten er ulåst.
 - Adressebar RGB-status-LED på GPIO22.
@@ -74,6 +74,52 @@ cc -std=c11 -Wall -Wextra -Werror \
 
 Forventet resultat: `security host tests: ok`. Den dekker PIN-sperring,
 PUK-gjenåpning, full live factory-wipe og at auto-lock også lukker disken.
+
+Profiltesten kjøres slik:
+
+```bash
+cc -std=c11 -Wall -Wextra -Werror \
+  -Isrc/core -Isrc/fido \
+  tests/test_profile.c src/fido/ctap2.c src/fido/cbor.c \
+  -o /tmp/fjaeger-test-profile
+/tmp/fjaeger-test-profile
+```
+
+Forventet resultat: `profile host tests: ok`. Den dekker at
+`makeCredential` knytter credentialet til aktiv profil og at `getAssertion`
+(med og uten allowList) bare løser credentials i aktiv profil — en credential
+fra en annen profil brukes aldri, heller ikke ved dublettregistrering via
+excludeList.
+
+## Profiler (implementert 2026-09-27)
+
+De gamle nøkkel-slot-ene er erstattet med navngitte profiler.
+
+- En profil er **metadata og et tilgangsfilter**, ikke en felles privatnøkkel.
+  Hvert CTAP2-credential beholder sin egen tilfeldige P-256-nøkkel, credential-ID
+  og RP-binding, og har nå et `profile_id` som knytter det til én profil.
+- Opptil **8 profiler** (ID 0–7), hver med navn. På tomt lager opprettes
+  profil 0 «Default» og velges automatisk.
+- **Valgt profil lagres permanent** i flash og overlever reboot. Ved boot
+  faller en ugyldig lagret valg tilbake til første gyldige profil.
+- `PROFILE LIST` / `CREATE` / `SELECT` / `RENAME` / `ERASE` erstatter
+  `KEY LIST` / `SELECT` / `PROVISION` / `ERASE`.
+- `makeCredential` knytter nye credentials til aktiv profil. `getAssertion`
+  med eller uten allowList godtar bare credentials i aktiv profil. Feil profil,
+  feil RP og ukjent credential-ID returnerer ingen signatur.
+- `excludeList` sjekker dublettregistrering **på tvers av profiler** (samme
+  credential-ID) og avviser den uten å røpe hvilken profil som eier den.
+- **Sletting av aktiv profil er avvist**, så det finnes alltid minst én profil
+  og aktiv profil forblir gyldig. Sletting av en inaktiv profil fjerner
+  profilen **og** alle dens credentials i én konsistent operasjon: live
+  CTAP2-cache tømmes først, så persistent lager oppdateres — en utsatt flush
+  kan ikke skrive slettede credentials tilbake til flash.
+- Enhets-PIN, recovery-PUK og MSC-disken er felles og uavhengig av profilvalg;
+  profilbytte og profilsletting endrer ikke disk-PIN, disknøkkel eller diskdata.
+- Flashformatversjonen ble bumpet til 7 (de gamle slot-nøklene er fjernet).
+  Utviklingsdata kan tapes; eksisterende credentials må enrolles på nytt.
+- Factory-wipe sletter fortsatt begge flashkopier og alt live nøkkelmateriale,
+  inkludert profiler og credentials; ved neste oppstart opprettes «Default» på nytt.
 
 ## Fikset i denne runden
 
@@ -245,7 +291,7 @@ MSC-disken ble gjort til en **12 MiB vedvarende flash-partisjon** og frikoblet
 fra keyslots.
 
 - **Partisjon:** `0x10100000`–`0x10D00000` (12 MiB), som offset `0x00100000`
-  fra XIP. Firmware (~128 KB) ligger før dette; PIN/slots/CTAP2/disknøkkel
+  fra XIP. Firmware (~128 KB) ligger før dette; PIN/profiler/CTAP2/disknøkkel
   ligger i de siste 8 KiB. Ingen overlapp.
 - **Filsystem:** FAT16, 512-byte-sektorer, 1 sektor/cluster. Metadata (boot,
   begge FAT-er, rotkatalog) initialiseres én gang ved første oppstart;
@@ -296,20 +342,25 @@ ingen wear-leveling; de mest skrevne sektorene (FAT, rotkatalog) slites fortere.
 Prioritert liste for neste utviklingsøkt (punkter som nå er fullført og
 verifisert er fjernet — se «Fysisk verifisert 2026-09-26» over):
 
-1. **Flere FIDO-klienter / OS.** Prøv nettleser/WebAuthn og gjerne både Linux og
+1. **Fysisk profilregresjon.** På donglen: opprett profiler, enroll `ecdsa-sk`-
+   credentials i minst to profiler, og verifiser at bare credentials i valgt
+   profil signerer; at profilvalg, navn og binding overlever reset/kaldstart;
+   at sletting av en inaktiv profil gjør dens credentials ubrukelige umiddelbart
+   og etter omstart; og at profilsletting ikke påvirker diskdata.
+2. **Flere FIDO-klienter / OS.** Prøv nettleser/WebAuthn og gjerne både Linux og
    Windows/macOS. Test også flere tilkoblede FIDO-enheter samtidig.
-2. **Avbrudd og feiltrafikk.** Test CTAPHID CANCEL, kanal-lock, fragmenterte og
+3. **Avbrudd og feiltrafikk.** Test CTAPHID CANCEL, kanal-lock, fragmenterte og
    maksimalt store meldinger, feil sekvensnummer og USB-frakobling midt i svar.
-3. **Langtidstest.** Kjør mange signeringer, lås/ulås-sykluser og auto-lock mens
+4. **Langtidstest.** Kjør mange signeringer, lås/ulås-sykluser og auto-lock mens
    HID og MSC brukes samtidig. Se etter USB-reset, heap-/stackproblemer og
    flashslitasje.
-4. **MSC-dataintegritet.** Skriv og les filer over mange lock/unlock-sykluser,
-   auto-lock under I/O og bytte av aktiv slot. Disken er nå en vedvarende
+5. **MSC-dataintegritet.** Skriv og les filer over mange lock/unlock-sykluser,
+   auto-lock under I/O og bytte av aktiv profil. Disken er nå en vedvarende
    flash-partisjon (12 MiB) med dedikert disknøkkel; verifiser at innhold aldri
    lekker klartekst mens den er låst, og at data overlever reboot.
-5. **LED-regresjon.** Bekreft visuelt rød/grønn/gul og at blå aktivitetspuls ikke
+6. **LED-regresjon.** Bekreft visuelt rød/grønn/gul og at blå aktivitetspuls ikke
    skjuler låsestatus for lenge, særlig under kontinuerlig disk- eller HID-I/O.
-6. **Reell innlogging på ekstern vert.** Denne økten brukte en lokal `sshd`;
+7. **Reell innlogging på ekstern vert.** Denne økten brukte en lokal `sshd`;
    verifiser også mot en fjerntliggende/tjenestevert.
 
 ## Kjente begrensninger og sikkerhetsarbeid
@@ -330,7 +381,7 @@ verifisert er fjernet — se «Fysisk verifisert 2026-09-26» over):
 - Signaturtelleren er null fordi en flyktig teller ville gått bakover etter
   reboot. Persistent monotonteller er ikke implementert.
 - MSC er nå en **12 MiB vedvarende FAT16-partisjon** i on-board-flash, AES-XTS-
-  kryptert i farten med en **dedikert disknøkkel** (uavhengig av keyslots).
+  kryptert i farten med en **dedikert disknøkkel** (uavhengig av profiler).
   Filsystemets metadata initialiseres én gang; dataregionen skrives lazy.
   Skriving av store filer er treg og sliter på flash (hver sektoroppdatering
   krever flash-erase av en 4 KiB-blokk). Flash-layout: firmware ~128 KB fra

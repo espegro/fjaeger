@@ -32,6 +32,12 @@ void fj_ctap2_task(void);
  * factory-reset transaction. */
 void fj_ctap2_forget_all(void);
 
+/* Drop every live credential bound to the given profile so that a deferred
+ * flash flush can never write back credentials that were erased. Call this
+ * when a profile is erased to keep the live cache consistent with the
+ * persistent store. */
+void fj_ctap2_forget_profile(unsigned profile_id);
+
 /* Process one complete CTAP2 message. 'msg' is the CBOR-message payload
  * as received on the U2FHID CBOR channel (first byte is the CTAP2 command
  * byte). Writes the CBOR response into 'out' (up to out_cap bytes) and

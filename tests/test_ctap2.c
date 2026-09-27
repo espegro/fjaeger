@@ -15,6 +15,8 @@ static uint8_t random_byte = 1;
 
 fj_state_t fj_state_get(void) { return FJ_STATE_UNLOCKED; }
 
+unsigned fj_keys_active_profile(void) { return 0; }
+
 void fj_keys_ctap2_load(fj_ctap2_cred_t *out) {
     memcpy(out, persisted, sizeof(persisted));
 }

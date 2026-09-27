@@ -97,6 +97,12 @@ bool fj_keys_set_timeout(uint32_t seconds) {
 
 void fj_msc_lock(void) { disk_lock_count++; }
 void fj_ctap2_forget_all(void) { ctap_forget_count++; }
+void fj_ctap2_forget_profile(unsigned profile_id) { (void)profile_id; ctap_forget_count++; }
+
+bool fj_keys_profile_erase(unsigned profile_id) {
+    (void)profile_id;
+    return true;
+}
 
 static void reset_fixture(void) {
     memset(stored_pin, 0, sizeof(stored_pin));
@@ -177,10 +183,23 @@ static void test_wrong_puk_factory_wipes_live_state(void) {
     assert(!have_pin && !have_puk);
 }
 
+static void test_profile_erase_consistent(void) {
+    reset_fixture();
+    assert(fj_state_set_pin("12345"));
+    assert(fj_state_unlock("12345"));
+
+    unsigned before = ctap_forget_count;
+    /* Erasing a non-active profile must purge the live CTAP2 cache and the
+     * persistent profile store in one operation. */
+    assert(fj_state_profile_erase(1));
+    assert(ctap_forget_count == before + 1);
+}
+
 int main(void) {
     test_pin_block_and_puk_recovery();
     test_auto_lock_closes_disk();
     test_wrong_puk_factory_wipes_live_state();
+    test_profile_erase_consistent();
     puts("security host tests: ok");
     return 0;
 }

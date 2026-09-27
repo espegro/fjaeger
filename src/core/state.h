@@ -67,6 +67,11 @@ bool fj_state_set_puk(const char *puk);
  * success. */
 bool fj_state_set_pin(const char *pin);
 
+/* Erase a profile and every credential bound to it as one consistent
+ * operation: first the live CTAP2 cache is purged, then the persistent
+ * store is updated and flushed. Rejects erasing the active profile. */
+bool fj_state_profile_erase(unsigned profile_id);
+
 /* Called from the main loop to enforce the auto-relock timeout. */
 void fj_state_tick(void);
 

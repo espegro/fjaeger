@@ -58,6 +58,14 @@ void fj_state_lock(void) {
     have_unlock_time = false;
 }
 
+bool fj_state_profile_erase(unsigned profile_id) {
+    /* A single consistent operation: purge the live CTAP2 cache first so a
+     * deferred flush can never write erased credentials back to flash, then
+     * remove the profile and its credentials from the persistent store. */
+    fj_ctap2_forget_profile(profile_id);
+    return fj_keys_profile_erase(profile_id);
+}
+
 bool fj_state_unlock(const char *pin) {
     if (!pin_configured) return false;
 
