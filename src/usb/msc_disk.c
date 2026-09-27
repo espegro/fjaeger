@@ -322,8 +322,17 @@ static void build_clear_sector(uint32_t lba, uint8_t out[DISK_SECTOR_SIZE]) {
             out[0] = 0xF8; out[1] = 0xFF;            /* FAT[0] media */
             out[2] = 0xFF; out[3] = 0xFF;            /* FAT[1] EOC */
         }
+    } else if (lba == root_dir_lba) {
+        /* Root directory: first entry is the volume label (attribute 0x08).
+         * udev/gvfs and Nautilus read the volume label from here (not from
+         * the boot-sector label field), so a missing label entry makes the
+         * volume appear unlabelled. */
+        memset(out, ' ', 11);                        /* name(8) + ext(3) */
+        memcpy(out, "FJAEGER", 7);
+        out[11] = 0x08;                              /* ATTR_VOLUME_ID */
     }
-    /* root directory (root_dir_lba .. data_lba-1) and data are all zero. */
+    /* remaining root directory entries (root_dir_lba+1 .. data_lba-1) and
+     * the data region are all zero. */
 }
 
 /* Encrypt and write the filesystem metadata (boot sector, both FATs, root
