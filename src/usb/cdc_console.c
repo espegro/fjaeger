@@ -112,7 +112,7 @@ static void cmd_help(void) {
     outln("  DISK LOCK                  lock/unmount the drive");
     outln("  TIMEOUT <sec>              save auto-lock delay (default 900; 0 = off)");
     outln("  BACKUP <password>          write encrypted backup to FJAEGER.BAK");
-    outln("  RESTORE <password>         restore backup from FJAEGER.BAK");
+    outln("  RESTORE <pw> <pin> <puk>    restore backup, set new PIN and PUK");
     outln("  RESET                      reboot the device");
     outln("  PROFILE LIST               list all profiles, active flag & credential count");
     outln("  PROFILE CREATE <id> <name> create a new empty profile (0-7)");
@@ -232,11 +232,13 @@ static void cmd_backup(const char *password) {
     }
 }
 
-/* RESTORE <password> — read FJAEGER.BAK from the MSC drive, decrypt it and
- * import the credentials/profiles/master key. Afterwards set a new PIN. */
-static void cmd_restore(const char *password) {
-    if (!password) {
-        outln("ERR usage: RESTORE <password>");
+/* RESTORE <password> <new-pin> <new-puk> — read FJAEGER.BAK from the MSC
+ * drive, decrypt it and import the credentials/profiles/master key, setting
+ * a new PIN and PUK in one step. */
+static void cmd_restore(const char *password, const char *new_pin,
+                        const char *new_puk) {
+    if (!password || !new_pin || !new_puk) {
+        outln("ERR usage: RESTORE <password> <new-pin> <new-puk>");
         return;
     }
     if (strlen(password) < 8 || strlen(password) > 64) {
@@ -247,10 +249,10 @@ static void cmd_restore(const char *password) {
         outln("ERR drive not mounted; DISK UNLOCK <pin> first");
         return;
     }
-    if (fj_state_backup_restore(password)) {
-        outln("OK restored; now SETPIN <pin> to secure the master key");
+    if (fj_state_backup_restore(password, new_pin, new_puk)) {
+        outln("OK restored with new PIN and PUK");
     } else {
-        outln("ERR restore failed (bad password or no backup)");
+        outln("ERR restore failed (bad password, no backup, or invalid pin/puk)");
     }
 }
 
@@ -523,7 +525,7 @@ static void dispatch(char *cmdline) {
     } else if (strcasecmp(tok, "backup") == 0) {
         cmd_backup(next_token(&p));
     } else if (strcasecmp(tok, "restore") == 0) {
-        cmd_restore(next_token(&p));
+        cmd_restore(next_token(&p), next_token(&p), next_token(&p));
     } else if (strcasecmp(tok, "reset") == 0) {
         cmd_reset(next_token(&p));
     } else {

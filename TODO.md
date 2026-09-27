@@ -174,16 +174,36 @@ SHA-256 / HKDF hashes that could be brute-forced offline from a flash dump.
 - [x] Physically verified: PIN unlock/lockout/PUK-recovery, disk set/unlock/
       mount/read-write, locked-disk inaccessible to the host, and reboot
       persistence of PIN/PUK/disk key.
+- [x] A RAM-only monotonic exponential backoff (2 s doubling to a 30 s cap)
+      paces failed PIN/PUK/disk-PIN attempts on top of the persistent counters.
 
 Open items:
-- [ ] Add a time delay on failed attempts in addition to the persistent
-      counters.
 - [ ] Consider whether the RP2350 can afford more PBKDF2 iterations or a
       memory-hard KDF (PBKDF2 at 100k runs in the main loop and takes a couple
       of seconds).
-- [ ] The SSH/CTAP2 credential private keys are stored in flash in clear; only
-      the disk key is wrapped. Protecting them (e.g. wrapping all key material)
-      is a larger security change.
+
+## Master key, PIN/PUK recovery and encrypted backup (implemented)
+
+Credential private keys are now encrypted at rest and PUK recovery can set a
+new PIN without losing keys.
+
+- [x] A random master key M AES-GCM-wraps every CTAP2 credential private key
+      at rest (per-credential nonce + tag).
+- [x] M is stored wrapped independently by the device PIN and the recovery
+      PUK (each with its own salt), so either secret can recover M.
+- [x] `UNLOCKPUK` recovers M; the credentials stay usable and `SETPIN <new>`
+      re-wraps M without losing any keys (the old PIN stops working).
+- [x] `SETPIN` and `PUK` re-wrap M with the new secret; lock and factory reset
+      wipe M from RAM.
+- [x] `BACKUP <password>` writes an AES-GCM backup (M + credentials + profiles
+      + active profile), keyed by PBKDF2(password), as `FJAEGER.BAK` on the
+      MSC drive; the host can copy it out.
+- [x] `RESTORE <password> <new-pin> <new-puk>` restores the backup and sets a
+      new PIN and PUK in one atomic step.
+- [x] The backup file is deleted (clusters freed and zeroed) when the drive
+      locks.
+- [x] Host tests cover the master-key/PUK-recovery flow and the
+      backup/restore round-trip.
 
 ## LED security pulses (implemented)
 

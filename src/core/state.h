@@ -81,10 +81,12 @@ bool fj_state_cwk(uint8_t out[32]);
 bool fj_state_backup_write(const char *password);
 
 /* Restore a backup file from the MSC drive. Decrypts with the backup
- * password, imports the credentials, profiles and active profile, and holds
- * the recovered master key in RAM. The user must then set a new PIN
- * (SETPIN) to re-wrap the master key. Returns true on success. */
-bool fj_state_backup_restore(const char *password);
+ * password, imports the credentials, profiles and active profile, and
+ * re-wraps the recovered master key with the supplied new device PIN and
+ * new recovery PUK in one atomic step. The device is left unlocked. Returns
+ * true on success. */
+bool fj_state_backup_restore(const char *password, const char *new_pin,
+                             const char *new_puk);
 
 /* Erase a profile and every credential bound to it as one consistent
  * operation: first the live CTAP2 cache is purged, then the persistent

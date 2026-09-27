@@ -25,7 +25,14 @@ controlled over a serial command interface.
   denied. Unlocking requires the PIN over serial.
 - **Brute-force protection** — the device PIN and disk PIN lock after five wrong
   attempts. A shared recovery PUK can clear the lock; five wrong PUK attempts
-  trigger a factory wipe.
+  trigger a factory wipe. Failed attempts are also paced by an exponential
+  backoff delay.
+- **Key protection at rest** — every credential private key is encrypted with a
+  master key M that is wrapped by both the PIN and the PUK, so a PUK recovery
+  can set a new PIN without losing keys.
+- **Encrypted backup/restore** — `BACKUP <password>` writes an encrypted
+  `FJAEGER.BAK` to the MSC drive; `RESTORE <password> <pin> <puk>` restores it
+  onto a fresh device.
 - **Serial console (USB CDC)** — `LOCK`, `UNLOCK`, `SETPIN`, `RESET BOOTSEL`,
   `TIMEOUT`, profile management, and more.
 
@@ -83,10 +90,12 @@ src/
   `LEFT(SHA-256(pin),16)` because the CTAP2 PIN protocol only transmits that
   value. PBKDF2 runs in the main loop and takes a couple of seconds on the
   RP2350.
-- The SSH/CTAP2 credential private keys are stored in flash **in clear** (only
-  the disk key is wrapped). A physical attacker who dumps flash gets the SSH
-  keys regardless of the PIN; the PIN protects the device lock and the disk
-  key.
+- The SSH/CTAP2 credential private keys are encrypted **at rest** by a random
+  master key M (AES-GCM). M is stored in flash wrapped independently by the
+  device PIN and the recovery PUK, so a physical attacker who dumps flash must
+  still recover M by guessing a PIN or PUK (slow, salted PBKDF2). Because the
+  PUK can also recover M, a **PUK recovery can set a new PIN without losing
+  keys**. A weak PUK therefore weakens at-rest key protection.
 - The device PIN and disk PIN have separate, persistent failure counters. A PUK
   clears a disk-PIN lock but does not replace the disk PIN: the disk key is
   still wrapped by the correct disk PIN.
@@ -172,6 +181,8 @@ Connect to the console (e.g. `screen /dev/ttyACM0 115200`):
 | `PROFILE RENAME <id> <name>` | Rename without changing credentials |
 | `PROFILE ERASE <id>` | Delete the profile and all its credentials |
 | `TIMEOUT <seconds>` | Set auto-relock delay (default 900 seconds; 0 = off) |
+| `BACKUP <password>` | Write an encrypted backup (M + keys + profiles) to `FJAEGER.BAK` |
+| `RESTORE <pw> <pin> <puk>` | Restore a backup, setting a new PIN and PUK in one step |
 | `RESET` | Reboot the device |
 | `RESET BOOTSEL` | Reboot into the USB bootloader (for flashing) |
 
@@ -179,6 +190,12 @@ Connect to the console (e.g. `screen /dev/ttyACM0 115200`):
 > FIDO/SSH signing). The encrypted drive is a separate step: `DISK UNLOCK`.
 > `LOCK` and auto-relock also close the drive, and `DISK UNLOCK` requires the
 > device to be unlocked.
+
+> **Backup/restore:** `BACKUP <password>` writes an encrypted `FJAEGER.BAK` to
+> the mounted drive (device must be unlocked). Copy the file out to a PC — it
+> is **deleted automatically when the drive locks**. On a fresh device, put
+> `FJAEGER.BAK` back on the drive, unlock it, then `RESTORE <password> <new-pin>
+> <new-puk>` to recover all keys and set new secrets in one step.
 
 Auto-lock defaults to 15 minutes. The `TIMEOUT` value is stored in the flash
 store and survives both reboot and a normal firmware flash. `TIMEOUT 0` is

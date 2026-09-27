@@ -21,8 +21,20 @@ signing and verification. The CTAP2 client PIN reuses the device's global PIN;
 a dongle with no PIN set accepts any CTAP2 PIN (dummy mode), while a set PIN is
 verified.
 
-The dongle was left **locked** after the last test. Test PIN is **`12345`**.
-This is only a development setup and must be changed before real use.
+Credential private keys are **encrypted at rest**: a random **master key M**
+wraps every CTAP2 private key (AES-GCM), and M is itself stored wrapped by
+both the device PIN and the recovery PUK. Either secret can recover M, so a
+**PUK recovery can set a new PIN without losing any keys**.
+
+An encrypted **backup/restore** feature lets the user write `FJAEGER.BAK` (M +
+credentials + profiles, AES-GCM-keyed by a dedicated backup password) to the
+MSC drive so the host can copy it out, and restore it onto a fresh device with
+`RESTORE <password> <new-pin> <new-puk>`.
+
+The dongle was left **locked** after the last test. Test PIN is **`12345`**,
+PUK is **`recovery-code`**, disk PIN is **`54321`**, backup password is
+**`backup-pass-123`**. This is only a development setup and must be changed
+before real use.
 
 ## Build environment
 
@@ -344,33 +356,77 @@ block, so large files write slowly and wear flash. The filesystem is FAT16 (max
 ~2 GB with a suitable cluster size), but the partition is 12 MiB. There is no
 wear leveling; the most-written sectors (FAT, root directory) wear faster.
 
+## Master key, PIN/PUK recovery and encrypted backup (implemented 2026-09-27)
+
+### Master-key model (PIN/PUK -> M)
+
+Credential private keys are no longer stored in clear text. A random 32-byte
+**master key M** AES-GCM-wraps every CTAP2 credential private key at rest. M
+itself is stored in flash **wrapped independently by the device PIN and the
+recovery PUK** (each with its own PBKDF2 salt):
+
+```
+flash:  m_enc_pin = M XOR PBKDF2(PIN, salt_pin)
+        m_enc_puk = M XOR PBKDF2(PUK, salt_puk)
+```
+
+- Either secret can recover M into RAM (RAM only while unlocked; wiped on
+  lock and factory reset).
+- **PUK recovery now also recovers M**, so after `UNLOCKPUK` the credentials
+  remain usable, and `SETPIN <new>` re-wraps M with the new PIN **without
+  losing any keys**. The old PIN stops working.
+- `SETPIN` and `PUK` re-wrap M with the new secret.
+- Brute-force: the device PIN, disk PIN and PUK each have independent
+  persistent attempt counters (block/wipe after `FJ_MAX_PIN_FAILS` /
+  `FJ_MAX_PUK_FAILS`) plus a RAM-only monotonic exponential-backoff delay
+  (2 s doubling to a 30 s cap) between live attempts.
+
+### Backup / restore (own password)
+
+- `BACKUP <password>` (device unlocked, drive mounted) writes an
+  AES-GCM-encrypted blob to the MSC drive as a real FAT16 file **`FJAEGER.BAK`**:
+  master key M + all credentials + profiles + active profile. The file is
+  keyed by `PBKDF2(backup password)`, so only the password decrypts it. The
+  host can copy the file out (e.g. to a PC) for safekeeping.
+- `RESTORE <password> <new-pin> <new-puk>` reads the file, decrypts it and, in
+  one atomic step, imports the credentials/profiles/active profile and re-wraps
+  the recovered M with the supplied **new PIN and new PUK**. The device is left
+  unlocked. This recovers all keys onto a fresh/wiped device.
+- The backup file is **deleted automatically when the drive locks**: its
+  clusters are freed and its data sectors zeroed, so it does not linger at
+  rest. To preserve it, copy `FJAEGER.BAK` out to a PC before locking.
+- The PIN and PUK are **not** stored in the backup; they are device-specific
+  and chosen fresh on restore.
+
+### PIN/PUK requirements
+
+- Device PIN: 4-32 characters (any characters). The initial PIN can be set on
+  a locked device; changing an existing PIN requires the device unlocked.
+- Recovery PUK: 8-64 characters (any characters). Since the PUK can recover
+  the master key, a weak PUK weakens at-rest key protection.
+- Disk PIN: 4-32 characters.
+
 ## What should be tested next
 
 Prioritized list for the next development session (completed and verified items
 are removed):
 
-1. **Physical multi-profile regression.** On the dongle: create profiles, enroll
-   `ecdsa-sk` credentials in at least two profiles, and verify that only the
-   credentials in the selected profile sign; that profile selection, name and
-   binding survive reset/cold start; that deleting an inactive profile makes its
-   credentials unusable immediately and after reboot; and that profile deletion
-   does not affect drive data.
-2. **More FIDO clients / OS.** Try browser/WebAuthn and ideally both Linux and
+1. **More FIDO clients / OS.** Try browser/WebAuthn and ideally both Linux and
    Windows/macOS. Also test several FIDO devices connected at once.
-3. **Interrupts and malformed traffic.** Test CTAPHID CANCEL, channel lock,
+2. **Interrupts and malformed traffic.** Test CTAPHID CANCEL, channel lock,
    fragmented and maximum-size messages, wrong sequence numbers and USB
    disconnect mid-response.
-4. **Long-run test.** Run many signing, lock/unlock cycles and auto-lock while
+3. **Long-run test.** Run many signing, lock/unlock cycles and auto-lock while
    HID and MSC are used simultaneously. Look for USB resets, heap/stack issues
    and flash wear.
-5. **MSC data integrity.** Write and read files over many lock/unlock cycles,
+4. **MSC data integrity.** Write and read files over many lock/unlock cycles,
    auto-lock during I/O and active-profile switches. The drive is now a
    persistent flash partition (12 MiB) with a dedicated disk key; verify that
    contents never leak in cleartext while locked and that data survives reboot.
-6. **LED regression.** Visually confirm red/green/yellow and that the blue
+5. **LED regression.** Visually confirm red/green/yellow and that the blue
    activity pulse does not obscure the lock status for too long, especially
    under continuous drive or HID I/O.
-7. **Real login on an external host.** This session used a local `sshd`; also
+6. **Real login on an external host.** This session used a local `sshd`; also
    verify against a remote/service host.
 
 ## Known limitations and security work
@@ -384,9 +440,17 @@ are removed):
   the PBKDF2-derived disk-PIN key. The CTAP2 client-PIN verifier is
   `LEFT(SHA-256(pin),16)` because the CTAP2 PIN protocol only transmits that
   value. PBKDF2 runs in the main loop and takes a couple of seconds on the
-  RP2350; a time delay in addition to the persistent attempt counters is still
-  missing. The SSH/CTAP2 credential private keys themselves are stored in flash
-  in clear, so a physical flash dump reveals them regardless of the PIN.
+  RP2350. Failed PIN/PUK/disk-PIN attempts are additionally paced by a RAM-only
+  monotonic exponential backoff (2 s doubling to a 30 s cap) on top of the
+  persistent attempt counters.
+- The SSH/CTAP2 credential private keys are encrypted at rest by a master key
+  M (AES-GCM), and M is wrapped by the PIN and PUK. However, M itself and the
+  wrapped key material still live in ordinary external flash; resistance to
+  physical extraction (e.g. an attacker who can read flash and brute-force a
+  weak PIN/PUK offline) depends on the PIN/PUK strength.
+- Because the recovery PUK can also recover the master key, the PUK is as
+  important as the PIN for protecting the keys. A weak or short PUK weakens
+  at-rest security.
 - There is no dedicated physical touch button. CTAP `up` in practice represents
   that the device is already unlocked via the PIN, not a fresh physical
   confirmation per use.
@@ -416,17 +480,19 @@ are removed):
 1. Test points 1–4 above are run and the results documented. Continue with the
    remaining items in "What should be tested next".
 2. Add automated parser and transport tests for CTAPHID/CBOR.
-3. **PIN/PUK/disk-PIN bruker nå saltet PBKDF2-HMAC-SHA256** (per-felt tilfeldig
-   salt). Gjenstår: en tidsforsinkelse i tillegg til de vedvarende
-   forsøkstellerne, og vurder om RP2350 kan bære flere iterasjoner eller en
-   minnehard KDF.
+3. **Brute-force protection is implemented**: persistent salted PBKDF2 counters
+   plus a RAM-only backoff delay. Consider more PBKDF2 iterations or a
+   memory-hard KDF if the RP2350 can afford it.
 4. Decide whether the project should have a physical confirmation button for
    correct FIDO user-presence semantics.
 5. **The persistent MSC partition is implemented** (12 MiB, dedicated disk key,
    XTS). Remaining: optimize write performance/wear (e.g. write coalescing and
    lower erase frequency), consider FAT32 if capacity grows, and consider
    per-sector integrity protection.
-6. Plan secure boot, signed updates and key protection before use with real
+6. **Backup/restore is implemented** (`BACKUP` / `RESTORE <pw> <pin> <puk>`).
+   Remaining: document the full copy-out / restore flow, and consider whether a
+   backup imported onto a different physical dongle is desired.
+7. Plan secure boot, signed updates and key protection before use with real
    secrets.
 
 ## Relevant commits

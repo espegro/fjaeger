@@ -114,6 +114,8 @@ bool fj_keys_get_puk(uint8_t pbkdf2_hash[32], uint8_t salt[16]) {
     return true;
 }
 
+bool fj_keys_puk_configured(void) { return have_puk; }
+
 void fj_keys_wipe(void) {
     memset(stored_pin, 0, sizeof(stored_pin));
     memset(stored_pin_salt, 0, sizeof(stored_pin_salt));
@@ -484,9 +486,12 @@ static void test_backup_restore(void) {
     fj_state_lock();
     assert(!fj_state_cwk(m));
 
-    /* Restore with the correct password recovers the same master key M. */
-    assert(fj_state_backup_restore("backup-pass"));
+    /* Restore with the correct password + new PIN/PUK recovers the same
+     * master key M and sets the new secrets. */
+    assert(fj_state_backup_restore("backup-pass", "restored-pin", "restored-puk"));
     assert(fj_state_get() == FJ_STATE_UNLOCKED);
+    assert(fj_state_pin_configured());
+    assert(fj_keys_puk_configured());
     uint8_t m2[32];
     assert(fj_state_cwk(m2));
     assert(memcmp(m, m2, 32) == 0);
@@ -494,7 +499,7 @@ static void test_backup_restore(void) {
     /* A wrong password must fail and not clobber M. */
     uint8_t m_before[32];
     assert(fj_state_cwk(m_before));
-    assert(!fj_state_backup_restore("wrong-pass"));
+    assert(!fj_state_backup_restore("wrong-pass", "x", "y"));
     assert(fj_state_cwk(m2));
     assert(memcmp(m_before, m2, 32) == 0);
 }

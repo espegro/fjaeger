@@ -103,11 +103,14 @@ static bool master_unwrap_puk(const char *puk, size_t len) {
 static bool master_wrap_with(const char *secret, size_t len,
                              bool (*set_wrap)(const uint8_t[32], const uint8_t[16])) {
     uint8_t enc[32], salt[16];
-    if (!fj_keys_master_key_set()) {
+    if (!fj_keys_master_key_set() && !master_available) {
         /* First master key: fresh random value and salt. */
         fj_random(salt, sizeof(salt));
         fj_random(master, sizeof(master));
+        master_available = true;
     } else {
+        /* A master key already exists (either in the store or held in RAM,
+         * e.g. after a restore); keep it and just re-wrap with a fresh salt. */
         fj_random(salt, sizeof(salt));
     }
 
@@ -428,8 +431,12 @@ bool fj_state_backup_write(const char *password) {
     return ok;
 }
 
-bool fj_state_backup_restore(const char *password) {
-    if (!password) return false;
+bool fj_state_backup_restore(const char *password, const char *new_pin,
+                             const char *new_puk) {
+    if (!password || !new_pin || !new_puk) return false;
+    size_t pin_len = strlen(new_pin), puk_len = strlen(new_puk);
+    if (pin_len < PIN_MIN_LEN || pin_len > PIN_MAX_LEN) return false;
+    if (puk_len < 8 || puk_len > 64) return false;
 
     uint8_t blob[BACKUP_TOTAL(sizeof(fj_backup_payload_t))];
     size_t blob_len = 0;
@@ -459,16 +466,40 @@ bool fj_state_backup_restore(const char *password) {
     }
     memset(key, 0, sizeof(key));
 
-    /* Import the store and hold the recovered master key in RAM. The user
-     * must set a new PIN to re-wrap it. Reload the live CTAP2 cache so the
-     * restored credentials are usable immediately without a reboot. */
+    /* Import the store and hold the recovered master key in RAM. */
     if (!fj_keys_backup_restore(&payload)) return false;
     memcpy(master, payload.master, sizeof(master));
     master_available = true;
-    fj_ctap2_forget_all();
-    fj_ctap2_init();
     memset(&payload, 0, sizeof(payload));
     memset(blob, 0, sizeof(blob));
+
+    /* Set the new device PIN and re-wrap the recovered master key with it. */
+    fj_random(pin_salt, FJ_PIN_SALT_LEN);
+    if (!fj_pbkdf2_sha256((const uint8_t *)new_pin, pin_len, pin_salt,
+                          FJ_PIN_SALT_LEN, FJ_PBKDF2_ITERATIONS, pin_hash))
+        return false;
+    uint8_t sha[FJ_HASH_LEN];
+    fj_sha256((const uint8_t *)new_pin, pin_len, sha);
+    memcpy(pin_ctap2_verifier, sha, 16);
+    if (!fj_keys_set_pin(pin_hash, pin_salt, pin_ctap2_verifier)) return false;
+    pin_configured = true;
+    if (!master_wrap_with(new_pin, pin_len, fj_keys_set_master_pin_wrap))
+        return false;
+
+    /* Set the new recovery PUK and re-wrap the master key with it too. */
+    uint8_t puk_salt[FJ_PUK_SALT_LEN], puk_hash[FJ_HASH_LEN];
+    fj_random(puk_salt, FJ_PUK_SALT_LEN);
+    if (!fj_pbkdf2_sha256((const uint8_t *)new_puk, puk_len, puk_salt,
+                          FJ_PUK_SALT_LEN, FJ_PBKDF2_ITERATIONS, puk_hash))
+        return false;
+    if (!fj_keys_set_puk(puk_hash, puk_salt)) return false;
+    if (!master_wrap_with(new_puk, puk_len, fj_keys_set_master_puk_wrap))
+        return false;
+
+    /* Reload the live CTAP2 cache so the restored credentials are usable
+     * immediately without a reboot. */
+    fj_ctap2_forget_all();
+    fj_ctap2_init();
 
     state = FJ_STATE_UNLOCKED;
     unlock_since = get_absolute_time();
