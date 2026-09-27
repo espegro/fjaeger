@@ -156,6 +156,12 @@ cmake --build build -j$(nproc)
 
 Result: `build/fjaeger.uf2`.
 
+> **Pre-built firmware:** a ready-to-flash build is committed under
+> [`releases/`](releases/) (`fjaeger-<commit>.uf2`, plus the matching `.elf`
+> for debugging) so you can flash without building. It is built from the same
+> commit as the release. If you built your own, use `build/fjaeger.uf2` from
+> that build instead.
+
 ### Flash
 
 Put the dongle into **BOOTSEL** mode (hold BOOTSEL, connect USB; or reboot into
@@ -164,6 +170,14 @@ it with the console command `RESET BOOTSEL`) and run one of the scripts:
 ```bash
 scripts/reflash.sh            # firmware only; drive + store (profiles/PIN) kept
 scripts/reflash_wipe.sh       # erase all flash (firmware + drive + store), then flash
+```
+
+To flash the pre-built firmware directly with `picotool` (no build needed):
+
+```bash
+# put the dongle in BOOTSEL mode first
+picotool load -f releases/fjaeger-034ebf3.uf2
+picotool reboot
 ```
 
 ### Host tests

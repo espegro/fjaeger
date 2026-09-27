@@ -8,6 +8,11 @@
 *.bin
 *.hex
 *.map
+# Pre-built firmware releases are intentionally committed under /releases/
+!/releases/
+/releases/*
+!/releases/*.uf2
+!/releases/*.elf
 
 .cache/
 .vscode/
