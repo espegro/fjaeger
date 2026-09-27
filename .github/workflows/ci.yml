@@ -46,3 +46,11 @@ jobs:
             tests/test_profile_erase.c src/core/state.c src/fido/ctap2.c \
             src/fido/cbor.c src/fido/pin.c -o /tmp/fjaeger-test-profile-erase
           /tmp/fjaeger-test-profile-erase
+
+          # The HMAC/PBKDF2 host test is self-contained (no Pico SDK/mbedTLS)
+          # and verifies the production HMAC/PBKDF2 construction against
+          # RFC 4231 (HMAC) and RFC 7914 (PBKDF2) vectors. The other tests
+          # stub these out, so this is the only check of the real algorithm.
+          cc $COMMON -Isrc/core \
+            tests/test_hmac.c -o /tmp/fjaeger-test-hmac
+          /tmp/fjaeger-test-hmac
