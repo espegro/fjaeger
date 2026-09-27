@@ -1,0 +1,48 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  host-tests:
+    name: Host tests
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        sanitize: ["", "asan-ubsan"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install toolchain
+        run: sudo apt-get update && sudo apt-get install -y build-essential
+
+      # The four host tests compile the firmware sources with cc against
+      # stubbed crypto/state layers; they run without the Pico SDK.
+      - name: Build and run host tests
+        run: |
+          set -e
+          EXTRA=""
+          if [ "${{ matrix.sanitize }}" = "asan-ubsan" ]; then
+            EXTRA="-fsanitize=address,undefined -fno-omit-frame-pointer"
+          fi
+          COMMON="-std=c11 -Wall -Wextra -Werror $EXTRA"
+
+          cc $COMMON -Itests/stubs -Isrc/core -Isrc/fido -Isrc/usb -Isrc/led \
+            tests/test_security.c src/core/state.c -o /tmp/fjaeger-test-security
+          /tmp/fjaeger-test-security
+
+          cc $COMMON -Isrc/core -Isrc/fido -Isrc/led \
+            tests/test_ctap2.c src/fido/ctap2.c src/fido/cbor.c src/fido/pin.c \
+            -o /tmp/fjaeger-test-ctap2
+          /tmp/fjaeger-test-ctap2
+
+          cc $COMMON -Isrc/core -Isrc/fido -Isrc/led \
+            tests/test_profile.c src/fido/ctap2.c src/fido/cbor.c src/fido/pin.c \
+            -o /tmp/fjaeger-test-profile
+          /tmp/fjaeger-test-profile
+
+          cc $COMMON -Itests/stubs -Isrc/core -Isrc/fido -Isrc/usb -Isrc/led \
+            tests/test_profile_erase.c src/core/state.c src/fido/ctap2.c \
+            src/fido/cbor.c src/fido/pin.c -o /tmp/fjaeger-test-profile-erase
+          /tmp/fjaeger-test-profile-erase
