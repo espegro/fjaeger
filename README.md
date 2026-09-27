@@ -107,34 +107,89 @@ src/
 
 ## Building
 
-Prerequisites: CMake ≥ 3.13, ARM-none-EABI toolchain, **Pico SDK ≥ 2.1.0**
-(preferably 2.2.0) and **`picotool`** on PATH (for flashing). The host tests
-only need `cc` (x86-64).
+### Prerequisites
 
-> The Pico SDK (and the `pico-extras` submodule it references) are **not
-> vendored** in this repository; clone them next to this checkout and point
-> `PICO_SDK_PATH` at the SDK before configuring.
+- **CMake ≥ 3.13** — e.g. `apt install cmake`.
+- **ARM GNU toolchain** (`arm-none-eabi-gcc`) — e.g. `apt install gcc-arm-none-eabi`.
+- **Pico SDK ≥ 2.1.0** (preferably **2.2.0**) with RP2350/TinyUSB support.
+- **`picotool`** on `PATH` (only needed to flash).
+- The host tests only need a C11 compiler (`cc`).
 
-The dongle is a **TENSTAR RP2350-USB 16 MB** and uses the board profile
-`waveshare_rp2350_plus_16mb` (electrically compatible). It builds against
-Pico SDK 2.2.0 (with TinyUSB that supports RP2350).
+The Pico SDK is **not vendored** in this repository. Either clone it next to
+this checkout and set `PICO_SDK_PATH`, or let CMake fetch it automatically.
+
+### Get the Pico SDK
+
+Option A — clone next to the checkout (the SDK has its own submodules, e.g.
+TinyUSB, so use `--recurse-submodules`):
 
 ```bash
-# Use SDK 2.2.0 (required for RP2350 USB support); point PICO_SDK_PATH at
-# wherever you cloned the Pico SDK
+git clone --recurse-submodules -b 2.2.0 \
+  https://github.com/raspberrypi/pico-sdk.git pico-sdk
+```
+
+Option B — let CMake download the SDK automatically on the first configure:
+
+```bash
+cmake -S . -B build \
+  -DPICO_SDK_FETCH_FROM_GIT=ON \
+  -DPICO_SDK_FETCH_FROM_GIT_TAG=2.2.0 \
+  -DPICO_BOARD=waveshare_rp2350_plus_16mb
+```
+
+> Note: `PICO_SDK_FETCH_FROM_GIT` does not fetch TinyUSB with `--recurse
+> -submodules`, so if you hit a missing-TinyUSB error, prefer Option A (clone
+> with submodules) and point `PICO_SDK_PATH` at it.
+
+### Configure and build
+
+The dongle is a **TENSTAR RP2350-USB 16 MB** and uses the board profile
+`waveshare_rp2350_plus_16mb` (electrically compatible with the Waveshare
+RP2350-Plus 16 MB). It builds against Pico SDK 2.2.0.
+
+```bash
 cmake -S . -B build \
   -DPICO_SDK_PATH=/path/to/pico-sdk \
   -DPICO_BOARD=waveshare_rp2350_plus_16mb
 cmake --build build -j$(nproc)
 ```
 
-Result: `build/fjaeger.uf2`. Put the dongle into BOOTSEL mode and flash with
-one of the scripts. The device also accepts the console command
-`RESET BOOTSEL` to enter BOOTSEL mode programmatically.
+Result: `build/fjaeger.uf2`.
+
+### Flash
+
+Put the dongle into **BOOTSEL** mode (hold BOOTSEL, connect USB; or reboot into
+it with the console command `RESET BOOTSEL`) and run one of the scripts:
 
 ```bash
 scripts/reflash.sh            # firmware only; drive + store (profiles/PIN) kept
 scripts/reflash_wipe.sh       # erase all flash (firmware + drive + store), then flash
+```
+
+### Host tests
+
+The host tests compile the firmware sources with `cc` against stubbed
+crypto/state layers, so they run on x86-64 without hardware:
+
+```bash
+cc -std=c11 -Wall -Wextra -Werror -Itests/stubs -Isrc/core -Isrc/fido -Isrc/usb -Isrc/led \
+  tests/test_security.c src/core/state.c -o /tmp/fjaeger-test-security
+/tmp/fjaeger-test-security            # -> "security host tests: ok"
+
+cc -std=c11 -Wall -Wextra -Werror -Isrc/core -Isrc/fido -Isrc/led \
+  tests/test_ctap2.c src/fido/ctap2.c src/fido/cbor.c src/fido/pin.c \
+  -o /tmp/fjaeger-test-ctap2
+/tmp/fjaeger-test-ctap2               # -> "ctap2 host tests: ok"
+
+cc -std=c11 -Wall -Wextra -Werror -Isrc/core -Isrc/fido -Isrc/led \
+  tests/test_profile.c src/fido/ctap2.c src/fido/cbor.c src/fido/pin.c \
+  -o /tmp/fjaeger-test-profile
+/tmp/fjaeger-test-profile             # -> "profile host tests: ok"
+
+cc -std=c11 -Wall -Wextra -Werror -Itests/stubs -Isrc/core -Isrc/fido -Isrc/usb -Isrc/led \
+  tests/test_profile_erase.c src/core/state.c src/fido/ctap2.c src/fido/cbor.c src/fido/pin.c \
+  -o /tmp/fjaeger-test-profile-erase
+/tmp/fjaeger-test-profile-erase       # -> "profile erase/flush host test: ok"
 ```
 
 ### Do you lose your keys when re-flashing the firmware?
