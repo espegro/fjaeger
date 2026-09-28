@@ -30,7 +30,13 @@ firmware build, then committed.
 - `DISK FORMAT YES` (unlocked, disk key unwrapped, confirmation token), fail-closed otherwise; no implicit format from DISK UNLOCK.
 
 ## P7 – FJ-N004 credProtect
-- Implement (parse/extensions -> per-credential policy persisted + in AAD; enforce in getAssertion) OR stop advertising it in getInfo. Preferred: implement.
+- Status: REMOVAL IS NOT VIABLE. Removing credProtect from GetInfo made
+  `ssh-keygen -O resident` fail ("requested feature not supported") — OpenSSH
+  requires the extension to permit resident keys. Advertisement restored so
+  resident-enroll works.
+- Open: implement credProtect (parse extensions 0x06 -> per-credential policy
+  persisted in the AAD; enforce UV policies in getAssertion). Deferred; needs
+  a real UV path or explicit UV-required rejection.
 
 ## P8 – FJ-N008 document user-presence
 - Document global-unlock = authorization boundary; LED is feedback, not presence. No code change (by design).
