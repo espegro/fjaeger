@@ -5,6 +5,7 @@
 #include "pico/stdlib.h"
 
 #include "state.h"
+#include "ctap2.h"
 #include "rgb_led.pio.h"
 
 #define FJ_LED_PIN 22u
@@ -68,7 +69,14 @@ void fj_led_task(void) {
     }
 
     if (fj_state_get() == FJ_STATE_UNLOCKED) {
-        put_rgb(0, 24, 0);       /* green: unlocked */
+        if (!fj_ctap2_has_credentials()) {
+            /* Unlocked but blank (no credential enrolled yet): amber blink. */
+            uint32_t bi = 700u;
+            put_rgb(((now / bi) & 1u) ? 24u : 0u,
+                    ((now / bi) & 1u) ? 8u : 0u, 0);
+        } else {
+            put_rgb(0, 24, 0);   /* green: unlocked + provisioned */
+        }
         return;
     }
 

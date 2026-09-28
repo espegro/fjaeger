@@ -150,6 +150,12 @@ void fj_ctap2_init(void) {
 /* Drop any in-progress resident-credential discovery. The active profile is
  * kept in the credential store (keys.c), so a profile switch from the console
  * must invalidate the buffered selection here. */
+bool fj_ctap2_has_credentials(void) {
+    for (unsigned i = 0; i < FJ_CTAP2_CREDS; i++)
+        if (creds[i].in_use) return true;
+    return false;
+}
+
 void fj_ctap2_invalidate_discovery(void) {
     discovery_active = false;
     /* A new active profile also invalidates credential-management cursors so
