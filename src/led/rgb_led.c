@@ -57,7 +57,7 @@ static void led_pulse(uint8_t r, uint8_t g, uint8_t b, uint32_t ms) {
 void fj_led_activity(void) { led_pulse(0, 0, 28, 100); }   /* blue: USB */
 void fj_led_pin_unlock(void) { led_pulse(0, 40, 0, 250); } /* green flash */
 void fj_led_pin_lock(void)   { led_pulse(40, 0, 0, 200); } /* red flash */
-void fj_led_sign(void)       { led_pulse(0, 30, 30, 150); }/* cyan flash */
+void fj_led_sign(void)       { led_pulse(0, 30, 30, 600); } /* cyan flash (SSH sign presence) */
 
 void fj_led_task(void) {
     uint32_t now = to_ms_since_boot(get_absolute_time());
