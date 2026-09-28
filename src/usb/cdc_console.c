@@ -743,7 +743,12 @@ static void cmd_creds(const char *sub, char *rest) {
 
     if (strcasecmp(sub, "del") == 0) {
         const char *id = next_token(&rest);
-        if (!id) { outln("ERR usage: CREDS DEL <hex-id>"); return; }
+        const char *conf = next_token(&rest);
+        if (!id) { outln("ERR usage: CREDS DEL <hex-id> yes"); return; }
+        if (!conf || strcasecmp(conf, "yes") != 0) {
+            outln("ERR mutating; type CREDS DEL <hex-id> yes");
+            return;
+        }
         if (strlen(id) != FJ_CRED_ID_LEN * 2) {
             outln("ERR invalid credential id (need 32 hex chars)");
             return;
@@ -874,6 +879,14 @@ void fj_console_task(void) {
         if (pending_secret != SEC_NONE) {
             char *buf = secret_confirm_phase ? secret2 : secret1;
             size_t *len = secret_confirm_phase ? &secret2_len : &secret1_len;
+            if (c == 0x03 || c == 0x1b) {   /* Ctrl-C / ESC: cancel */
+                pending_secret = SEC_NONE;
+                secret1_len = secret2_len = 0;
+                clear_secrets();
+                out("\r\nOK cancelled\r\n");
+                out(PROMPT);
+                continue;
+            }
             if (c == 0x08) {
                 if (*len > 0) { (*len)--; echo_erase(); }
                 continue;
