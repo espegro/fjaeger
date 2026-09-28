@@ -23,7 +23,7 @@ controlled over a serial command interface.
   Data survives reboot.
 - **Lock/unlock model** — when locked, signing, decryption and writing are
   denied. Unlocking requires the PIN over serial.
-- **Brute-force protection** — the device PIN and disk PIN lock after five wrong
+- **Brute-force protection** — the unlock passphrase and disk PIN lock after five wrong
   attempts. A shared recovery PUK can clear the lock; five wrong PUK attempts
   trigger a factory wipe. Failed attempts are also paced by an exponential
   backoff delay.
@@ -83,7 +83,7 @@ src/
 - The MSC drive uses a **dedicated permanent XTS key** stored in the flash
   store, independent of profiles. Switching or deleting profiles does not change
   drive data.
-- The device PIN, disk PIN and recovery PUK are derived with salted
+- The unlock passphrase, disk PIN and recovery PUK are derived with salted
   PBKDF2-HMAC-SHA256 (a fresh random salt per field), so a dumped flash store
   cannot be brute-forced offline with a fast hash. The disk key is wrapped with
   the PBKDF2-derived disk-PIN key. The CTAP2 client-PIN verifier is
@@ -93,10 +93,10 @@ src/
 - The SSH/CTAP2 credential private keys are encrypted **at rest** by a random
   master key M (AES-GCM). M is stored in flash wrapped independently by the
   device PIN and the recovery PUK, so a physical attacker who dumps flash must
-  still recover M by guessing a PIN or PUK (slow, salted PBKDF2). Because the
+  still recover M by guessing a passphrase or PUK (slow, salted PBKDF2). Because the
   PUK can also recover M, a **PUK recovery can set a new PIN without losing
   keys**. A weak PUK therefore weakens at-rest key protection.
-- The device PIN and disk PIN have separate, persistent failure counters. A PUK
+- The unlock passphrase, disk PIN and CTAP2 PIN each have separate, persistent failure counters. A PUK
   clears a disk-PIN lock but does not replace the disk PIN: the disk key is
   still wrapped by the correct disk PIN.
 
@@ -240,7 +240,7 @@ Connect to the console (e.g. `screen /dev/ttyACM0 115200`):
 | `HELP` | List commands |
 | `STATUS` | Show device + drive state, active profile, profiles, timeout |
 | `LOCK` | Lock the device (and close the drive) |
-| `UNLOCK <pin>` | Unlock the **device** for key operations (not the drive) |
+| `UNLOCK <passphrase>` | Unlock the **device** for key operations (not the drive) |
 | `SETPIN <pin>` | Set/change PIN |
 | `UNLOCKPUK <puk>` | Unblock a locked device PIN with the recovery PUK |
 | `PUK <code>` | Set/change the recovery PUK |
@@ -380,13 +380,18 @@ ssh-keygen -Y verify -f allowed_signers -I <name> -n test -s file.txt.sig < file
   resident-key download (`ssh-keygen -K`) and real SSH login are physically
   tested on the RP2350 dongle.
   - Only **ECDSA P-256 / ES256** is supported (no EdDSA/ed25519-sk).
-  - The device must be unlocked (PIN) for `makeCredential`/`getAssertion` to be
+  - The device must be unlocked (passphrase) for `makeCredential`/`getAssertion` to be
     accepted.
   - Credentials are flash-persistent (up to 8) in a CRC-checked A/B format,
     written defer-ably from the main loop.
-  - The CTAP2 client PIN reuses the device's global PIN: with no PIN set any
-    PIN is accepted (so `ssh-keygen -K` works on a fresh device); with a PIN
-    set it is verified.
+  - The CTAP2 client PIN is **independent** of the unlock passphrase: with no
+    CTAP2 PIN set any PIN is accepted (so `ssh-keygen -K` works on a fresh
+    device); with a PIN set it is verified. The passphrase and CTAP2 PIN have
+    separate persistent retry/block counters.
+  - **User presence:** this prototype treats "device unlocked" as the user
+    authorization boundary for signing; there is no per-signature touch or
+    button. The cyan LED pulse after signing is feedback that a signature
+    happened, not a presence authorization.
 - The MSC drive is a **12 MiB persistent FAT16 partition** in on-board flash,
   encrypted on the fly with AES-XTS using a **dedicated disk key** (independent
   of profiles). Metadata (boot, FAT, root) is initialized once on first boot;
