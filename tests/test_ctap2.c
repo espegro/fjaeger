@@ -313,6 +313,20 @@ static void test_resident_aad(void) {
     FJ_TAMPER(persisted[0].profile_id = 9);          /* lookup reject */
 #undef FJ_TAMPER
 
+    /* FJ: deleting the credential is active-profile scoped; after persist +
+     * reload it is gone, and a second delete fails. */
+    {
+        uint8_t id[FJ_CRED_ID_LEN];
+        memcpy(id, persisted[0].credential_id, FJ_CRED_ID_LEN);
+        assert(fj_ctap2_delete_cred(0, id));
+        assert(!fj_ctap2_delete_cred(0, id));          /* already gone */
+        fj_ctap2_task();                               /* persist the deletion */
+        fj_ctap2_init();                               /* reload */
+        len = discovery_request(request, sizeof(request));
+        len = fj_ctap2_dispatch(request, len, response, sizeof(response));
+        assert(len == 1 && response[0] != 0);          /* no resident cred left */
+    }
+
     puts("resident AAD round-trip + tamper: ok");
 }
 

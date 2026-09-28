@@ -38,6 +38,11 @@ void fj_ctap2_forget_all(void);
  * persistent store. */
 void fj_ctap2_forget_profile(unsigned profile_id);
 
+/* Delete the single credential with the given id from the given profile's
+ * credential set (active-profile scoped). Returns true if one was removed;
+ * the change is persisted on the next fj_ctap2_task(). */
+bool fj_ctap2_delete_cred(unsigned profile_id, const uint8_t *credential_id);
+
 /* Invalidate any in-progress resident-credential discovery. Call after the
  * active profile changes so a buffered credential selection is not reused
  * across a profile switch. */

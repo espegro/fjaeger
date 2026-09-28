@@ -95,6 +95,7 @@ static uint8_t cm_rp_hash[FJ_HASH_LEN];/* RP being enumerated */
 #define CM_ENUM_RPS_NEXT             0x03
 #define CM_ENUM_CREDS_BEGIN          0x04
 #define CM_ENUM_CREDS_NEXT           0x05
+#define CM_DELETE_CRED               0x06
 
 /* authenticatorCredentialManagement response keys */
 #define CM_RSP_RP           0x03
@@ -196,6 +197,26 @@ void fj_ctap2_forget_profile(unsigned profile_id) {
      * erased credentials; the persistent store was already updated by the
      * profile erase. */
     if (removed) ctap2_dirty = true;
+}
+
+bool fj_ctap2_delete_cred(unsigned profile_id, const uint8_t *credential_id) {
+    bool removed = false;
+    for (unsigned i = 0; i < FJ_CTAP2_CREDS; i++) {
+        if (creds[i].in_use && creds[i].profile_id == profile_id &&
+            memcmp(creds[i].credential_id, credential_id, FJ_CRED_ID_LEN) == 0) {
+            memset(&creds[i], 0, sizeof(fj_ctap2_cred_t));
+            removed = true;
+            break;   /* credential ids are unique */
+        }
+    }
+    if (removed) {
+        /* A changed credential set invalidates discovery/credMgmt cursors. */
+        discovery_active = false;
+        cm_rp_index = cm_rp_count = 0;
+        cm_cred_index = cm_cred_count = 0;
+        ctap2_dirty = true;
+    }
+    return removed;
 }
 
 /* Build the AES-GCM AAD that binds a credential's immutable, security-
@@ -1059,8 +1080,12 @@ static bool write_credential_info(fj_cbor_writer *w, const fj_ctap2_cred_t *cr,
 }
 
 /* Parse subCommandParams {1: rpIDHash} and copy the hash out. */
-static bool parse_rp_hash_param(fj_cbor_reader *r, fj_cbor_item *item,
-                                uint8_t rp_hash[FJ_HASH_LEN]) {
+/* Parse the credential-management subParameter map ({1: bstr}). The value is
+ * the Relying-Party ID hash (32 B, for enumerating credentials) or a
+ * credential ID (FJ_CRED_ID_LEN, for deleteCredential). */
+static bool parse_subparam_map(fj_cbor_reader *r, fj_cbor_item *item,
+                               uint8_t rp_hash[FJ_HASH_LEN], bool *have_rp,
+                               uint8_t cred_id[FJ_CRED_ID_LEN], bool *have_cred) {
     if (item->type != FJ_CBOR_MAP) return false;
     size_t pairs = (size_t)item->val;
     for (size_t i = 0; i < pairs; i++) {
@@ -1069,10 +1094,13 @@ static bool parse_rp_hash_param(fj_cbor_reader *r, fj_cbor_item *item,
         if (!fj_cbor_next(r, &v)) return false;
         if (k.type == FJ_CBOR_UINT && k.val == 0x01) {
             size_t n = 0;
+            uint8_t tmp[64];
             if (v.type != FJ_CBOR_BSTR ||
-                !fj_cbor_read_bytes(r, &v, rp_hash, FJ_HASH_LEN, &n) ||
-                n != FJ_HASH_LEN)
+                !fj_cbor_read_bytes(r, &v, tmp, sizeof(tmp), &n))
                 return false;
+            if (n == FJ_HASH_LEN) { memcpy(rp_hash, tmp, FJ_HASH_LEN); *have_rp = true; }
+            else if (n == FJ_CRED_ID_LEN) { memcpy(cred_id, tmp, FJ_CRED_ID_LEN); *have_cred = true; }
+            else return false;
         } else {
             if (!fj_cbor_skip(r, &v)) return false;
         }
@@ -1204,6 +1232,8 @@ static size_t credential_management(const uint8_t *req, size_t len,
     bool have_pin_auth = false;
     uint8_t rp_hash[FJ_HASH_LEN];
     bool have_rp_hash = false;
+    uint8_t cred_id[FJ_CRED_ID_LEN];
+    bool have_cred_id = false;
 
     for (size_t i = 0; i < pairs; i++) {
         fj_cbor_item k, v;
@@ -1227,9 +1257,9 @@ static size_t credential_management(const uint8_t *req, size_t len,
                 break;
             }
             case CM_REQ_SUBPARAMS:
-                if (!parse_rp_hash_param(&r, &v, rp_hash))
+                if (!parse_subparam_map(&r, &v, rp_hash, &have_rp_hash,
+                                        cred_id, &have_cred_id))
                     return ctap_error(out, cap, ERR_INVALID_PARAMETER);
-                have_rp_hash = true;
                 break;
             default:
                 if (!fj_cbor_skip(&r, &v)) return ctap_error(out, cap, ERR_INVALID_PARAMETER);
@@ -1272,6 +1302,24 @@ static size_t credential_management(const uint8_t *req, size_t len,
         }
         case CM_ENUM_CREDS_NEXT:
             return cm_enumerate_creds_next(out, cap);
+        case CM_DELETE_CRED: {
+            if (!have_pin_auth) return ctap_error(out, cap, ERR_PUAT_REQUIRED);
+            if (!have_cred_id) return ctap_error(out, cap, ERR_MISSING_PARAMETER);
+            /* pinAuth = authenticate(pinToken, 0x06 || {1: credentialID}).
+             * Canonical encoding of {1: credentialID} is A1 01 58 <len> || id. */
+            uint8_t msg[1 + 4 + FJ_CRED_ID_LEN];
+            msg[0] = 0x06;
+            msg[1] = 0xA1; msg[2] = 0x01; msg[3] = 0x58; msg[4] = FJ_CRED_ID_LEN;
+            memcpy(msg + 5, cred_id, FJ_CRED_ID_LEN);
+            if (!fj_pin_verify_auth(msg, sizeof(msg), pin_auth))
+                return ctap_error(out, cap, ERR_PIN_AUTH_INVALID);
+            uint8_t active = (uint8_t)fj_keys_active_profile();
+            if (!fj_ctap2_delete_cred(active, cred_id))
+                return ctap_error(out, cap, ERR_NO_CREDENTIALS);
+            if (cap < 1) return 0;
+            out[0] = 0;
+            return 1;   /* empty success response */
+        }
         default:
             return ctap_error(out, cap, ERR_INVALID_COMMAND);
     }

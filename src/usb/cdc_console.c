@@ -277,6 +277,8 @@ static void cmd_help(void) {
     outln("  PROFILE SELECT <id>        select and persist the active profile");
     outln("  PROFILE RENAME <id> <name> rename a profile without touching its credentials");
     outln("  PROFILE ERASE <id>         delete a profile and every credential in it");
+    outln("  CREDS LIST                 list credentials in the active profile");
+    outln("  CREDS DEL <hex-id>         delete one credential from the active profile");
     outln("");
     outln("  BACKUP <password>          write an encrypted backup (keys+profiles) to the drive");
     outln("  RESTORE <pw> <pass> <puk>  restore a backup; sets a new passphrase and PUK");
@@ -702,6 +704,68 @@ static void cmd_reset(const char *arg) {
     while (1) tight_loop_contents();
 }
 
+static int hex_val(char c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
+/* CREDS LIST / CREDS DEL <hex-id> — manage the credentials in the ACTIVE
+ * profile only. */
+static void cmd_creds(const char *sub, char *rest) {
+    char buf[160];
+    if (!sub) { outln("ERR CREDS requires subcommand (LIST|DEL)"); return; }
+
+    if (strcasecmp(sub, "list") == 0) {
+        fj_ctap2_cred_t creds[FJ_CTAP2_CREDS];
+        fj_keys_ctap2_load(creds);
+        unsigned active = fj_keys_active_profile();
+        unsigned n = 0;
+        for (unsigned i = 0; i < FJ_CTAP2_CREDS; i++) {
+            if (!creds[i].in_use || creds[i].profile_id != active) continue;
+            char idhex[FJ_CRED_ID_LEN * 2 + 1];
+            unsigned j;
+            for (j = 0; j < FJ_CRED_ID_LEN; j++)
+                snprintf(idhex + j * 2, 3, "%02x", creds[i].credential_id[j]);
+            idhex[FJ_CRED_ID_LEN * 2] = '\0';
+            snprintf(buf, sizeof(buf), "  [%02u] %s rp=%.*s user=%.*s resident=%u",
+                     i, idhex, creds[i].rp_len, creds[i].rp,
+                     creds[i].user_id_len, creds[i].user_id,
+                     creds[i].resident ? 1u : 0u);
+            outln(buf);
+            n++;
+        }
+        snprintf(buf, sizeof(buf), "%u credential(s) in active profile %u", n, active);
+        outln(buf);
+        return;
+    }
+
+    if (strcasecmp(sub, "del") == 0) {
+        const char *id = next_token(&rest);
+        if (!id) { outln("ERR usage: CREDS DEL <hex-id>"); return; }
+        if (strlen(id) != FJ_CRED_ID_LEN * 2) {
+            outln("ERR invalid credential id (need 32 hex chars)");
+            return;
+        }
+        uint8_t idb[FJ_CRED_ID_LEN];
+        for (unsigned j = 0; j < FJ_CRED_ID_LEN; j++) {
+            int hi = hex_val(id[j * 2]);
+            int lo = hex_val(id[j * 2 + 1]);
+            if (hi < 0 || lo < 0) { outln("ERR invalid credential id (non-hex)"); return; }
+            idb[j] = (uint8_t)((hi << 4) | lo);
+        }
+        unsigned active = fj_keys_active_profile();
+        if (fj_ctap2_delete_cred(active, idb))
+            outln("OK credential deleted from active profile");
+        else
+            outln("ERR credential not found in active profile");
+        return;
+    }
+
+    outln("ERR unknown CREDS subcommand (LIST|DEL)");
+}
+
 /* ------------------------------------------------------------------ */
 /* Command dispatch                                                    */
 /* ------------------------------------------------------------------ */
@@ -744,6 +808,8 @@ static void dispatch(char *cmdline) {
         }
         else if (strcasecmp(sub, "erase") == 0) cmd_profile_erase(next_token(&p));
         else outln("ERR unknown PROFILE subcommand");
+    } else if (strcasecmp(tok, "creds") == 0) {
+        cmd_creds(next_token(&p), p);
     } else if (strcasecmp(tok, "timeout") == 0) {
         cmd_timeout(next_token(&p));
     } else if (strcasecmp(tok, "backup") == 0) {
