@@ -240,7 +240,7 @@ static bool store_write_commit(void) {
         store_dirty = true;
         return true;
     }
-    return store_write_commit();
+    return write_store();
 }
 
 void fj_store_begin(void) {
