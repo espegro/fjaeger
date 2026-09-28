@@ -40,7 +40,9 @@ controlled over a serial command interface.
 
 - Raspberry Pi RP2350 (16 MB flash, `waveshare_rp2350_plus_16mb` board profile)
 - Integrated USB-A plug
-- Addressable RGB LED on GPIO22: red = locked, green = unlocked, yellow = not
+- Addressable RGB LED on GPIO22: **yellow blink = no credential enrolled**
+  (blank/unprovisioned device, shown regardless of lock state), **red blink =
+  locked (provisioned)**, **green = unlocked (provisioned)**, amber = not
   enumerated, blue pulse = USB activity. Brief pulses signal security events: a
   green flash on a successful PIN unlock, a red flash on lock, and a cyan flash
   when an SSH key signs.
