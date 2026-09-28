@@ -59,6 +59,14 @@ int main(void) {
     }
 }
 
+/* Override the weak no-op in crypto.c so the PBKDF2 loop services USB
+ * periodically. Otherwise the multi-second 100k-iteration derivation in
+ * SETPASS/UNLOCK/backup blocks the main loop and the host USB stack
+ * deactivates the device (observed as a dropped console). */
+void fj_pbkdf2_yield(void) {
+    tud_task();
+}
+
 /* ------------------------------------------------------------------ */
 /* TinyUSB device callbacks                                            */
 /* ------------------------------------------------------------------ */

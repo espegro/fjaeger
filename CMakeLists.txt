@@ -77,8 +77,15 @@ target_compile_definitions(fjaeger PRIVATE
   FJ_VERSION_STRING="${FJ_VERSION_STRING}"
   # mbedTLS P-256 signing plus CTAP2 request/response buffers exceed the
   # Pico SDK's 2 KiB default stack and otherwise wedge USB in getAssertion.
-  PICO_STACK_SIZE=0x1000
+  # The default RP2350 memmap puts the core 0 stack in the 4 KiB SCRATCH_Y
+  # region, which overflows during PBKDF2 (SETPASS/UNLOCK/backup) and drops
+  # USB. fjaeger_memmap.ld moves the stack to main SRAM, where 16 KiB is cheap.
+  PICO_STACK_SIZE=0x4000
 )
+
+# Use the custom memmap that places the core 0 stack in main SRAM (the SDK
+# default SCRATCH_Y stack is only 4 KiB and overflows during PBKDF2).
+pico_set_linker_script(fjaeger ${CMAKE_CURRENT_SOURCE_DIR}/fjaeger_memmap.ld)
 
 # --- Hardware / SDK libs ---
 target_link_libraries(fjaeger PRIVATE

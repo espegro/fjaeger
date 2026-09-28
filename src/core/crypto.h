@@ -75,6 +75,12 @@ bool fj_pbkdf2_sha256(const uint8_t *password, size_t pw_len,
                       const uint8_t *salt, size_t salt_len,
                       uint32_t iterations, uint8_t out[32]);
 
+/* Weak hook called periodically inside the PBKDF2 loop. The firmware (main.c)
+ * overrides it to service USB (tud_task) so the host does not deactivate the
+ * device during the multi-second derivation. Default (host tests / no USB) is
+ * a no-op. */
+void fj_pbkdf2_yield(void);
+
 /* Derive 32 bytes of key material from the XTS key
  * and a label, using HKDF-SHA256. Used to derive per-block tweak/sector
  * keys for the MSC. */

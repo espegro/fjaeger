@@ -23,6 +23,14 @@ static int crypto_rng(void *ctx, unsigned char *out, size_t len) {
     return 0;
 }
 
+/* Weak hook invoked periodically inside the PBKDF2 loop so the platform can
+ * service USB (tud_task) during the multi-second 100k-iteration derivation.
+ * A plain (strong) definition in the firmware overrides this; host tests and
+ * builds without TinyUSB get this no-op. Without this, PBKDF2 (SETPASS,
+ * UNLOCK, backup, PUK) blocks the main loop for seconds and the host USB
+ * stack deactivates the device. */
+__attribute__((weak)) void fj_pbkdf2_yield(void) {}
+
 void fj_sha256(const uint8_t *data, size_t len, uint8_t out[FJ_HASH_LEN]) {
     mbedtls_sha256(data, len, out, 0);
 }
@@ -362,6 +370,9 @@ bool fj_pbkdf2_sha256(const uint8_t *password, size_t pw_len,
     for (uint32_t i = 1; i < iterations; i++) {
         if (!fj_hmac_sha256(password, pw_len, u, 32, u)) return false;
         for (int j = 0; j < 32; j++) out[j] ^= u[j];
+        /* Service USB periodically so the host does not time out the device
+         * during the long derivation. */
+        if ((i & 0x3FF) == 0) fj_pbkdf2_yield();
     }
     return true;
 }
