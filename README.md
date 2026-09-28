@@ -275,9 +275,12 @@ Auto-lock defaults to 15 minutes. The `TIMEOUT` value is stored in the flash
 store and survives both reboot and a normal firmware flash. `TIMEOUT 0` is
 stored as an explicit disable.
 
-The console does not echo commands. Turn off local echo in your terminal too;
-the firmware clears its command buffer after each command but cannot erase text
-that the terminal has already displayed or logged.
+The console echoes input itself, so keep local echo OFF in your terminal
+(the terminal would otherwise show secrets in cleartext). Secret entry
+(passphrase, PUK, PINs) is masked as `*` and the set/change commands ask for
+the value twice to confirm. The firmware wipes its command and secret buffers
+after handling, but cannot erase text the terminal has already displayed or
+logged.
 
 ## SSH (sk-keys)
 

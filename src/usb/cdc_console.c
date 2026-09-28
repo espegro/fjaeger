@@ -49,6 +49,19 @@ static size_t line_len = 0;
 static bool was_connected = false;
 static bool last_was_cr = false;
 
+/* Secret-entry mode: the device echoes input itself (so the terminal's local
+ * echo can stay OFF), masking secret characters with '*', and requiring two
+ * matching entries for the set/change commands. */
+typedef enum {
+    SEC_NONE,
+    SEC_SETPASS, SEC_SETPIN, SEC_SETPUK, SEC_DISK_SETPIN,
+    SEC_UNLOCK, SEC_UNLOCKPUK, SEC_DISK_UNLOCK,
+} sec_action_t;
+static sec_action_t pending_secret = SEC_NONE;
+static char secret1[LINE_MAX], secret2[LINE_MAX];
+static size_t secret1_len = 0, secret2_len = 0;
+static bool secret_confirm_phase = false;   /* entering 2nd (confirm) entry */
+
 /* Cooperative job currently executing (long PBKDF2 operations). A command
  * handler starts a job and fj_console_task() pumps it one bounded chunk per
  * main-loop tick, so the main loop's top-of-loop tud_task() keeps USB alive
@@ -77,6 +90,44 @@ static void out(const char *s) {
 static void outln(const char *s) {
     out(s);
     out("\r\n");
+}
+
+/* Character echo for interactive input (device echoes; terminal local echo
+ * stays off). */
+static void echo_char(char c) {
+    while (!tud_cdc_write_available()) {
+        tud_cdc_write_flush();
+        tud_task();
+        tight_loop_contents();
+    }
+    tud_cdc_write_char(c);
+    tud_cdc_write_flush();
+}
+
+/* Erase the last displayed character (backspace-space-backspace). */
+static void echo_erase(void) {
+    echo_char(0x08); echo_char(' '); echo_char(0x08);
+}
+
+static const char *secret_entry_label(sec_action_t a) {
+    switch (a) {
+    case SEC_SETPASS:     return "Enter unlock passphrase: ";
+    case SEC_SETPIN:      return "Enter CTAP2 PIN: ";
+    case SEC_SETPUK:      return "Enter recovery PUK: ";
+    case SEC_DISK_SETPIN: return "Enter disk PIN: ";
+    case SEC_UNLOCK:      return "Passphrase: ";
+    case SEC_UNLOCKPUK:   return "Recovery PUK: ";
+    case SEC_DISK_UNLOCK: return "Disk PIN: ";
+    default:              return ": ";
+    }
+}
+
+static void begin_secret(sec_action_t a) {
+    pending_secret = a;
+    secret1_len = secret2_len = 0;
+    secret_confirm_phase = false;
+    out("\r\n");
+    out(secret_entry_label(a));
 }
 
 /* Print the outcome of a finished cooperative job. */
@@ -142,11 +193,18 @@ static void job_print_result(void) {
 }
 
 /* Prevent the compiler from retaining command arguments (including PINs and
- * PUKs) in the reusable input buffer. The firmware never echoes input; users
- * must also keep local echo disabled in their terminal program. */
+ * PUKs) in the reusable input buffer. The firmware echoes input itself and
+ * masks secret entry ('*'); keep the terminal's local echo OFF so secrets are
+ * not shown by the terminal. */
 static void clear_line(void) {
     volatile char *p = line;
     for (size_t i = 0; i < sizeof(line); i++) p[i] = 0;
+}
+
+/* Wipe collected secrets so they do not linger in RAM. */
+static void clear_secrets(void) {
+    volatile char *a = secret1, *b = secret2;
+    for (size_t i = 0; i < LINE_MAX; i++) { a[i] = 0; b[i] = 0; }
 }
 
 /* ------------------------------------------------------------------ */
@@ -191,6 +249,9 @@ static void cmd_help(void) {
     outln("    device. It must be unlocked to mount/use it.");
     outln("  * Credentials live in named PROFILES. Only the active profile's");
     outln("    credentials can be used or discovered.");
+    outln("  * Secret input (passphrase, PUK, PINs) is masked (*) and entered");
+    outln("    twice to confirm for set/change commands. The device echoes your");
+    outln("    input, so keep the terminal's local echo OFF.");
     outln("");
     outln("Commands:");
     outln("  HELP|?                     this help");
@@ -280,11 +341,7 @@ static void cmd_lock(void) {
     outln("OK locked");
 }
 
-static void cmd_unlock(const char *passphrase) {
-    if (!passphrase) {
-        outln("ERR usage: UNLOCK <passphrase>");
-        return;
-    }
+static void do_unlock(const char *passphrase) {
     if (fj_state_pass_blocked()) {
         outln("ERR passphrase blocked, use UNLOCKPUK <puk>");
         return;
@@ -294,23 +351,25 @@ static void cmd_unlock(const char *passphrase) {
     job_is_disk = false;
 }
 
-static void cmd_unlock_puk(const char *puk) {
-    if (!puk) {
-        outln("ERR usage: UNLOCKPUK <puk>");
-        return;
-    }
+static void cmd_unlock(const char *passphrase) {
+    if (!passphrase) { begin_secret(SEC_UNLOCK); return; }
+    do_unlock(passphrase);
+}
+
+static void do_unlock_puk(const char *puk) {
     fj_state_job_start(&state_job, FJ_JOB_UNLOCKPUK, puk, NULL, NULL);
     job_active = true;
     job_is_disk = false;
 }
 
+static void cmd_unlock_puk(const char *puk) {
+    if (!puk) { begin_secret(SEC_UNLOCKPUK); return; }
+    do_unlock_puk(puk);
+}
+
 static bool require_unlocked(void);
 
-static void cmd_set_puk(const char *puk) {
-    if (!puk) {
-        outln("ERR usage: PUK <code>");
-        return;
-    }
+static void do_set_puk(const char *puk) {
     if (!require_unlocked()) return;
     if (strlen(puk) < 8 || strlen(puk) > 64) {
         outln("ERR invalid PUK (8-64 chars) or device locked");
@@ -319,6 +378,11 @@ static void cmd_set_puk(const char *puk) {
     fj_state_job_start(&state_job, FJ_JOB_SETPUK, puk, NULL, NULL);
     job_active = true;
     job_is_disk = false;
+}
+
+static void cmd_set_puk(const char *puk) {
+    if (!puk) { begin_secret(SEC_SETPUK); return; }
+    do_set_puk(puk);
 }
 
 /* BACKUP <password> — write an encrypted backup of the master key and all
@@ -365,6 +429,24 @@ static void cmd_restore(const char *password, const char *new_pass,
     job_is_disk = false;
 }
 
+static void do_disk_unlock(const char *pin) {
+    if (fj_msc_pin_blocked()) {
+        outln("ERR disk PIN blocked, use DISK UNBLOCK <puk>");
+        return;
+    }
+    fj_disk_job_start(&disk_job, FJ_JOB_DISK_UNLOCK, pin);
+    job_active = true;
+    job_is_disk = true;
+}
+
+static void do_disk_setpin(const char *pin) {
+    size_t n = strlen(pin);
+    if (n < 4 || n > 32) { outln("ERR disk pin invalid or drive locked"); return; }
+    fj_disk_job_start(&disk_job, FJ_JOB_DISK_SETPIN, pin);
+    job_active = true;
+    job_is_disk = true;
+}
+
 /* DISK UNLOCK <pin> / SETPIN <pin> / LOCK / STATUS — independent drive lock. */
 static void cmd_disk(const char *sub, char *rest) {
     if (!sub) {
@@ -384,14 +466,8 @@ static void cmd_disk(const char *sub, char *rest) {
     } else if (strcasecmp(sub, "unlock") == 0) {
         if (!require_unlocked()) return;
         const char *pin = next_token(&rest);
-        if (!pin) { outln("ERR usage: DISK UNLOCK <pin>"); return; }
-        if (fj_msc_pin_blocked()) {
-            outln("ERR disk PIN blocked, use DISK UNBLOCK <puk>");
-            return;
-        }
-        fj_disk_job_start(&disk_job, FJ_JOB_DISK_UNLOCK, pin);
-        job_active = true;
-        job_is_disk = true;
+        if (!pin) { begin_secret(SEC_DISK_UNLOCK); return; }
+        do_disk_unlock(pin);
     } else if (strcasecmp(sub, "unblock") == 0) {
         if (!require_unlocked()) return;
         const char *puk = next_token(&rest);
@@ -405,12 +481,8 @@ static void cmd_disk(const char *sub, char *rest) {
     } else if (strcasecmp(sub, "setpin") == 0) {
         if (!require_unlocked()) return;
         const char *pin = next_token(&rest);
-        if (!pin) { outln("ERR usage: DISK SETPIN <pin>"); return; }
-        size_t n = strlen(pin);
-        if (n < 4 || n > 32) { outln("ERR disk pin invalid or drive locked"); return; }
-        fj_disk_job_start(&disk_job, FJ_JOB_DISK_SETPIN, pin);
-        job_active = true;
-        job_is_disk = true;
+        if (!pin) { begin_secret(SEC_DISK_SETPIN); return; }
+        do_disk_setpin(pin);
     } else if (strcasecmp(sub, "format") == 0) {
         if (!require_unlocked()) return;
         const char *tok = next_token(&rest);
@@ -432,11 +504,7 @@ static void cmd_disk(const char *sub, char *rest) {
     }
 }
 
-static void cmd_setpin(const char *pin) {
-    if (!pin) {
-        outln("ERR usage: SETPIN <pin>");
-        return;
-    }
+static void do_setpin(const char *pin) {
     if (fj_state_set_ctap2_pin(pin)) {
         outln("OK CTAP2 PIN set");
     } else {
@@ -444,11 +512,12 @@ static void cmd_setpin(const char *pin) {
     }
 }
 
-static void cmd_setpass(const char *passphrase) {
-    if (!passphrase) {
-        outln("ERR usage: SETPASS <passphrase>");
-        return;
-    }
+static void cmd_setpin(const char *pin) {
+    if (!pin) { begin_secret(SEC_SETPIN); return; }
+    do_setpin(pin);
+}
+
+static void do_setpass(const char *passphrase) {
     size_t n = strlen(passphrase);
     if (n < 8 || n > 64) {
         outln("ERR invalid passphrase (8-64 chars)");
@@ -459,10 +528,35 @@ static void cmd_setpass(const char *passphrase) {
     job_is_disk = false;
 }
 
+static void cmd_setpass(const char *passphrase) {
+    if (!passphrase) { begin_secret(SEC_SETPASS); return; }
+    do_setpass(passphrase);
+}
+
 static bool require_unlocked(void) {
     if (fj_state_get() == FJ_STATE_UNLOCKED) return true;
     outln("ERR device locked");
     return false;
+}
+
+/* Only the set/change commands require two matching (masked) entries. */
+static bool action_needs_confirm(sec_action_t a) {
+    return a == SEC_SETPASS || a == SEC_SETPIN ||
+           a == SEC_SETPUK || a == SEC_DISK_SETPIN;
+}
+
+/* Apply a collected secret to the pending masked-entry action. */
+static void run_secret(sec_action_t a, const char *s) {
+    switch (a) {
+    case SEC_SETPASS:     do_setpass(s); break;
+    case SEC_SETPIN:      do_setpin(s); break;
+    case SEC_SETPUK:      do_set_puk(s); break;
+    case SEC_DISK_SETPIN: do_disk_setpin(s); break;
+    case SEC_UNLOCK:      do_unlock(s); break;
+    case SEC_UNLOCKPUK:   do_unlock_puk(s); break;
+    case SEC_DISK_UNLOCK: do_disk_unlock(s); break;
+    default:              break;
+    }
 }
 
 static void cmd_profile_list(void) {
@@ -707,28 +801,77 @@ void fj_console_task(void) {
     while (tud_cdc_available()) {
         char c;
         tud_cdc_read(&c, 1);
+        if (c == 0x7f) c = 0x08;   /* DEL ~ backspace */
 
-        if (c == '\n' && last_was_cr) {
-            last_was_cr = false;
+        if (c == '\n' && last_was_cr) { last_was_cr = false; continue; }
+
+        if (pending_secret != SEC_NONE) {
+            char *buf = secret_confirm_phase ? secret2 : secret1;
+            size_t *len = secret_confirm_phase ? &secret2_len : &secret1_len;
+            if (c == 0x08) {
+                if (*len > 0) { (*len)--; echo_erase(); }
+                continue;
+            }
+            if (c == '\r' || c == '\n') {
+                last_was_cr = (c == '\r');
+                out("\r\n");
+                if (secret_confirm_phase) {
+                    sec_action_t act = pending_secret;
+                    if (secret1_len == secret2_len &&
+                        memcmp(secret1, secret2, secret1_len) == 0) {
+                        pending_secret = SEC_NONE;
+                        secret1[secret1_len] = '\0';
+                        run_secret(act, secret1);
+                        clear_secrets();
+                    } else {
+                        outln("ERR entries did not match; try again");
+                        secret_confirm_phase = false;
+                        secret1_len = 0;
+                        clear_secrets();
+                        out(secret_entry_label(act));
+                    }
+                    secret2_len = 0;
+                } else if (action_needs_confirm(pending_secret)) {
+                    secret_confirm_phase = true;
+                    out("Confirm: ");
+                } else {
+                    sec_action_t act = pending_secret;
+                    pending_secret = SEC_NONE;
+                    secret1[secret1_len] = '\0';
+                    run_secret(act, secret1);
+                    clear_secrets();
+                }
+                continue;
+            }
+            if (*len < LINE_MAX - 1) {
+                buf[(*len)++] = c;
+                echo_char('*');
+            }
             continue;
         }
-        if (c == '\n' || c == '\r') {
-            last_was_cr = c == '\r';
+
+        if (c == '\r' || c == '\n') {
+            last_was_cr = (c == '\r');
+            echo_char('\r'); echo_char('\n');
             if (line_len > 0) {
                 line[line_len] = '\0';
                 dispatch(line);
                 line_len = 0;
                 clear_line();
             }
-            /* Present a fresh prompt unless a job now needs to print its
-             * (deferred) result first. */
-            if (!job_active) out(PROMPT);
+            if (!job_active && pending_secret == SEC_NONE) out(PROMPT);
+        } else if (c == 0x08) {
+            last_was_cr = false;
+            if (line_len > 0) { line_len--; echo_erase(); }
         } else if (line_len < LINE_MAX - 1) {
             last_was_cr = false;
+            echo_char(c);
             line[line_len++] = c;
         } else {
-            line_len = 0; /* line too long, discard */
+            last_was_cr = false;
+            line_len = 0;
             clear_line();
+            out("\r\n");
             out(PROMPT);
         }
     }
