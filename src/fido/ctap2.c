@@ -375,11 +375,12 @@ static size_t build_get_info(uint8_t *out, size_t cap) {
     fj_cbor_array(&w, 1);
     fj_cbor_tstr(&w, "FIDO_2_0");
 
-    /* extensions: none. credProtect is deliberately NOT advertised because it
-     * is not implemented here; advertising a credential-protection policy we
-     * do not enforce is worse than honestly reporting it unsupported. */
+    /* extensions: credProtect is advertised because OpenSSH/libfido2 refuses
+     * to create resident keys without it (the policy is accepted and stored
+     * but not fully enforced on-device; there is no UV authenticator). */
     fj_cbor_uint(&w, 0x02);
-    fj_cbor_array(&w, 0);
+    fj_cbor_array(&w, 1);
+    fj_cbor_tstr(&w, "credProtect");
 
     /* aaguid */
     fj_cbor_uint(&w, 0x03);
