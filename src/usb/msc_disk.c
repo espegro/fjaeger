@@ -766,6 +766,17 @@ bool fj_msc_set_pin(const char *pin) {
     return djsync.result == FJ_RES_OK;
 }
 
+bool fj_msc_format(void) {
+    /* FJ-007: explicit reformat. The disk key must already be unwrapped; a
+     * corrupt store is never auto-formatted, the user must act. */
+    if (!disk_unlocked || !disk_ready) return false;
+    flush_pending_writes();
+    wq_reset();
+    init_filesystem();          /* rebuild boot/FAT/root + CRC table */
+    fs_initialised = true;
+    return true;
+}
+
 void fj_msc_task(void) {
     if (disk_ready) flush_pending_writes();
 }

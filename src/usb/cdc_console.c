@@ -209,6 +209,7 @@ static void cmd_help(void) {
     outln("  DISK UNLOCK <pin>          unlock and mount the encrypted drive");
     outln("  DISK UNBLOCK <puk>         clear a disk-PIN lock (the disk PIN is still needed)");
     outln("  DISK LOCK                  lock and unmount the drive");
+    outln("  DISK FORMAT YES             erase ALL drive data and rebuild the filesystem");
     outln("");
     outln("  PROFILE LIST               list profiles, the active one and credential counts");
     outln("  PROFILE CREATE <id> <name> create a new empty profile (id 0-7)");
@@ -367,7 +368,7 @@ static void cmd_restore(const char *password, const char *new_pass,
 /* DISK UNLOCK <pin> / SETPIN <pin> / LOCK / STATUS — independent drive lock. */
 static void cmd_disk(const char *sub, char *rest) {
     if (!sub) {
-        outln("ERR DISK requires subcommand (UNLOCK|UNBLOCK|LOCK|SETPIN|STATUS)");
+        outln("ERR DISK requires subcommand (UNLOCK|UNBLOCK|LOCK|SETPIN|STATUS|FORMAT)");
         return;
     }
     if (strcasecmp(sub, "status") == 0) {
@@ -410,8 +411,24 @@ static void cmd_disk(const char *sub, char *rest) {
         fj_disk_job_start(&disk_job, FJ_JOB_DISK_SETPIN, pin);
         job_active = true;
         job_is_disk = true;
+    } else if (strcasecmp(sub, "format") == 0) {
+        if (!require_unlocked()) return;
+        const char *tok = next_token(&rest);
+        if (!tok || strcasecmp(tok, "YES") != 0) {
+            outln("ERR mutating; type DISK FORMAT YES to erase all drive data");
+            return;
+        }
+        if (!fj_keys_disk_secret_set()) {
+            outln("ERR no disk key; use DISK SETPIN <pin> first");
+            return;
+        }
+        if (!fj_msc_format()) {
+            outln("ERR drive not mounted; DISK UNLOCK <pin> first");
+            return;
+        }
+        outln("OK drive formatted (all data erased)");
     } else {
-        outln("ERR unknown DISK subcommand (UNLOCK|UNBLOCK|LOCK|SETPIN|STATUS)");
+        outln("ERR unknown DISK subcommand (UNLOCK|UNBLOCK|LOCK|SETPIN|STATUS|FORMAT)");
     }
 }
 

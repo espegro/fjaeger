@@ -375,11 +375,11 @@ static size_t build_get_info(uint8_t *out, size_t cap) {
     fj_cbor_array(&w, 1);
     fj_cbor_tstr(&w, "FIDO_2_0");
 
-    /* extensions: credProtect is advertised so OpenSSH permits creating
-     * resident keys. The policy is accepted but not enforced on-device. */
+    /* extensions: none. credProtect is deliberately NOT advertised because it
+     * is not implemented here; advertising a credential-protection policy we
+     * do not enforce is worse than honestly reporting it unsupported. */
     fj_cbor_uint(&w, 0x02);
-    fj_cbor_array(&w, 1);
-    fj_cbor_tstr(&w, "credProtect");
+    fj_cbor_array(&w, 0);
 
     /* aaguid */
     fj_cbor_uint(&w, 0x03);

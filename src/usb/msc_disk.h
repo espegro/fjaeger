@@ -33,6 +33,11 @@ fj_puk_result_t fj_msc_unblock_puk(const char *puk);
  * Returns true on success. */
 bool fj_msc_set_pin(const char *pin);
 
+/* Explicitly rebuild the drive's filesystem + CRC table. Requires the device
+ * to be unlocked and the disk key unwrapped (DISK SETPIN/UNLOCK). Destroys all
+ * drive data; the console layer demands an explicit confirmation token. */
+bool fj_msc_format(void);
+
 /* Lock/unmount the drive and discard the unwrapped disk key. */
 void fj_msc_lock(void);
 
