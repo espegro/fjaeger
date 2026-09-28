@@ -15,6 +15,7 @@
 #include "msc_disk.h"
 #include "keys.h"
 #include "crypto.h"
+#include "job.h"
 #include "state.h"
 #include "rgb_led.h"
 
@@ -687,33 +688,6 @@ void fj_msc_init(void) {
  * key as ciphertext XOR hash). */
 #define DISK_WRAP_AAD "Fjaeger disk key v1"
 
-static bool disk_derive(const char *pin, const uint8_t salt[16], uint8_t out[32]) {
-    return fj_pbkdf2_sha256((const uint8_t *)pin, strlen(pin), salt, 16,
-                            FJ_PBKDF2_ITERATIONS, out);
-}
-
-/* Verify the disk PIN and unwrap the disk key into disk_key. Returns false on
- * a wrong PIN (AES-GCM tag mismatch). */
-static bool disk_unwrap(const char *pin) {
-    uint8_t enc[32], salt[16], nonce[12], tag[16];
-    fj_keys_get_disk_secret(enc, salt, nonce, tag);
-
-    uint8_t k[32];
-    if (!disk_derive(pin, salt, k)) return false;
-
-    uint8_t key[32];
-    bool ok = fj_aes_gcm_decrypt_with_aad(k, nonce, tag,
-                                          (const uint8_t *)DISK_WRAP_AAD,
-                                          sizeof(DISK_WRAP_AAD) - 1,
-                                          enc, sizeof(enc), key);
-    memset(k, 0, sizeof(k));
-    if (!ok) return false;
-
-    memcpy(disk_key, key, sizeof(disk_key));
-    memset(key, 0, sizeof(key));
-    return true;
-}
-
 /* Build or verify the filesystem using the live (unwrapped) disk key.
  *
  * On a first-time setup (no disk secret yet) the filesystem is initialized.
@@ -747,51 +721,25 @@ bool fj_msc_pin_blocked(void) {
 }
 
 bool fj_msc_unlock(const char *pin) {
-    if (!pin || !fj_keys_disk_secret_set()) return false;
-
-    /* Brute-force protection: a blocked disk PIN requires the PUK, and a
-     * growing delay is imposed between failed attempts. */
-    fj_security_t sec;
-    if (!fj_keys_get_security(&sec)) return false;
-    if (sec.disk_blocked) return false;
-    if (!fj_state_brute_ok(FJ_BRUTE_DISK)) return false;
-
-    if (!disk_unwrap(pin)) {
-        /* Wrong disk PIN: count it, grow the backoff delay and block once
-         * the limit is reached. */
-        sec.disk_fail++;
-        if (sec.disk_fail >= FJ_MAX_PIN_FAILS) sec.disk_blocked = 1;
-        fj_keys_set_security(&sec);
-        fj_state_brute_failure(FJ_BRUTE_DISK);
-        return false;
-    }
-
-    /* Correct disk PIN resets the counter and the backoff delay. */
-    if (sec.disk_fail != 0 || sec.disk_blocked) {
-        sec.disk_fail = 0;
-        sec.disk_blocked = 0;
-        fj_keys_set_security(&sec);
-    }
-    fj_state_brute_success(FJ_BRUTE_DISK);
-
-    if (!fj_msc_prepare(false)) return false;
-    disk_unlocked = true;
-    disk_ready = true;
-    return true;
+    static fj_disk_job_t djsync;
+    fj_disk_job_start(&djsync, FJ_JOB_DISK_UNLOCK, pin);
+    while (djsync.busy) fj_disk_job_step(&djsync);
+    return djsync.result == FJ_RES_OK;
 }
 
 /* The disk key is wrapped only by the disk PIN. A PUK can safely clear the
  * brute-force block, but cannot substitute for that PIN without weakening
  * the at-rest encryption model. */
 fj_puk_result_t fj_msc_unblock_puk(const char *puk) {
-    fj_puk_result_t result = fj_state_verify_puk(puk);
-    if (result != FJ_PUK_OK) return result;
-
-    fj_security_t sec;
-    if (!fj_keys_get_security(&sec)) return FJ_PUK_WRONG;
-    sec.disk_fail = 0;
-    sec.disk_blocked = 0;
-    return fj_keys_set_security(&sec) ? FJ_PUK_OK : FJ_PUK_WRONG;
+    static fj_disk_job_t djsync;
+    fj_disk_job_start(&djsync, FJ_JOB_DISK_UNBLOCK, puk);
+    while (djsync.busy) fj_disk_job_step(&djsync);
+    switch (djsync.result) {
+        case FJ_RES_OK:     return FJ_PUK_OK;
+        case FJ_RES_NO_PUK: return FJ_PUK_UNSET;
+        case FJ_RES_WIPED:  return FJ_PUK_WIPED;
+        default:            return FJ_PUK_WRONG;
+    }
 }
 
 void fj_msc_lock(void) {
@@ -807,40 +755,10 @@ void fj_msc_lock(void) {
 }
 
 bool fj_msc_set_pin(const char *pin) {
-    size_t n = pin ? strlen(pin) : 0;
-    if (n < 4 || n > 32) return false;
-
-    bool first_time = !fj_keys_disk_secret_set();
-    uint8_t salt[16], nonce[12], enc[32], wrap[32], tag[16];
-    if (first_time) {
-        /* First-time: generate a fresh master secret for the drive. */
-        fj_random(salt, sizeof(salt));
-        fj_random(disk_key, sizeof(disk_key));
-    } else {
-        /* Change PIN: require the drive to be unlocked (holds the secret). */
-        if (!disk_unlocked) return false;
-        fj_random(salt, sizeof(salt));
-    }
-
-    if (!disk_derive(pin, salt, wrap)) return false;
-    fj_random(nonce, sizeof(nonce));
-    /* Authenticated key wrapping: enc, tag = AES-GCM(wrap, nonce, disk_key).
-     * No separate verification hash is stored, so the disk key cannot be
-     * recovered as a simple XOR of two persisted values. */
-    if (!fj_aes_gcm_encrypt_with_aad(wrap, nonce,
-                                     (const uint8_t *)DISK_WRAP_AAD,
-                                     sizeof(DISK_WRAP_AAD) - 1,
-                                     disk_key, sizeof(disk_key), enc, tag)) {
-        memset(wrap, 0, sizeof(wrap));
-        return false;
-    }
-    memset(wrap, 0, sizeof(wrap));
-
-    if (!fj_keys_set_disk_secret(enc, salt, nonce, tag)) return false;
-    if (!fj_msc_prepare(first_time)) return false;
-    disk_unlocked = true;
-    disk_ready = true;
-    return true;
+    static fj_disk_job_t djsync;
+    fj_disk_job_start(&djsync, FJ_JOB_DISK_SETPIN, pin);
+    while (djsync.busy) fj_disk_job_step(&djsync);
+    return djsync.result == FJ_RES_OK;
 }
 
 void fj_msc_task(void) {
@@ -960,3 +878,142 @@ bool fj_msc_is_ready(void) {
 }
 
 #endif /* CFG_TUD_MSC */
+
+/* ------------------------------------------------------------------ */
+/* Cooperative disk-layer jobs                                        */
+/* ------------------------------------------------------------------ */
+static bool dkdf_begin(fj_disk_job_t *j, unsigned slot, const char *pin,
+                       const uint8_t salt[16]) {
+    return fj_kdf_begin(&j->kdf[slot], (const uint8_t *)pin, strlen(pin),
+                        salt, 16, FJ_PBKDF2_ITERATIONS);
+}
+
+static bool dkdf_chunk_done(fj_kdf_t *k) {
+    unsigned n = 0;
+    while (k->running && n++ < FJ_JOB_KDF_CHUNK) fj_kdf_step(k);
+    return !k->running;
+}
+
+void fj_disk_job_start(fj_disk_job_t *j, fj_job_kind_t kind, const char *a1) {
+    memset(j, 0, sizeof(*j));
+    j->kind = kind;
+    j->result = FJ_RES_ERR;
+    j->busy = true;
+    if (a1) { strncpy(j->a1, a1, sizeof(j->a1) - 1); j->a1[sizeof(j->a1) - 1] = '\0'; }
+
+    switch (kind) {
+    case FJ_JOB_DISK_UNLOCK: {
+        if (!fj_keys_disk_secret_set()) { j->result = FJ_RES_BAD_PIN; j->busy = false; return; }
+        fj_security_t sec;
+        if (!fj_keys_get_security(&sec)) { j->result = FJ_RES_ERR; j->busy = false; return; }
+        if (sec.disk_blocked) { j->result = FJ_RES_BLOCKED; j->busy = false; return; }
+        if (!fj_state_brute_ok(FJ_BRUTE_DISK)) { j->result = FJ_RES_BAD_PIN; j->busy = false; return; }
+        fj_keys_get_disk_secret(j->enc, j->salt[0], j->nonce, j->tag);
+        if (!dkdf_begin(j, 0, j->a1, j->salt[0])) { j->result = FJ_RES_ERR; j->busy = false; return; }
+        j->phase = 0;
+        return;
+    }
+    case FJ_JOB_DISK_SETPIN: {
+        size_t n = strlen(j->a1);
+        if (n < 4 || n > 32) { j->result = FJ_RES_BAD_SECRET; j->busy = false; return; }
+        j->first_time = !fj_keys_disk_secret_set();
+        if (!j->first_time && !disk_unlocked) { j->result = FJ_RES_BAD_SECRET; j->busy = false; return; }
+        fj_random(j->salt[0], 16);
+        if (j->first_time) fj_random(disk_key, sizeof(disk_key));
+        if (!dkdf_begin(j, 0, j->a1, j->salt[0])) { j->result = FJ_RES_ERR; j->busy = false; return; }
+        j->phase = 0;
+        return;
+    }
+    case FJ_JOB_DISK_UNBLOCK:
+        j->phase = 0;
+        fj_state_job_start(&j->puk, FJ_JOB_VERIFY_PUK, j->a1, NULL, NULL);
+        return;
+    default:
+        j->result = FJ_RES_ERR;
+        j->busy = false;
+        return;
+    }
+}
+
+bool fj_disk_job_step(fj_disk_job_t *j) {
+    if (!j->busy) return false;
+    switch (j->kind) {
+    case FJ_JOB_DISK_UNLOCK:
+        if (j->phase == 0) {
+            if (!dkdf_chunk_done(&j->kdf[0])) break;
+            uint8_t key[32];
+            if (!fj_aes_gcm_decrypt_with_aad(j->kdf[0].out, j->nonce, j->tag,
+                    (const uint8_t *)DISK_WRAP_AAD, sizeof(DISK_WRAP_AAD) - 1,
+                    j->enc, sizeof(j->enc), key)) {
+                fj_security_t sec;
+                if (fj_keys_get_security(&sec)) {
+                    sec.disk_fail++;
+                    if (sec.disk_fail >= FJ_MAX_PIN_FAILS) sec.disk_blocked = 1;
+                    fj_keys_set_security(&sec);
+                }
+                fj_state_brute_failure(FJ_BRUTE_DISK);
+                memset(key, 0, sizeof(key));
+                j->result = FJ_RES_BAD_PIN;
+                j->busy = false;
+                break;
+            }
+            fj_security_t sec;
+            if (fj_keys_get_security(&sec)) {
+                if (sec.disk_fail != 0 || sec.disk_blocked) {
+                    sec.disk_fail = 0; sec.disk_blocked = 0;
+                    fj_keys_set_security(&sec);
+                }
+            }
+            fj_state_brute_success(FJ_BRUTE_DISK);
+            memcpy(disk_key, key, sizeof(disk_key));
+            memset(key, 0, sizeof(key));
+            if (!fj_msc_prepare(false)) { j->result = FJ_RES_ERR; j->busy = false; break; }
+            disk_unlocked = true;
+            disk_ready = true;
+            j->result = FJ_RES_OK;
+            j->busy = false;
+        }
+        break;
+    case FJ_JOB_DISK_SETPIN:
+        if (j->phase == 0) {
+            if (!dkdf_chunk_done(&j->kdf[0])) break;
+            uint8_t enc[32], wrap[32], tag[16];
+            memcpy(wrap, j->kdf[0].out, sizeof(wrap));
+            fj_random(j->nonce, 12);
+            bool ok = fj_aes_gcm_encrypt_with_aad(wrap, j->nonce,
+                        (const uint8_t *)DISK_WRAP_AAD, sizeof(DISK_WRAP_AAD) - 1,
+                        disk_key, sizeof(disk_key), enc, tag);
+            memset(wrap, 0, sizeof(wrap));
+            if (!ok) { j->result = FJ_RES_ERR; j->busy = false; break; }
+            if (!fj_keys_set_disk_secret(enc, j->salt[0], j->nonce, tag)) { j->result = FJ_RES_ERR; j->busy = false; break; }
+            if (!fj_msc_prepare(j->first_time)) { j->result = FJ_RES_ERR; j->busy = false; break; }
+            disk_unlocked = true;
+            disk_ready = true;
+            j->result = FJ_RES_OK;
+            j->busy = false;
+        }
+        break;
+    case FJ_JOB_DISK_UNBLOCK:
+        if (j->phase == 0) {
+            if (!fj_state_job_step(&j->puk)) {
+                if (j->puk.result != FJ_RES_OK) {
+                    j->result = j->puk.result;
+                    j->busy = false;
+                    break;
+                }
+                fj_security_t sec;
+                if (!fj_keys_get_security(&sec)) { j->result = FJ_RES_ERR; j->busy = false; break; }
+                sec.disk_fail = 0;
+                sec.disk_blocked = 0;
+                j->result = fj_keys_set_security(&sec) ? FJ_RES_OK : FJ_RES_ERR;
+                j->busy = false;
+            }
+        }
+        break;
+    default:
+        j->result = FJ_RES_ERR;
+        j->busy = false;
+        break;
+    }
+    return j->busy;
+}

@@ -68,6 +68,47 @@ bool fj_pbkdf2_sha256(const uint8_t *pw, size_t pw_len, const uint8_t *salt,
     return true;
 }
 
+/* Resumable-KDF stand-in for the cooperative jobs: deterministic for the same
+ * (password, salt), which is all the state machine needs. The result is
+ * produced eagerly in fj_kdf_begin() so a job finishes on its first step. */
+void fj_kdf_fill(fj_kdf_t *k, const uint8_t *pw, size_t pw_len,
+                 const uint8_t *salt, size_t salt_len, uint32_t iter) {
+    memset(k->out, 0, 32);
+    size_t n = 0;
+    for (size_t i = 0; i < pw_len; i++) { k->out[n % 32] ^= (uint8_t)(pw[i] + i); n++; }
+    for (size_t i = 0; i < salt_len; i++) k->out[(n + i) % 32] ^= (uint8_t)(salt[i] + i);
+    k->out[0] ^= (uint8_t)iter;
+    k->running = false;
+}
+
+bool fj_kdf_begin(fj_kdf_t *k, const uint8_t *pw, size_t pw_len,
+                  const uint8_t *salt, size_t salt_len, uint32_t iter) {
+    if (!k) return false;
+    memset(k, 0, sizeof(*k));
+    if (pw_len > FJ_KDF_PW_MAX) return false;
+    memcpy(k->password, pw, pw_len); k->pw_len = pw_len;
+    memcpy(k->salt, salt, salt_len); k->salt_len = salt_len;
+    k->iterations = iter;
+    fj_kdf_fill(k, pw, pw_len, salt, salt_len, iter);
+    return true;
+}
+
+bool fj_kdf_step(fj_kdf_t *k) {
+    if (!k) return false;
+    bool r = k->running;
+    k->running = false;
+    return r;
+}
+
+bool fj_kdf_result(const fj_kdf_t *k, uint8_t out[32]) {
+    if (!k || !out) return false;
+    memcpy(out, k->out, 32);
+    return true;
+}
+
+bool fj_msc_is_ready(void) { return true; }
+
+
 bool fj_keys_set_passphrase(const uint8_t pbkdf2_hash[32], const uint8_t salt[16]) {
     memcpy(stored_pin, pbkdf2_hash, 32);
     memcpy(stored_pin_salt, salt, 16);

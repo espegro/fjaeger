@@ -35,6 +35,7 @@
 
 #include "state.h"
 #include "keys.h"
+#include "job.h"
 #include "ctap2.h"
 #include "msc_disk.h"
 #include "rgb_led.h"
@@ -47,6 +48,15 @@ static char line[LINE_MAX];
 static size_t line_len = 0;
 static bool was_connected = false;
 static bool last_was_cr = false;
+
+/* Cooperative job currently executing (long PBKDF2 operations). A command
+ * handler starts a job and fj_console_task() pumps it one bounded chunk per
+ * main-loop tick, so the main loop's top-of-loop tud_task() keeps USB alive
+ * during the multi-second derivation. */
+static fj_state_job_t state_job;
+static fj_disk_job_t disk_job;
+static bool job_active = false;
+static bool job_is_disk = false;
 
 /* ------------------------------------------------------------------ */
 /* Line output (respects CDC back-pressure)                            */
@@ -67,6 +77,68 @@ static void out(const char *s) {
 static void outln(const char *s) {
     out(s);
     out("\r\n");
+}
+
+/* Print the outcome of a finished cooperative job. */
+static void job_print_result(void) {
+    const fj_job_kind_t k = job_is_disk ? disk_job.kind : state_job.kind;
+    const fj_job_result_t r = job_is_disk ? disk_job.result : state_job.result;
+    char buf[96];
+    const char *m = NULL;
+    switch (r) {
+    case FJ_RES_OK:
+        switch (k) {
+        case FJ_JOB_SETPASS:     m = "OK unlock passphrase set"; break;
+        case FJ_JOB_UNLOCK:      m = "OK unlocked"; break;
+        case FJ_JOB_SETPUK:      m = "OK recovery PUK set"; break;
+        case FJ_JOB_UNLOCKPUK:   m = "OK unlocked via PUK"; break;
+        case FJ_JOB_BACKUP:      m = "OK backup written to FJAEGER.BAK"; break;
+        case FJ_JOB_RESTORE:     m = "OK restored with new passphrase and PUK"; break;
+        case FJ_JOB_DISK_SETPIN: m = "OK disk pin set"; break;
+        case FJ_JOB_DISK_UNLOCK: m = "OK disk unlocked"; break;
+        case FJ_JOB_DISK_UNBLOCK: m = "OK disk PIN unblocked; use DISK UNLOCK <pin>"; break;
+        default:                 m = "OK"; break;
+        }
+        break;
+    case FJ_RES_BLOCKED:
+        m = (k == FJ_JOB_DISK_UNLOCK)
+                ? "ERR disk PIN blocked, use DISK UNBLOCK <puk>"
+                : "ERR passphrase blocked, use UNLOCKPUK <puk>";
+        break;
+    case FJ_RES_BAD_PIN:
+        {
+            fj_security_t sec = {0};
+            fj_keys_get_security(&sec);
+            if (k == FJ_JOB_DISK_UNLOCK)
+                snprintf(buf, sizeof(buf), "ERR bad disk pin (%u/%u left)",
+                         (unsigned)(FJ_MAX_PIN_FAILS - sec.disk_fail),
+                         (unsigned)FJ_MAX_PIN_FAILS);
+            else
+                snprintf(buf, sizeof(buf), "ERR bad passphrase (%u/%u left)",
+                         (unsigned)(FJ_MAX_PIN_FAILS - sec.pin_fail),
+                         (unsigned)FJ_MAX_PIN_FAILS);
+            m = buf;
+        }
+        break;
+    case FJ_RES_BAD_SECRET:
+        switch (k) {
+        case FJ_JOB_SETPASS:        m = "ERR invalid passphrase (8-64 chars) or device locked"; break;
+        case FJ_JOB_SETPUK:         m = "ERR invalid PUK (8-64 chars) or device locked"; break;
+        case FJ_JOB_BACKUP:         m = "ERR password must be 8-64 chars"; break;
+        case FJ_JOB_RESTORE:        m = "ERR invalid passphrase/PUK (see HELP)"; break;
+        case FJ_JOB_DISK_SETPIN:    m = "ERR disk pin invalid or drive locked"; break;
+        default:                    m = "ERR operation not permitted here"; break;
+        }
+        break;
+    case FJ_RES_DRIVE:
+        m = "ERR drive not mounted; DISK UNLOCK <pin> first";
+        break;
+    case FJ_RES_WRONG_PUK: m = "ERR wrong PUK"; break;
+    case FJ_RES_NO_PUK:    m = "ERR no PUK configured"; break;
+    case FJ_RES_WIPED:     m = "OK too many wrong PUKs, device wiped"; break;
+    default:               m = "ERR failed"; break;
+    }
+    outln(m);
 }
 
 /* Prevent the compiler from retaining command arguments (including PINs and
@@ -213,27 +285,9 @@ static void cmd_unlock(const char *passphrase) {
         outln("ERR passphrase blocked, use UNLOCKPUK <puk>");
         return;
     }
-    if (fj_state_unlock(passphrase)) {
-        /* Only unlocks the device for key operations. The encrypted drive
-         * is a separate step: DISK UNLOCK. */
-        outln("OK unlocked");
-    } else {
-        fj_security_t sec = {0};
-        fj_keys_get_security(&sec);
-        if (sec.pin_blocked) {
-            char buf[64];
-            snprintf(buf, sizeof(buf),
-                     "ERR passphrase blocked after %u fails, use UNLOCKPUK <puk>",
-                     (unsigned)FJ_MAX_PIN_FAILS);
-            outln(buf);
-        } else {
-            char buf[64];
-            snprintf(buf, sizeof(buf),
-                     "ERR bad passphrase (%u/%u left)", (unsigned)FJ_MAX_PIN_FAILS - sec.pin_fail,
-                     (unsigned)FJ_MAX_PIN_FAILS);
-            outln(buf);
-        }
-    }
+    fj_state_job_start(&state_job, FJ_JOB_UNLOCK, passphrase, NULL, NULL);
+    job_active = true;
+    job_is_disk = false;
 }
 
 static void cmd_unlock_puk(const char *puk) {
@@ -241,12 +295,9 @@ static void cmd_unlock_puk(const char *puk) {
         outln("ERR usage: UNLOCKPUK <puk>");
         return;
     }
-    switch (fj_state_unlock_puk(puk)) {
-        case FJ_PUK_OK:    outln("OK unlocked via PUK"); break;
-        case FJ_PUK_WRONG: outln("ERR wrong PUK"); break;
-        case FJ_PUK_UNSET: outln("ERR no PUK configured"); break;
-        case FJ_PUK_WIPED: outln("OK too many wrong PUKs, device wiped"); break;
-    }
+    fj_state_job_start(&state_job, FJ_JOB_UNLOCKPUK, puk, NULL, NULL);
+    job_active = true;
+    job_is_disk = false;
 }
 
 static bool require_unlocked(void);
@@ -257,8 +308,13 @@ static void cmd_set_puk(const char *puk) {
         return;
     }
     if (!require_unlocked()) return;
-    if (fj_state_set_puk(puk)) outln("OK recovery PUK set");
-    else outln("ERR invalid PUK (8-64 chars) or device locked");
+    if (strlen(puk) < 8 || strlen(puk) > 64) {
+        outln("ERR invalid PUK (8-64 chars) or device locked");
+        return;
+    }
+    fj_state_job_start(&state_job, FJ_JOB_SETPUK, puk, NULL, NULL);
+    job_active = true;
+    job_is_disk = false;
 }
 
 /* BACKUP <password> — write an encrypted backup of the master key and all
@@ -278,11 +334,9 @@ static void cmd_backup(const char *password) {
         outln("ERR drive not mounted; DISK UNLOCK <pin> first");
         return;
     }
-    if (fj_state_backup_write(password)) {
-        outln("OK backup written to FJAEGER.BAK");
-    } else {
-        outln("ERR backup failed");
-    }
+    fj_state_job_start(&state_job, FJ_JOB_BACKUP, password, NULL, NULL);
+    job_active = true;
+    job_is_disk = false;
 }
 
 /* RESTORE <password> <new-pin> <new-puk> — read FJAEGER.BAK from the MSC
@@ -302,11 +356,9 @@ static void cmd_restore(const char *password, const char *new_pass,
         outln("ERR drive not mounted; DISK UNLOCK <pin> first");
         return;
     }
-    if (fj_state_backup_restore(password, new_pass, new_puk)) {
-        outln("OK restored with new passphrase and PUK");
-    } else {
-        outln("ERR restore failed (bad password, no backup, or invalid pass/puk)");
-    }
+    fj_state_job_start(&state_job, FJ_JOB_RESTORE, password, new_pass, new_puk);
+    job_active = true;
+    job_is_disk = false;
 }
 
 /* DISK UNLOCK <pin> / SETPIN <pin> / LOCK / STATUS — independent drive lock. */
@@ -333,31 +385,16 @@ static void cmd_disk(const char *sub, char *rest) {
             outln("ERR disk PIN blocked, use DISK UNBLOCK <puk>");
             return;
         }
-        if (fj_msc_unlock(pin)) outln("OK disk unlocked");
-        else {
-            fj_security_t sec = {0};
-            fj_keys_get_security(&sec);
-            if (sec.disk_blocked) {
-                outln("ERR disk PIN blocked, use DISK UNBLOCK <puk>");
-            } else {
-                char buf[64];
-                snprintf(buf, sizeof(buf),
-                         "ERR bad disk pin (%u/%u left)",
-                         (unsigned)(FJ_MAX_PIN_FAILS - sec.disk_fail),
-                         (unsigned)FJ_MAX_PIN_FAILS);
-                outln(buf);
-            }
-        }
+        fj_disk_job_start(&disk_job, FJ_JOB_DISK_UNLOCK, pin);
+        job_active = true;
+        job_is_disk = true;
     } else if (strcasecmp(sub, "unblock") == 0) {
         if (!require_unlocked()) return;
         const char *puk = next_token(&rest);
         if (!puk) { outln("ERR usage: DISK UNBLOCK <puk>"); return; }
-        switch (fj_msc_unblock_puk(puk)) {
-            case FJ_PUK_OK:    outln("OK disk PIN unblocked; use DISK UNLOCK <pin>"); break;
-            case FJ_PUK_WRONG: outln("ERR wrong PUK"); break;
-            case FJ_PUK_UNSET: outln("ERR no PUK configured"); break;
-            case FJ_PUK_WIPED: outln("OK too many wrong PUKs, device wiped"); break;
-        }
+        fj_disk_job_start(&disk_job, FJ_JOB_DISK_UNBLOCK, puk);
+        job_active = true;
+        job_is_disk = true;
     } else if (strcasecmp(sub, "lock") == 0) {
         fj_msc_lock();
         outln("OK disk locked");
@@ -365,8 +402,11 @@ static void cmd_disk(const char *sub, char *rest) {
         if (!require_unlocked()) return;
         const char *pin = next_token(&rest);
         if (!pin) { outln("ERR usage: DISK SETPIN <pin>"); return; }
-        if (fj_msc_set_pin(pin)) outln("OK disk pin set");
-        else outln("ERR disk pin invalid or drive locked");
+        size_t n = strlen(pin);
+        if (n < 4 || n > 32) { outln("ERR disk pin invalid or drive locked"); return; }
+        fj_disk_job_start(&disk_job, FJ_JOB_DISK_SETPIN, pin);
+        job_active = true;
+        job_is_disk = true;
     } else {
         outln("ERR unknown DISK subcommand (UNLOCK|UNBLOCK|LOCK|SETPIN|STATUS)");
     }
@@ -389,11 +429,14 @@ static void cmd_setpass(const char *passphrase) {
         outln("ERR usage: SETPASS <passphrase>");
         return;
     }
-    if (fj_state_set_passphrase(passphrase)) {
-        outln("OK unlock passphrase set");
-    } else {
-        outln("ERR invalid passphrase (8-64 chars) or device locked");
+    size_t n = strlen(passphrase);
+    if (n < 8 || n > 64) {
+        outln("ERR invalid passphrase (8-64 chars)");
+        return;
     }
+    fj_state_job_start(&state_job, FJ_JOB_SETPASS, passphrase, NULL, NULL);
+    job_active = true;
+    job_is_disk = false;
 }
 
 static bool require_unlocked(void) {
@@ -627,6 +670,20 @@ void fj_console_task(void) {
         return;
     }
 
+    /* Pump an active cooperative job (long PBKDF2) a bounded chunk per
+     * main-loop tick; the main loop's top-of-loop tud_task() services USB
+     * between chunks. */
+    if (job_active) {
+        bool done = job_is_disk ? !fj_disk_job_step(&disk_job)
+                                : !fj_state_job_step(&state_job);
+        if (done) {
+            job_print_result();
+            job_active = false;
+            out(PROMPT);
+        }
+        return;
+    }
+
     while (tud_cdc_available()) {
         char c;
         tud_cdc_read(&c, 1);
@@ -643,8 +700,9 @@ void fj_console_task(void) {
                 line_len = 0;
                 clear_line();
             }
-            /* Always present a fresh prompt after a command line. */
-            out(PROMPT);
+            /* Present a fresh prompt unless a job now needs to print its
+             * (deferred) result first. */
+            if (!job_active) out(PROMPT);
         } else if (line_len < LINE_MAX - 1) {
             last_was_cr = false;
             line[line_len++] = c;

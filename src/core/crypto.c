@@ -23,14 +23,6 @@ static int crypto_rng(void *ctx, unsigned char *out, size_t len) {
     return 0;
 }
 
-/* Weak hook invoked periodically inside the PBKDF2 loop so the platform can
- * service USB (tud_task) during the multi-second 100k-iteration derivation.
- * A plain (strong) definition in the firmware overrides this; host tests and
- * builds without TinyUSB get this no-op. Without this, PBKDF2 (SETPASS,
- * UNLOCK, backup, PUK) blocks the main loop for seconds and the host USB
- * stack deactivates the device. */
-__attribute__((weak)) void fj_pbkdf2_yield(void) {}
-
 void fj_sha256(const uint8_t *data, size_t len, uint8_t out[FJ_HASH_LEN]) {
     mbedtls_sha256(data, len, out, 0);
 }
@@ -348,33 +340,74 @@ bool fj_ct_equal(const void *a, const void *b, size_t n) {
     return diff == 0;
 }
 
-bool fj_pbkdf2_sha256(const uint8_t *password, size_t pw_len,
-                      const uint8_t *salt, size_t salt_len,
-                      uint32_t iterations, uint8_t out[32]) {
-    if (iterations == 0 || salt_len > 60) return false;
+bool fj_kdf_begin(fj_kdf_t *k, const uint8_t *password, size_t pw_len,
+                  const uint8_t *salt, size_t salt_len, uint32_t iterations) {
+    if (!k || iterations == 0 || salt_len > FJ_KDF_SALT_MAX)
+        return false;
+    if (pw_len > FJ_KDF_PW_MAX)
+        return false;
 
-    /* U_1 = HMAC(password, salt || INT(1)). */
-    uint8_t block[64];
+    memset(k, 0, sizeof(*k));
+    memcpy(k->password, password, pw_len);
+    k->pw_len = pw_len;
+    memcpy(k->salt, salt, salt_len);
+    k->salt_len = salt_len;
+    k->iterations = iterations;
+
+    /* U_1 = HMAC(password, salt || INT(1)); T_1 = U_1. */
+    uint8_t block[FJ_KDF_SALT_MAX + 4];
     memcpy(block, salt, salt_len);
     block[salt_len] = 0;
     block[salt_len + 1] = 0;
     block[salt_len + 2] = 0;
     block[salt_len + 3] = 1;
-
-    uint8_t u[32];
-    if (!fj_hmac_sha256(password, pw_len, block, salt_len + 4, u))
+    if (!fj_hmac_sha256(password, pw_len, block, salt_len + 4, k->u))
         return false;
-    memcpy(out, u, 32);
-
-    /* T_1 = U_1 XOR U_2 XOR ... XOR U_iterations. */
-    for (uint32_t i = 1; i < iterations; i++) {
-        if (!fj_hmac_sha256(password, pw_len, u, 32, u)) return false;
-        for (int j = 0; j < 32; j++) out[j] ^= u[j];
-        /* Service USB periodically so the host does not time out the device
-         * during the long derivation. */
-        if ((i & 0x3FF) == 0) fj_pbkdf2_yield();
-    }
+    memcpy(k->out, k->u, 32);
+    k->i = 1;
+    k->running = true;
     return true;
+}
+
+bool fj_kdf_step(fj_kdf_t *k) {
+    if (!k || !k->running) return false;
+
+    /* iterations == 1 needs no inner rounds; the result is already in out. */
+    if (k->i >= k->iterations) {
+        k->running = false;
+        return false;
+    }
+
+    if (!fj_hmac_sha256(k->password, k->pw_len, k->u, 32, k->u)) {
+        k->running = false;
+        return false;
+    }
+    for (int j = 0; j < 32; j++) k->out[j] ^= k->u[j];
+    k->i++;
+    return k->i < k->iterations;
+}
+
+bool fj_kdf_result(const fj_kdf_t *k, uint8_t out[32]) {
+    if (!k || !out) return false;
+    memcpy(out, k->out, 32);
+    return true;
+}
+
+bool fj_pbkdf2_sha256(const uint8_t *password, size_t pw_len,
+                      const uint8_t *salt, size_t salt_len,
+                      uint32_t iterations, uint8_t out[32]) {
+    if (iterations == 0 || salt_len > FJ_KDF_SALT_MAX) return false;
+    if (pw_len > FJ_KDF_PW_MAX) return false;
+
+    fj_kdf_t k;
+    if (!fj_kdf_begin(&k, password, pw_len, salt, salt_len, iterations))
+        return false;
+    while (fj_kdf_step(&k)) {
+        /* No USB servicing here: firmware paths that must not block drive the
+         * resumable KDF from the main loop instead. This wrapper is used by
+         * host tests and any caller that can tolerate the full derivation. */
+    }
+    return fj_kdf_result(&k, out);
 }
 
 bool fj_aes_gcm_encrypt_with_aad(const uint8_t key[32], const uint8_t nonce[12],

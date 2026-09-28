@@ -75,11 +75,39 @@ bool fj_pbkdf2_sha256(const uint8_t *password, size_t pw_len,
                       const uint8_t *salt, size_t salt_len,
                       uint32_t iterations, uint8_t out[32]);
 
-/* Weak hook called periodically inside the PBKDF2 loop. The firmware (main.c)
- * overrides it to service USB (tud_task) so the host does not deactivate the
- * device during the multi-second derivation. Default (host tests / no USB) is
- * a no-op. */
-void fj_pbkdf2_yield(void);
+/* Resumable PBKDF2-HMAC-SHA256 (RFC 2898).
+ *
+ * fj_kdf_begin() copies the password/salt and derives U_1 (which equals the
+ * current T_1). fj_kdf_step() performs one inner HMAC iteration and returns
+ * true while more work remains, false once the derivation is complete (result
+ * is in k->out). Spread the derivation over many fj_kdf_step() calls so a
+ * caller that owns the main loop (e.g. the serial console) can pump USB in
+ * the top-of-loop tick between calls instead of blocking for the whole
+ * multi-second 100k-iteration run. This replaces the earlier approach of
+ * calling tud_task() from inside the KDF loop, which re-entered the TinyUSB
+ * device task and wedged the RP2350 USB controller. */
+#define FJ_KDF_PW_MAX 64
+#define FJ_KDF_SALT_MAX 64
+
+typedef struct {
+    uint8_t password[FJ_KDF_PW_MAX];
+    size_t  pw_len;
+    uint8_t salt[FJ_KDF_SALT_MAX];
+    size_t  salt_len;
+    uint32_t iterations;
+    uint32_t i;               /* index of the next inner iteration to run */
+    uint8_t  u[32];           /* current U block */
+    uint8_t  out[32];         /* accumulated T */
+    bool running;
+} fj_kdf_t;
+
+bool fj_kdf_begin(fj_kdf_t *k, const uint8_t *password, size_t pw_len,
+                  const uint8_t *salt, size_t salt_len, uint32_t iterations);
+/* Advance one inner iteration. Returns true while more work remains; false
+ * once complete (or on a fatal error, in which case running is also cleared).
+ * fj_kdf_result() returns the derived key once finished. */
+bool fj_kdf_step(fj_kdf_t *k);
+bool fj_kdf_result(const fj_kdf_t *k, uint8_t out[32]);
 
 /* Derive 32 bytes of key material from the XTS key
  * and a label, using HKDF-SHA256. Used to derive per-block tweak/sector
