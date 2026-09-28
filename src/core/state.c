@@ -52,14 +52,12 @@ static bool have_unlock_time = false;
  * reboot, but never persists beyond power-off. */
 #define BRUTE_BASE_DELAY_US 2000000u   /* 2 s after the first failure */
 #define BRUTE_MAX_DELAY_US  30000000u  /* 30 s cap */
-#define BRUTE_CTX_COUNT 3
+#define BRUTE_CTX_COUNT 4
 static uint32_t brute_fail_count[BRUTE_CTX_COUNT];
 static absolute_time_t brute_allowed_at[BRUTE_CTX_COUNT];
 
 static fj_brute_ctx_t brute_ctx_index(fj_brute_ctx_t ctx) {
-    if (ctx == FJ_BRUTE_PIN) return FJ_BRUTE_PIN;
-    if (ctx == FJ_BRUTE_PUK) return FJ_BRUTE_PUK;
-    return FJ_BRUTE_DISK;
+    return ctx;
 }
 
 void fj_state_init(void) {
@@ -171,10 +169,10 @@ bool fj_state_unlock(const char *passphrase) {
     return state_job_sync(&sync_job);
 }
 
-/* True when the device PIN is currently blocked and needs a PUK. */
-bool fj_state_pin_blocked(void) {
+/* True when the unlock passphrase is currently blocked and needs a PUK. */
+bool fj_state_pass_blocked(void) {
     fj_security_t sec;
-    return fj_keys_get_security(&sec) && sec.pin_blocked;
+    return fj_keys_get_security(&sec) && sec.pass_blocked;
 }
 
 void fj_state_factory_reset(void) {
@@ -373,8 +371,8 @@ static void job_start_unlock(fj_state_job_t *j, const char *a1) {
     if (!pass_configured) { j->result = FJ_RES_BAD_PIN; j->busy = false; return; }
     fj_security_t sec;
     if (!fj_keys_get_security(&sec)) { j->result = FJ_RES_ERR; j->busy = false; return; }
-    if (sec.pin_blocked) { j->result = FJ_RES_BLOCKED; j->busy = false; return; }
-    if (!fj_state_brute_ok(FJ_BRUTE_PIN)) { j->result = FJ_RES_BAD_PIN; j->busy = false; return; }
+    if (sec.pass_blocked) { j->result = FJ_RES_BLOCKED; j->busy = false; return; }
+    if (!fj_state_brute_ok(FJ_BRUTE_PASS)) { j->result = FJ_RES_BAD_PIN; j->busy = false; return; }
     if (!job_begin_kdf(j, 0, a1, pass_salt)) { j->result = FJ_RES_ERR; j->busy = false; return; }
     j->phase = 0;
 }
@@ -387,23 +385,23 @@ static void job_run_unlock(fj_state_job_t *j) {
         if (acc) {
             fj_security_t sec;
             if (fj_keys_get_security(&sec)) {
-                sec.pin_fail++;
-                if (sec.pin_fail >= FJ_MAX_PIN_FAILS) sec.pin_blocked = 1;
+                sec.pass_fail++;
+                if (sec.pass_fail >= FJ_MAX_PASS_FAILS) sec.pass_blocked = 1;
                 fj_keys_set_security(&sec);
             }
-            fj_state_brute_failure(FJ_BRUTE_PIN);
+            fj_state_brute_failure(FJ_BRUTE_PASS);
             j->result = FJ_RES_BAD_PIN;
             j->busy = false;
             return;
         }
         fj_security_t sec;
         if (fj_keys_get_security(&sec)) {
-            if (sec.pin_fail != 0 || sec.pin_blocked) {
-                sec.pin_fail = 0; sec.pin_blocked = 0;
+            if (sec.pass_fail != 0 || sec.pass_blocked) {
+                sec.pass_fail = 0; sec.pass_blocked = 0;
                 fj_keys_set_security(&sec);
             }
         }
-        fj_state_brute_success(FJ_BRUTE_PIN);
+        fj_state_brute_success(FJ_BRUTE_PASS);
         if (!fj_keys_get_master_pin_wrap(j->enc[1], j->salt[1])) { j->result = FJ_RES_ERR; j->busy = false; return; }
         if (!job_begin_kdf(j, 1, j->a1, j->salt[1])) { j->result = FJ_RES_ERR; j->busy = false; return; }
         j->phase = 1;
@@ -506,10 +504,14 @@ static void job_run_puk(fj_state_job_t *j) {
     master_available = true;
     fj_security_t sec;
     if (fj_keys_get_security(&sec)) {
-        sec.pin_fail = 0; sec.pin_blocked = 0;
+        /* PUK recovery clears the passphrase and CTAP2 PIN locks; the disk
+         * PIN lock is cleared separately via DISK UNBLOCK. */
+        sec.pass_fail = 0; sec.pass_blocked = 0;
+        sec.ctap_pin_fail = 0; sec.ctap_pin_blocked = 0;
         fj_keys_set_security(&sec);
     }
-    fj_state_brute_success(FJ_BRUTE_PIN);
+    fj_state_brute_success(FJ_BRUTE_PASS);
+    fj_state_brute_success(FJ_BRUTE_CTAP);
     state = FJ_STATE_UNLOCKED;
     unlock_since = get_absolute_time();
     have_unlock_time = true;

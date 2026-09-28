@@ -113,8 +113,8 @@ bool fj_keys_set_passphrase(const uint8_t pbkdf2_hash[32], const uint8_t salt[16
     memcpy(stored_pin, pbkdf2_hash, 32);
     memcpy(stored_pin_salt, salt, 16);
     have_pin = true;
-    security.pin_fail = 0;
-    security.pin_blocked = 0;
+    security.pass_fail = 0;
+    security.pass_blocked = 0;
     return true;
 }
 
@@ -313,7 +313,7 @@ static void reset_fixture(void) {
     backup_writes = 0;
     backup_deletes = 0;
     memset(&backup_payload, 0, sizeof(backup_payload));
-    fj_state_brute_success(FJ_BRUTE_PIN);
+    fj_state_brute_success(FJ_BRUTE_PASS);
     fj_state_brute_success(FJ_BRUTE_PUK);
     fj_state_brute_success(FJ_BRUTE_DISK);
     fj_state_init();
@@ -332,12 +332,12 @@ static void test_pin_block_and_puk_recovery(void) {
         now_us += 40000000;
         assert(!fj_state_unlock("wrong"));
     }
-    assert(fj_state_pin_blocked());
+    assert(fj_state_pass_blocked());
     assert(!fj_state_unlock("testpass1"));
     assert(fj_state_unlock_puk("recovery-code") == FJ_PUK_OK);
     assert(fj_state_get() == FJ_STATE_UNLOCKED);
-    assert(!fj_state_pin_blocked());
-    assert(security.pin_fail == 0);
+    assert(!fj_state_pass_blocked());
+    assert(security.pass_fail == 0);
 }
 
 static void test_auto_lock_closes_disk(void) {
@@ -410,26 +410,26 @@ static void test_brute_force_delay_backoff(void) {
 
     /* Immediately after boot an attempt is allowed. */
     now_us = 0;
-    assert(fj_state_brute_ok(FJ_BRUTE_PIN));
+    assert(fj_state_brute_ok(FJ_BRUTE_PASS));
     assert(!fj_state_unlock("wrong"));   /* failure 1: 2 s delay */
 
     /* A second attempt within the delay window is refused outright (before
      * any PBKDF2 work) and does not consume a retry. */
     now_us = 1000000;
-    assert(!fj_state_brute_ok(FJ_BRUTE_PIN));
+    assert(!fj_state_brute_ok(FJ_BRUTE_PASS));
     assert(!fj_state_unlock("wrong"));
 
     /* After the delay has elapsed a wrong attempt is counted again. */
     now_us = 1999999;
-    assert(!fj_state_brute_ok(FJ_BRUTE_PIN));
+    assert(!fj_state_brute_ok(FJ_BRUTE_PASS));
     now_us = 2000000;
-    assert(fj_state_brute_ok(FJ_BRUTE_PIN));
+    assert(fj_state_brute_ok(FJ_BRUTE_PASS));
     assert(!fj_state_unlock("wrong"));   /* failure 2: 4 s delay */
 
     now_us = 5000000;
-    assert(!fj_state_brute_ok(FJ_BRUTE_PIN));
+    assert(!fj_state_brute_ok(FJ_BRUTE_PASS));
     now_us = 6000001;
-    assert(fj_state_brute_ok(FJ_BRUTE_PIN));
+    assert(fj_state_brute_ok(FJ_BRUTE_PASS));
 
     /* The PIN delay does not affect a PUK attempt (separate contexts). */
     assert(fj_state_brute_ok(FJ_BRUTE_PUK));
@@ -437,7 +437,7 @@ static void test_brute_force_delay_backoff(void) {
     /* A correct PIN clears the backoff. */
     assert(fj_state_unlock("testpass1"));
     assert(fj_state_get() == FJ_STATE_UNLOCKED);
-    assert(fj_state_brute_ok(FJ_BRUTE_PIN));
+    assert(fj_state_brute_ok(FJ_BRUTE_PASS));
 }
 
 static void test_master_key_at_rest(void) {
@@ -499,7 +499,7 @@ static void test_puk_sets_new_pin_preserves_keys(void) {
         now_us += 40000000;
         assert(!fj_state_unlock("wrong"));
     }
-    assert(fj_state_pin_blocked());
+    assert(fj_state_pass_blocked());
     assert(!fj_state_unlock("testpass1"));
 
     /* PUK recovery unlocks and recovers the same master key M. */
@@ -562,7 +562,51 @@ static void test_backup_restore(void) {
     assert(memcmp(m_before, m2, 32) == 0);
 }
 
+
+/* FJ-N002: the unlock passphrase and the CTAP2 PIN are independent retry
+ * domains. A blocked CTAP2 PIN must not block the passphrase, and vice versa;
+ * PUK recovery clears both. */
+static void test_retry_domain_split(void) {
+    reset_fixture();
+    fj_security_t sec;
+
+    assert(fj_state_set_passphrase("testpass1"));
+    assert(fj_state_unlock("testpass1"));
+    assert(fj_state_set_puk("recovery-code"));
+
+    /* A blocked CTAP2 PIN must not block the unlock passphrase. */
+    memset(&sec, 0, sizeof(sec));
+    sec.ctap_pin_fail = FJ_MAX_PIN_FAILS;
+    sec.ctap_pin_blocked = 1;
+    assert(fj_keys_set_security(&sec));
+    assert(!fj_state_pass_blocked());
+
+    /* A blocked passphrase must leave the CTAP2 counters untouched. */
+    memset(&sec, 0, sizeof(sec));
+    sec.pass_fail = FJ_MAX_PASS_FAILS;
+    sec.pass_blocked = 1;
+    assert(fj_keys_set_security(&sec));
+    assert(fj_state_pass_blocked());
+    fj_keys_get_security(&sec);
+    assert(sec.pass_blocked == 1);
+    assert(sec.ctap_pin_blocked == 0 && sec.ctap_pin_fail == 0);
+
+    /* PUK recovery clears both domains. */
+    fj_state_lock();
+    assert(fj_state_unlock_puk("recovery-code") == FJ_PUK_OK);
+    assert(fj_state_get() == FJ_STATE_UNLOCKED);
+    assert(!fj_state_pass_blocked());
+    fj_keys_get_security(&sec);
+    assert(sec.ctap_pin_blocked == 0);
+    assert(sec.ctap_pin_fail == 0);
+    assert(sec.pass_blocked == 0 && sec.pass_fail == 0);
+
+    puts("retry-domain split (passphrase vs CTAP2 PIN): ok");
+}
+
 int main(void) {
+    test_retry_domain_split();
+
     test_pin_block_and_puk_recovery();
     test_auto_lock_closes_disk();
     test_wrong_puk_factory_wipes_live_state();

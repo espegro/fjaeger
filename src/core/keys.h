@@ -38,6 +38,7 @@ extern "C" {
  * becomes BLOCKED and a PUK is required. After FJ_MAX_PUK_FAILS wrong PUK
  * attempts the device wipes itself (all profiles, credentials, the disk
  * secret and the PIN) — a full factory reset. */
+#define FJ_MAX_PASS_FAILS 5
 #define FJ_MAX_PIN_FAILS  5
 #define FJ_MAX_PUK_FAILS  5
 
@@ -162,12 +163,17 @@ bool fj_keys_set_master_puk_wrap(const uint8_t enc[32], const uint8_t salt[16]);
 bool fj_keys_get_master_puk_wrap(uint8_t enc[32], uint8_t salt[16]);
 
 /* Brute-force protection state for the device PIN, disk PIN and PUK. */
+/* Brute-force protection state. The unlock passphrase and the CTAP2 PIN are
+ * independent retry domains: failing the CTAP2 PIN cannot consume the retry
+ * budget of the (higher-value) unlock passphrase, and vice versa. */
 typedef struct {
-    uint8_t pin_fail;     /* consecutive wrong device-PIN attempts */
-    uint8_t pin_blocked;  /* device PIN blocked, PUK required */
-    uint8_t disk_fail;    /* consecutive wrong disk-PIN attempts */
-    uint8_t disk_blocked; /* disk PIN blocked, PUK required */
-    uint8_t puk_fail;     /* consecutive wrong PUK attempts */
+    uint8_t pass_fail;        /* consecutive wrong unlock-passphrase attempts */
+    uint8_t pass_blocked;     /* unlock passphrase blocked, PUK required */
+    uint8_t ctap_pin_fail;    /* consecutive wrong CTAP2 PIN attempts */
+    uint8_t ctap_pin_blocked; /* CTAP2 PIN blocked, PUK required */
+    uint8_t disk_fail;        /* consecutive wrong disk-PIN attempts */
+    uint8_t disk_blocked;     /* disk PIN blocked, PUK required */
+    uint8_t puk_fail;         /* consecutive wrong PUK attempts */
 } fj_security_t;
 
 /* Read/write the brute-force protection state in one flash write. */

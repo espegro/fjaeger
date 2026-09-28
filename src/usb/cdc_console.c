@@ -115,8 +115,8 @@ static void job_print_result(void) {
                          (unsigned)FJ_MAX_PIN_FAILS);
             else
                 snprintf(buf, sizeof(buf), "ERR bad passphrase (%u/%u left)",
-                         (unsigned)(FJ_MAX_PIN_FAILS - sec.pin_fail),
-                         (unsigned)FJ_MAX_PIN_FAILS);
+                         (unsigned)(FJ_MAX_PASS_FAILS - sec.pass_fail),
+                         (unsigned)FJ_MAX_PASS_FAILS);
             m = buf;
         }
         break;
@@ -251,8 +251,10 @@ static void cmd_status(void) {
     snprintf(buf, sizeof(buf), "version: %s\r\n"
              "state: %s\r\n"
              "disk: %s\r\n"
-             "pin_blocked: %s\r\n"
-             "pin_fail: %u\r\n"
+             "pass_blocked: %s\r\n"
+             "pass_fail: %u\r\n"
+             "ctap_pin_blocked: %s\r\n"
+             "ctap_pin_fail: %u\r\n"
              "disk_blocked: %s\r\n"
              "disk_fail: %u\r\n"
              "puk: %s\r\n"
@@ -263,7 +265,8 @@ static void cmd_status(void) {
              FJ_VERSION_STRING,
              fj_state_get() == FJ_STATE_UNLOCKED ? "unlocked" : "locked",
              fj_msc_is_ready() ? "unlocked" : "locked",
-             (have_sec && sec.pin_blocked) ? "yes" : "no", (unsigned)sec.pin_fail,
+             (have_sec && sec.pass_blocked) ? "yes" : "no", (unsigned)sec.pass_fail,
+             (have_sec && sec.ctap_pin_blocked) ? "yes" : "no", (unsigned)sec.ctap_pin_fail,
              (have_sec && sec.disk_blocked) ? "yes" : "no", (unsigned)sec.disk_fail,
              fj_keys_puk_configured() ? "set" : "unset", (unsigned)sec.puk_fail,
              fj_keys_active_profile(), fj_keys_profile_count(),
@@ -281,7 +284,7 @@ static void cmd_unlock(const char *passphrase) {
         outln("ERR usage: UNLOCK <passphrase>");
         return;
     }
-    if (fj_state_pin_blocked()) {
+    if (fj_state_pass_blocked()) {
         outln("ERR passphrase blocked, use UNLOCKPUK <puk>");
         return;
     }

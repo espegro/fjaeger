@@ -13,7 +13,7 @@
  * Each update erases and programs only the older copy. A generation number
  * and CRC select the newest complete record after a reset or power loss. */
 #define STORE_MAGIC   0x464A5345u /* "FJSE" */
-#define STORE_VERSION 14u
+#define STORE_VERSION 15u
 #define FLASH_OFFSET_BYTES (PICO_FLASH_SIZE_BYTES - (2 * FLASH_SECTOR_SIZE))
 
 typedef struct {
@@ -44,9 +44,12 @@ typedef struct {
     uint8_t  disk_wrap_nonce[12];
     uint8_t  disk_wrap_tag[16];
     uint8_t  disk_secret_valid;    /* 1 once the disk PIN/secret are set */
-    /* Brute-force protection (v5). */
-    uint8_t  pin_fail;             /* wrong device-PIN attempts */
-    uint8_t  pin_blocked;          /* device PIN blocked, PUK required */
+    /* Brute-force protection (v15: passphrase and CTAP2 PIN are separate
+     * retry domains). */
+    uint8_t  pass_fail;            /* wrong unlock-passphrase attempts */
+    uint8_t  pass_blocked;         /* unlock passphrase blocked, PUK required */
+    uint8_t  ctap_pin_fail;        /* wrong CTAP2 PIN attempts */
+    uint8_t  ctap_pin_blocked;     /* CTAP2 PIN blocked, PUK required */
     uint8_t  disk_fail;            /* wrong disk-PIN attempts */
     uint8_t  disk_blocked;         /* disk PIN blocked, PUK required */
     uint8_t  puk_hash[32];         /* recovery PUK (PBKDF2-SHA256) */
@@ -296,8 +299,8 @@ bool fj_keys_set_passphrase(const uint8_t pbkdf2_hash[32], const uint8_t salt[16
     memcpy(store.pass_hash, pbkdf2_hash, 32);
     memcpy(store.pass_salt, salt, 16);
     store.pass_configured = 1;
-    store.pin_fail = 0;
-    store.pin_blocked = 0;
+    store.pass_fail = 0;
+    store.pass_blocked = 0;
     return store_write_commit();
 }
 
@@ -387,8 +390,10 @@ bool fj_keys_get_master_puk_wrap(uint8_t enc[32], uint8_t salt[16]) {
 
 bool fj_keys_get_security(fj_security_t *sec) {
     if (!store_loaded) return false;
-    sec->pin_fail = store.pin_fail;
-    sec->pin_blocked = store.pin_blocked;
+    sec->pass_fail = store.pass_fail;
+    sec->pass_blocked = store.pass_blocked;
+    sec->ctap_pin_fail = store.ctap_pin_fail;
+    sec->ctap_pin_blocked = store.ctap_pin_blocked;
     sec->disk_fail = store.disk_fail;
     sec->disk_blocked = store.disk_blocked;
     sec->puk_fail = store.puk_fail;
@@ -397,8 +402,10 @@ bool fj_keys_get_security(fj_security_t *sec) {
 
 bool fj_keys_set_security(const fj_security_t *sec) {
     if (!store_loaded) return false;
-    store.pin_fail = sec->pin_fail;
-    store.pin_blocked = sec->pin_blocked;
+    store.pass_fail = sec->pass_fail;
+    store.pass_blocked = sec->pass_blocked;
+    store.ctap_pin_fail = sec->ctap_pin_fail;
+    store.ctap_pin_blocked = sec->ctap_pin_blocked;
     store.disk_fail = sec->disk_fail;
     store.disk_blocked = sec->disk_blocked;
     store.puk_fail = sec->puk_fail;

@@ -40,7 +40,7 @@ void fj_state_lock(void);
 bool fj_state_unlock(const char *passphrase);
 
 /* Whether the device passphrase is currently blocked (needs a PUK). */
-bool fj_state_pin_blocked(void);
+bool fj_state_pass_blocked(void);
 
 /* Result of a PUK unlock attempt. */
 typedef enum {
@@ -124,7 +124,8 @@ void fj_state_tick(void);
  *   fj_state_brute_failure(ctx) -> record a failed attempt (grows the delay).
  *   fj_state_brute_success(ctx) -> clear the delay on a correct passphrase. */
 typedef enum {
-    FJ_BRUTE_PIN,   /* device PIN (console UNLOCK + CTAP2 getPinToken) */
+    FJ_BRUTE_PASS,  /* unlock passphrase (console UNLOCK) */
+    FJ_BRUTE_CTAP,  /* CTAP2 client PIN (getPinToken) */
     FJ_BRUTE_PUK,   /* recovery PUK (UNLOCKPUK) */
     FJ_BRUTE_DISK,  /* disk PIN (DISK UNLOCK) */
 } fj_brute_ctx_t;

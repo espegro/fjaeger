@@ -134,8 +134,8 @@ static bool parse_platform_key(fj_cbor_reader *r, fj_cbor_item *item,
 static unsigned pin_retries(void) {
     fj_security_t sec;
     if (!fj_keys_get_security(&sec)) return 0;
-    if (sec.pin_blocked) return 0;
-    unsigned used = sec.pin_fail;
+    if (sec.ctap_pin_blocked) return 0;
+    unsigned used = sec.ctap_pin_fail;
     if (used >= FJ_MAX_PIN_FAILS) return 0;
     return FJ_MAX_PIN_FAILS - used;
 }
@@ -193,8 +193,8 @@ static size_t get_pin_token(const uint8_t *req, size_t len,
     /* Brute-force protection. */
     fj_security_t sec;
     if (!fj_keys_get_security(&sec)) return ctap_err(out, cap, ERR_INVALID_PARAMETER);
-    if (sec.pin_blocked) return ctap_err(out, cap, ERR_PIN_BLOCKED);
-    if (!fj_state_brute_ok(FJ_BRUTE_PIN)) return ctap_err(out, cap, ERR_PIN_BLOCKED);
+    if (sec.ctap_pin_blocked) return ctap_err(out, cap, ERR_PIN_BLOCKED);
+    if (!fj_state_brute_ok(FJ_BRUTE_CTAP)) return ctap_err(out, cap, ERR_PIN_BLOCKED);
 
     uint8_t secret[32];
     if (!compute_shared_secret(platform_pub, secret))
@@ -212,21 +212,21 @@ static size_t get_pin_token(const uint8_t *req, size_t len,
      * fast brute-force of this verifier yields at most a pinUvAuthToken and
      * never the master key M. */
     if (!fj_state_ctap2_verify(left16)) {
-        sec.pin_fail++;
-        if (sec.pin_fail >= FJ_MAX_PIN_FAILS) sec.pin_blocked = 1;
+        sec.ctap_pin_fail++;
+        if (sec.ctap_pin_fail >= FJ_MAX_PIN_FAILS) sec.ctap_pin_blocked = 1;
         fj_keys_set_security(&sec);
-        fj_state_brute_failure(FJ_BRUTE_PIN);
-        return ctap_err(out, cap, sec.pin_blocked ? ERR_PIN_BLOCKED
-                                                  : ERR_PIN_INVALID);
+        fj_state_brute_failure(FJ_BRUTE_CTAP);
+        return ctap_err(out, cap, sec.ctap_pin_blocked ? ERR_PIN_BLOCKED
+                                                       : ERR_PIN_INVALID);
     }
 
     /* Correct (or dummy-mode): reset the retry counter and mint a token. */
-    if (sec.pin_fail != 0 || sec.pin_blocked) {
-        sec.pin_fail = 0;
-        sec.pin_blocked = 0;
+    if (sec.ctap_pin_fail != 0 || sec.ctap_pin_blocked) {
+        sec.ctap_pin_fail = 0;
+        sec.ctap_pin_blocked = 0;
         fj_keys_set_security(&sec);
     }
-    fj_state_brute_success(FJ_BRUTE_PIN);
+    fj_state_brute_success(FJ_BRUTE_CTAP);
     fj_random(pin_token, sizeof(pin_token));
     token_valid = true;
 
