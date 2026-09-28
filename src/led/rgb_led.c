@@ -68,20 +68,21 @@ void fj_led_task(void) {
         return;
     }
 
-    if (fj_state_get() == FJ_STATE_UNLOCKED) {
-        if (!fj_ctap2_has_credentials()) {
-            /* Unlocked but blank (no credential enrolled yet): amber blink. */
-            uint32_t bi = 700u;
-            put_rgb(((now / bi) & 1u) ? 24u : 0u,
-                    ((now / bi) & 1u) ? 8u : 0u, 0);
-        } else {
-            put_rgb(0, 24, 0);   /* green: unlocked + provisioned */
-        }
+    uint32_t interval = usb_suspended ? 1200u : 500u;
+    bool phase = ((now / interval) & 1u) != 0;
+
+    /* Blank device (no credential enrolled): a clearly yellow blink,
+     * independent of the lock state, so a fresh/unprovisioned key is easy to
+     * spot even while it is locked. */
+    if (!fj_ctap2_has_credentials()) {
+        put_rgb(phase ? 30u : 0u, phase ? 26u : 0u, 0);   /* yellow blink */
         return;
     }
 
-    uint32_t interval = usb_suspended ? 1200u : 500u;
-    bool phase = ((now / interval) & 1u) != 0;
+    if (fj_state_get() == FJ_STATE_UNLOCKED) {
+        put_rgb(0, 24, 0);       /* green: unlocked + provisioned */
+        return;
+    }
 
     if (!phase) {
         put_rgb(0, 0, 0);
@@ -90,6 +91,6 @@ void fj_led_task(void) {
     } else if (!usb_mounted) {
         put_rgb(20, 8, 0);       /* amber: not enumerated */
     } else {
-        put_rgb(24, 0, 0);       /* red blink: locked */
+        put_rgb(24, 0, 0);       /* red blink: locked + provisioned */
     }
 }
