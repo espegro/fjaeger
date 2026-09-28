@@ -91,6 +91,7 @@ _Static_assert(PROGRAM_SIZE <= FLASH_SECTOR_SIZE,
                "key store must fit in one flash sector");
 
 static fj_store_payload_t store;
+static fj_store_payload_t tx_store;  /* snapshot for store transactions */
 static bool store_loaded = false;
 static int active_copy = -1;
 static uint32_t active_generation = 0;
@@ -247,6 +248,9 @@ static bool store_write_commit(void) {
 }
 
 void fj_store_begin(void) {
+    /* Snapshot the current state so fj_store_abort() can roll back any
+     * mutations made inside the transaction (FJ-005). */
+    memcpy(&tx_store, &store, sizeof(store));
     store_tx = true;
     store_dirty = false;
 }
@@ -255,13 +259,20 @@ bool fj_store_commit(void) {
     bool dirty = store_dirty;
     store_tx = false;
     store_dirty = false;
+    memset(&tx_store, 0, sizeof(tx_store));   /* snapshot no longer needed */
     if (!dirty) return true;
     return store_write_commit();
 }
 
 void fj_store_abort(void) {
+    if (store_tx) {
+        /* Discard any mutations made since fj_store_begin() so a later store
+         * write cannot persist the aborted changes. */
+        memcpy(&store, &tx_store, sizeof(store));
+    }
     store_tx = false;
     store_dirty = false;
+    memset(&tx_store, 0, sizeof(tx_store));
 }
 
 bool fj_keys_flush(void) {

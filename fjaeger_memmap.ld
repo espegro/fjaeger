@@ -244,4 +244,11 @@ SECTIONS
 
     ASSERT( __binary_info_header_end - __logical_binary_start <= 1024, "Binary info must be in first 1024 bytes of the binary")
     ASSERT( __embedded_block_end - __logical_binary_start <= 4096, "Embedded block must be in first 4096 bytes of the binary")
+
+    /* Encrypted MSC partition boundary (src/usb/msc_disk.c derives its
+     * DISK_FLASH_START offset from this symbol). Guard at link time so the
+     * firmware image can never grow into the partition. */
+    __flash_disk_start = 0x10100000;
+    ASSERT(__flash_binary_end <= __flash_disk_start,
+           "fjaeger firmware overlaps encrypted MSC partition")
 }

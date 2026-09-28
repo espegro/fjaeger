@@ -10,6 +10,8 @@
  * The disk key is stored in the same flash store as the PIN/slots/CTAP2
  * records, so changing or erasing key slots no longer affects disk data.
  */
+#include <stdint.h>
+
 #include "tusb.h"
 
 #include "msc_disk.h"
@@ -31,8 +33,11 @@
 
 /* Partition: 12 MiB starting 1 MiB in, leaving room for firmware growth and
  * the store at the very end. DISK_FLASH_START is an OFFSET from XIP_BASE
- * (0x10000000); the absolute address is XIP_BASE + DISK_FLASH_START. */
-#define DISK_FLASH_START       0x00100000u         /* absolute 0x10100000 */
+ * (0x10000000). The absolute address comes from the linker script symbol
+ * (fjaeger_memmap.ld), which also ASSERTs the firmware image ends before the
+ * partition, so the two boundaries stay in sync. */
+extern const char __flash_disk_start;
+#define DISK_FLASH_START ((uint32_t)(uintptr_t)&__flash_disk_start - XIP_BASE)
 #define DISK_FLASH_SIZE        0x00C00000u         /* 12 MiB */
 
 #define DISK_TOTAL_BLOCKS      (DISK_FLASH_SIZE / DISK_BLOCK_SIZE)   /* 3072 */
@@ -245,15 +250,15 @@ static bool read_block_apply(uint32_t idx, uint8_t clear[DISK_BLOCK_SIZE]) {
         if (!fj_xts_sector(disk_key, tweak, clear + s * DISK_SECTOR_SIZE, false))
             return false;
     }
-    /* FJ-003: when a CRC table is loaded, verify this block's CRC before
-     * returning decrypted data, so corrupted blocks are detected rather than
-     * silently served to the host. (CRC-32 is corruption detection, not
-     * cryptographic tamper protection.) Skip the check when there are
-     * unflushed pending writes for the block, whose CRC is not yet stored. */
-    bool pending = wq_apply_to_block(idx, clear);
-    if (crc_valid && !pending && crc32_block(clear) != block_crcs[idx]) {
+    /* FJ-003: when a CRC table is loaded, verify this block's CRC against the
+     * on-flash (decrypted) data BEFORE applying any queued writes, so
+     * pre-existing corruption is never legitimized into a new CRC. (CRC-32 is
+     * corruption detection, not cryptographic tamper protection.) The writes
+     * are applied only after the existing block verifies. */
+    if (crc_valid && crc32_block(clear) != block_crcs[idx]) {
         return false;
     }
+    wq_apply_to_block(idx, clear);
     return true;
 }
 
