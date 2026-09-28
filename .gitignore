@@ -25,3 +25,7 @@
 
 # Security/correctness review notes, kept local (not pushed)
 /findings*.md
+
+# libFuzzer auto-generated corpus files (keep only curated seeds)
+/fuzz/corpus/*
+!/fuzz/corpus/*.seed

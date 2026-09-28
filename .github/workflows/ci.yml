@@ -54,3 +54,31 @@ jobs:
           cc $COMMON -Isrc/core \
             tests/test_hmac.c -o /tmp/fjaeger-test-hmac
           /tmp/fjaeger-test-hmac
+  fuzz:
+    name: Parser fuzzing (FJ-N009)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install clang
+        run: sudo apt-get update && sudo apt-get install -y clang
+
+      - name: Build and run fuzzers (libFuzzer smoke)
+        run: |
+          set -e
+          INC="-Isrc/core -Isrc/fido -Isrc/led"
+          FZ="-std=c11 -Wall -Wextra -Werror -fsanitize=fuzzer,address,undefined"
+          clang $FZ $INC fuzz/fz_cbor.c src/fido/cbor.c -o /tmp/fz_cbor
+          clang $FZ $INC fuzz/fz_ctap2.c src/fido/ctap2.c src/fido/cbor.c src/fido/pin.c fuzz/stubs.c -o /tmp/fz_ctap2
+          /tmp/fz_cbor  -max_len=2048 -runs=20000 fuzz/corpus
+          /tmp/fz_ctap2 -max_len=2048 -runs=20000 fuzz/corpus
+
+      - name: gcc + ASAN driver smoke
+        run: |
+          set -e
+          INC="-Isrc/core -Isrc/fido -Isrc/led"
+          F="-std=c11 -Wall -Wextra -Werror -fsanitize=address,undefined"
+          cc $F $INC fuzz/driver.c fuzz/fz_cbor.c src/fido/cbor.c -o /tmp/drv_cbor
+          cc $F $INC -DFZ_CTAP2 fuzz/driver.c fuzz/fz_ctap2.c src/fido/ctap2.c src/fido/cbor.c src/fido/pin.c fuzz/stubs.c -o /tmp/drv_ctap2
+          /tmp/drv_cbor  fuzz/corpus/*
+          /tmp/drv_ctap2 fuzz/corpus/*
