@@ -72,13 +72,42 @@ bool fj_state_cwk(uint8_t out[32]) {
     return true;
 }
 
+/* Test-only AES-GCM oracle whose tag depends on key, nonce, AAD and data,
+ * so the resident-credential AAD binding is genuinely authenticated in CI
+ * (production uses real mbedTLS AES-GCM). Deterministic, not cryptographic. */
+static uint64_t test_gcm_hash(const uint8_t *key, const uint8_t *nonce,
+                              const uint8_t *aad, size_t aad_len,
+                              const uint8_t *data, size_t len, uint64_t x) {
+    uint64_t h = 0xcbf29ce484222325ull ^ x;
+    size_t i;
+    for (i = 0; i < 32; i++)          { h ^= key[i]; h *= 0x100000001b3ull; }
+    for (i = 0; i < 12; i++)          { h ^= nonce[i]; h *= 0x100000001b3ull; }
+    for (i = 0; i < 8; i++)           { h ^= (uint8_t)(aad_len >> (8 * i)); h *= 0x100000001b3ull; }
+    for (i = 0; i < aad_len; i++)     { h ^= aad[i]; h *= 0x100000001b3ull; }
+    for (i = 0; i < len; i++)         { h ^= data[i]; h *= 0x100000001b3ull; }
+    h ^= h >> 33; h *= 0xff51afd7ed558ccdull; h ^= h >> 33;
+    return h;
+}
+
+static void test_gcm_tag(const uint8_t *key, const uint8_t *nonce,
+                         const uint8_t *aad, size_t aad_len,
+                         const uint8_t *data, size_t len, uint8_t tag[16]) {
+    /* Two seeded hashes (never swap the key/nonce pointers, which would read
+     * past the 12-byte nonce) give a spread across all 16 tag bytes. */
+    uint64_t a = test_gcm_hash(key, nonce, aad, aad_len, data, len, 0x0000000000000000ull);
+    uint64_t b = test_gcm_hash(key, nonce, aad, aad_len, data, len, 0x9e3779b97f4a7c15ull);
+    size_t i;
+    for (i = 0; i < 8; i++) tag[i]     = (uint8_t)(a >> (8 * i));
+    for (i = 0; i < 8; i++) tag[8 + i] = (uint8_t)(b >> (8 * i));
+    tag[15] ^= 0x5a;
+}
+
 bool fj_aes_gcm_encrypt_with_aad(const uint8_t key[32], const uint8_t nonce[12],
                                  const uint8_t *aad, size_t aad_len,
                                  const uint8_t *in, size_t len,
                                  uint8_t *out, uint8_t tag[16]) {
-    (void)key; (void)nonce; (void)aad; (void)aad_len;
     memcpy(out, in, len);
-    memset(tag, 0, 16);
+    test_gcm_tag(key, nonce, aad, aad_len, in, len, tag);
     return true;
 }
 
@@ -86,7 +115,11 @@ bool fj_aes_gcm_decrypt_with_aad(const uint8_t key[32], const uint8_t nonce[12],
                                  const uint8_t tag[16],
                                  const uint8_t *aad, size_t aad_len,
                                  const uint8_t *in, size_t len, uint8_t *out) {
-    (void)key; (void)nonce; (void)tag; (void)aad; (void)aad_len;
+    uint8_t exp[16];
+    int diff = 0;
+    test_gcm_tag(key, nonce, aad, aad_len, in, len, exp);
+    for (size_t i = 0; i < 16; i++) diff |= tag[i] ^ exp[i];
+    if (diff) return false;
     memcpy(out, in, len);
     return true;
 }
@@ -184,6 +217,105 @@ static size_t assertion_request(uint8_t *buf, size_t cap) {
     return w.len + 1;
 }
 
+/* makeCredential request that creates a RESIDENT (rk) credential for "ssh:". */
+static size_t resident_request(uint8_t *buf, size_t cap) {
+    size_t p = 0;
+    buf[p++] = 0x01;                 /* authenticatorMakeCredential */
+    buf[p++] = 0xa6;                 /* map(6) */
+    buf[p++] = 0x01; buf[p++] = 0x58; buf[p++] = 0x20;                /* 1 clientDataHash */
+    for (int i = 0; i < 32; i++) buf[p++] = (uint8_t)(0xAB + i);
+    buf[p++] = 0x02; buf[p++] = 0xa1; buf[p++] = 0x62;                /* 2 rp {id:"ssh:"} */
+    buf[p++] = 'i'; buf[p++] = 'd'; buf[p++] = 0x64;
+    buf[p++] = 's'; buf[p++] = 's'; buf[p++] = 'h'; buf[p++] = ':';
+    buf[p++] = 0x03; buf[p++] = 0xa3;                                /* 3 user */
+    buf[p++] = 0x62; buf[p++] = 'i'; buf[p++] = 'd'; buf[p++] = 0x58; buf[p++] = 0x20;
+    for (int i = 0; i < 32; i++) buf[p++] = 0xCD;
+    buf[p++] = 0x64; memcpy(buf + p, "name", 4); p += 4;
+    buf[p++] = 0x67; memcpy(buf + p, "espegro", 7); p += 7;
+    buf[p++] = 0x6b; memcpy(buf + p, "displayName", 11); p += 11;
+    buf[p++] = 0x67; memcpy(buf + p, "espegro", 7); p += 7;
+    buf[p++] = 0x04; buf[p++] = 0x81; buf[p++] = 0xa2;                /* 4 pubKeyCredParams */
+    buf[p++] = 0x63; memcpy(buf + p, "alg", 3); p += 3;
+    buf[p++] = 0x26;                                                 /* alg -7 */
+    buf[p++] = 0x64; memcpy(buf + p, "type", 4); p += 4;
+    buf[p++] = 0x6a; memcpy(buf + p, "public-key", 10); p += 10;
+    buf[p++] = 0x05; buf[p++] = 0x80;                                /* 5 excludeList [] */
+    buf[p++] = 0x07; buf[p++] = 0xa1; buf[p++] = 0x62;               /* 7 options {"rk":true} */
+    buf[p++] = 'r'; buf[p++] = 'k'; buf[p++] = 0xf5;
+    assert(p <= cap);
+    return p;
+}
+
+/* Discovery getAssertion (no allowList) for resident lookup by RP "ssh:". */
+static size_t discovery_request(uint8_t *buf, size_t cap) {
+    uint8_t hash[32];
+    for (int i = 0; i < 32; i++) hash[i] = (uint8_t)i;
+    fj_cbor_writer w;
+    fj_cbor_writer_init(&w, buf + 1, cap - 1);
+    buf[0] = 0x02;
+    fj_cbor_map(&w, 2);
+    fj_cbor_uint(&w, 1); fj_cbor_tstr(&w, "ssh:");
+    fj_cbor_uint(&w, 2); fj_cbor_bstr(&w, hash, sizeof(hash));
+    assert(fj_cbor_ok(&w));
+    return w.len + 1;
+}
+
+/* getAssertion with an allowList carrying the given credential id. */
+static size_t allow_request(uint8_t *buf, size_t cap, const uint8_t *id) {
+    uint8_t hash[32];
+    for (int i = 0; i < 32; i++) hash[i] = (uint8_t)i;
+    fj_cbor_writer w;
+    fj_cbor_writer_init(&w, buf + 1, cap - 1);
+    buf[0] = 0x02;
+    fj_cbor_map(&w, 3);
+    fj_cbor_uint(&w, 1); fj_cbor_tstr(&w, "ssh:");
+    fj_cbor_uint(&w, 2); fj_cbor_bstr(&w, hash, sizeof(hash));
+    fj_cbor_uint(&w, 3); fj_cbor_array(&w, 1); fj_cbor_map(&w, 2);
+    fj_cbor_tstr(&w, "type"); fj_cbor_tstr(&w, "public-key");
+    fj_cbor_tstr(&w, "id"); fj_cbor_bstr(&w, id, FJ_CRED_ID_LEN);
+    assert(fj_cbor_ok(&w));
+    return w.len + 1;
+}
+
+/* Resident AAD regression (FJ-N001): enroll a resident key, persist, reload,
+ * sign, and verify that each AAD-bound immutable field is authenticated. */
+static void test_resident_aad(void) {
+    uint8_t request[512], response[512];
+    uint8_t saved[sizeof(persisted[0])];
+    size_t len;
+
+    memset(persisted, 0, sizeof(persisted));
+    fj_ctap2_init();
+
+    /* enroll a resident credential and persist it */
+    len = resident_request(request, sizeof(request));
+    len = fj_ctap2_dispatch(request, len, response, sizeof(response));
+    assert(len > 1 && response[0] == 0);          /* makeCredential ok */
+    fj_ctap2_task();                               /* persist to flash store */
+    assert(persisted[0].in_use && persisted[0].resident);
+
+    /* sign before reload */
+    len = discovery_request(request, sizeof(request));
+    len = fj_ctap2_dispatch(request, len, response, sizeof(response));
+    assert(len > 1 && response[0] == 0);
+
+    /* reload from flash, then sign again (decrypt must succeed) */
+    fj_ctap2_init();
+    len = discovery_request(request, sizeof(request));
+    len = fj_ctap2_dispatch(request, len, response, sizeof(response));
+    assert(len > 1 && response[0] == 0);
+
+#define FJ_TAMPER(expr) do {         memcpy(saved, &persisted[0], sizeof(saved));         (expr);                                              fj_ctap2_init();                                     len = allow_request(request, sizeof(request), persisted[0].credential_id);         len = fj_ctap2_dispatch(request, len, response, sizeof(response));         assert(len == 1 && response[0] != 0);        /* binding/reject */         memcpy(&persisted[0], saved, sizeof(saved)); /* restore */         fj_ctap2_init();                                     len = discovery_request(request, sizeof(request));         len = fj_ctap2_dispatch(request, len, response, sizeof(response));         assert(len > 1 && response[0] == 0);         /* still works */     } while (0)
+
+    FJ_TAMPER(persisted[0].public_key[1] ^= 0x01);   /* GCM auth fail */
+    FJ_TAMPER(persisted[0].resident = 0);            /* GCM auth fail */
+    FJ_TAMPER(persisted[0].rp_id_hash[0] ^= 0x01);   /* lookup reject */
+    FJ_TAMPER(persisted[0].profile_id = 9);          /* lookup reject */
+#undef FJ_TAMPER
+
+    puts("resident AAD round-trip + tamper: ok");
+}
+
 static void assert_response_map(const uint8_t *response, size_t len,
                                 size_t expected_pairs) {
     assert(len > 1 && response[0] == 0);
@@ -220,6 +352,8 @@ int main(void) {
     assert(len > 7);
     assert(response[2] == 0x01 && response[3] == 0xa2);
     assert(response[4] == 0x62 && response[5] == 'i' && response[6] == 'd');
+
+    test_resident_aad();
 
     /* Factory reset must invalidate the live credential cache immediately,
      * without waiting for a reboot. */
