@@ -631,6 +631,11 @@ static size_t make_credential(const uint8_t *req, size_t len,
     /* Bind the private key to its immutable metadata via AES-GCM AAD, so
      * later tampering with those fields fails decryption (FJ-006). */
     memcpy(cr->rp_id_hash, rp_id_hash, FJ_HASH_LEN);
+    /* Record the resident flag before the AAD bind: cred_build_aad() commits
+     * it to the GCM AAD, and cred_decrypt_private() later rebuilds the same
+     * AAD from the persisted flag. Setting it only after encryption made the
+     * AADs diverge for resident credentials, so every sign failed the tag. */
+    cr->resident = resident;
     fj_random(cr->private_key_nonce, sizeof(cr->private_key_nonce));
     uint8_t aad[128];
     size_t aad_len = cred_build_aad(cr, aad);
@@ -650,7 +655,6 @@ static size_t make_credential(const uint8_t *req, size_t len,
         cr->rp_len = (uint8_t)rp_id_len;
         memcpy(cr->user_id, user_id, user_id_len);
         cr->user_id_len = (uint8_t)user_id_len;
-        cr->resident = true;
     }
     cr->in_use = true;
 
