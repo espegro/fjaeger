@@ -39,6 +39,9 @@ findings; `TODO.md` is the active roadmap.
 
 ## P8 – FJ-N008 document user-presence  ✅ DONE
 - Document global-unlock = authorization boundary; LED is feedback, not presence. No code change (by design).
+- Document the CTAP2 challenge-response boundary: the host supplies
+  `clientDataHash`, Fjaeger signs `authenticatorData || clientDataHash`, and
+  no separate custom serial challenge command is provided.
 
 ## P9 – FJ-N010 README terminology  ✅ DONE
 - Replace stale "CTAP2 PIN reuses device PIN" wording with unlock passphrase / CTAP2 PIN / disk PIN / PUK.

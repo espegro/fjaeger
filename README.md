@@ -380,7 +380,7 @@ The same association is visible directly on the serial console:
 
 ```text
 fjaeger> CREDS LIST
-  [00] type=ed25519-sk application=ssh:github resident=yes id=a1b2...
+  [00] type=ed25519-sk application=ssh:github resident=yes fp=SHA256:... id=a1b2...
 ```
 
 For a non-resident credential, Fjaeger stores only the application/RP hash;
@@ -389,12 +389,21 @@ retains the clear-text application in that case.
 
 ### How a key signs (authentication)
 
-On login, OpenSSH sends `getAssertion` with the credential ID in an allowList.
-The dongle:
+This is a CTAP2 challenge-response exchange. OpenSSH sends `getAssertion` with
+the RP/application, a fresh `clientDataHash` challenge and (for a non-resident
+key) the credential ID in an allowList. The dongle:
+
 1. **verifies the credential is in the active profile** — if the wrong profile
    is selected, signing is denied even though the PC has the right key file;
-2. signs `authData || clientDataHash` with the stored private key;
-3. returns the DER signature to the PC, which forwards it to the host.
+2. builds `authenticatorData` containing the RP hash, flags and sign counter;
+3. signs `authenticatorData || clientDataHash` with the stored private key;
+4. returns the signature to the PC, which verifies it with the public key and
+   forwards the result to the host. ES256 uses DER encoding; Ed25519 returns
+   its raw 64-byte signature.
+
+Fjaeger does not expose a separate custom serial challenge-response command;
+the supported challenge-response interface is CTAP2/FIDO2 (and therefore
+OpenSSH's security-key protocol).
 
 ```bash
 ssh -i ~/.ssh/id_ecdsa_sk -o ControlPath=none user@host
