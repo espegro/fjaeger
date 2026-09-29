@@ -13,7 +13,7 @@
  * Each update erases and programs only the older copy. A generation number
  * and CRC select the newest complete record after a reset or power loss. */
 #define STORE_MAGIC   0x464A5345u /* "FJSE" */
-#define STORE_VERSION 15u
+#define STORE_VERSION 16u
 #define FLASH_OFFSET_BYTES (PICO_FLASH_SIZE_BYTES - (2 * FLASH_SECTOR_SIZE))
 
 typedef struct {

@@ -432,7 +432,6 @@ static bool boot_sector_valid(void) {
 #define FAT_FREE           0x0000
 #define ROOT_ENTRY_SIZE    32
 #define ROOT_ENTRIES       (32 * DISK_SECTOR_SIZE / ROOT_ENTRY_SIZE) /* 512 */
-#define MAX_BACKUP_SIZE    4096
 
 static bool read_sector_raw(uint32_t lba, uint8_t out[DISK_SECTOR_SIZE]) {
     uint8_t clear[DISK_BLOCK_SIZE];
@@ -542,7 +541,7 @@ bool fj_msc_backup_exists(void) {
 
 bool fj_msc_backup_write(const uint8_t *data, size_t len) {
     if (!disk_ready || !fs_initialised) return false;
-    if (!data || len == 0 || len > MAX_BACKUP_SIZE) return false;
+    if (!data || len == 0 || len > FJ_MSC_BACKUP_MAX) return false;
     flush_pending_writes();
 
     uint32_t clusters = (uint32_t)((len + DISK_SECTOR_SIZE - 1) / DISK_SECTOR_SIZE);
@@ -624,7 +623,7 @@ bool fj_msc_backup_read(uint8_t *out, size_t cap, size_t *len) {
     uint32_t size = (uint32_t)e[28] | ((uint32_t)e[29] << 8) |
                     ((uint32_t)e[30] << 16) | ((uint32_t)e[31] << 24);
     uint32_t first = (uint32_t)e[26] | ((uint32_t)e[27] << 8);
-    if (first < 2 || size == 0 || size > MAX_BACKUP_SIZE) return false;
+    if (first < 2 || size == 0 || size > FJ_MSC_BACKUP_MAX) return false;
     if (cap < size) return false;
 
     uint32_t clusters = (size + DISK_SECTOR_SIZE - 1) / DISK_SECTOR_SIZE;

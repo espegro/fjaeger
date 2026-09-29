@@ -43,7 +43,7 @@ extern "C" {
 #define FJ_MAX_PUK_FAILS  5
 
 /* CTAP2 credential store size. */
-#define FJ_CTAP2_CREDS     8
+#define FJ_CTAP2_CREDS     12
 #define FJ_CRED_ID_LEN     16
 #define FJ_USER_ID_LEN     32
 #define FJ_RP_MAX          64

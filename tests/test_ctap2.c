@@ -383,6 +383,28 @@ static void test_ed25519_credential(void) {
     assert(found_signature);
 }
 
+static void test_credential_capacity(void) {
+    uint8_t request[512], response[512];
+    memset(persisted, 0, sizeof(persisted));
+    fj_ctap2_init();
+
+    for (unsigned i = 0; i < FJ_CTAP2_CREDS; i++) {
+        size_t len = resident_request(request, sizeof(request), (i & 1u) != 0);
+        len = fj_ctap2_dispatch(request, len, response, sizeof(response));
+        assert(len > 1 && response[0] == 0);
+    }
+    fj_ctap2_task();
+    for (unsigned i = 0; i < FJ_CTAP2_CREDS; i++)
+        assert(persisted[i].in_use);
+
+    /* Slot 13 must fail without replacing any of the twelve stored keys. */
+    size_t len = resident_request(request, sizeof(request), false);
+    len = fj_ctap2_dispatch(request, len, response, sizeof(response));
+    assert(len == 1 && response[0] != 0);
+    for (unsigned i = 0; i < FJ_CTAP2_CREDS; i++)
+        assert(persisted[i].in_use);
+}
+
 static void assert_response_map(const uint8_t *response, size_t len,
                                 size_t expected_pairs) {
     assert(len > 1 && response[0] == 0);
@@ -469,6 +491,7 @@ int main(void) {
 
     test_resident_aad();
     test_ed25519_credential();
+    test_credential_capacity();
 
     /* Factory reset must invalidate the live credential cache immediately,
      * without waiting for a reboot. */

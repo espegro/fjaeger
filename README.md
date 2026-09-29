@@ -307,7 +307,7 @@ operations are allowed.
   but it only works when the correct profile is selected.
 - A profile is **not** a shared key — each credential has its own random
   P-256 key.
-- CTAP2 credentials are stored in flash (up to 8) in a CRC-checked A/B format,
+- CTAP2 credentials are stored in flash (up to 12) in a CRC-checked A/B format,
   written defer-ably from the main loop. Attestation is `none`. Deleting a
   profile makes its credentials unusable; a factory wipe (5 wrong PUKs) deletes
   all profiles and credentials.
@@ -402,7 +402,7 @@ ssh-keygen -Y verify -f allowed_signers -I <name> -n test -s file.txt.sig < file
   - **ECDSA P-256 / ES256** and **Ed25519 / EdDSA** credentials are supported.
   - The device must be unlocked (passphrase) for `makeCredential`/`getAssertion` to be
     accepted.
-  - Credentials are flash-persistent (up to 8) in a CRC-checked A/B format,
+  - Credentials are flash-persistent (up to 12) in a CRC-checked A/B format,
     written defer-ably from the main loop.
   - The CTAP2 client PIN is **independent** of the unlock passphrase: with no
     CTAP2 PIN set any PIN is accepted (so `ssh-keygen -K` works on a fresh

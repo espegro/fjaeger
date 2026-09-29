@@ -287,7 +287,7 @@ void fj_state_brute_success(fj_brute_ctx_t ctx) {
 /* Backup / restore                                                    */
 /* ------------------------------------------------------------------ */
 #define BACKUP_MAGIC    0x464A4255u   /* "FJBU" */
-#define BACKUP_VERSION  1u
+#define BACKUP_VERSION  2u
 #define BACKUP_SALT_LEN 16
 #define BACKUP_NONCE_LEN 12
 #define BACKUP_TAG_LEN  16
@@ -295,6 +295,11 @@ void fj_state_brute_success(fj_brute_ctx_t ctx) {
  * The AES-GCM tag follows the ciphertext. */
 #define BACKUP_HEADER   (4 + 1 + BACKUP_SALT_LEN + BACKUP_NONCE_LEN)
 #define BACKUP_TOTAL(payload_sz) (BACKUP_HEADER + (payload_sz) + BACKUP_TAG_LEN)
+
+_Static_assert(BACKUP_TOTAL(sizeof(fj_backup_payload_t)) <= FJ_BLOB_MAX,
+               "backup payload must fit the cooperative-job blob");
+_Static_assert(BACKUP_TOTAL(sizeof(fj_backup_payload_t)) <= FJ_MSC_BACKUP_MAX,
+               "backup payload must fit the MSC backup file");
 
 /* Backup file on the disk: magic(4) || version(1) || salt(16) || nonce(12)
  * || tag(16) || AES-GCM(payload). The key is PBKDF2(password, salt). */

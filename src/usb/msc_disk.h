@@ -11,6 +11,8 @@
 extern "C" {
 #endif
 
+#define FJ_MSC_BACKUP_MAX 4096u
+
 /* Prepare the encrypted backing store. Call once at startup. */
 void fj_msc_init(void);
 
@@ -53,7 +55,7 @@ void fj_msc_task(void);
 /* Backup / restore a small encrypted blob as a FAT file ("FJAEGER.BAK").
  *
  * fj_msc_backup_write() creates/overwrites the file with 'len' bytes (must
- * be non-zero and <= 4096). fj_msc_backup_read() reads it back into 'out'
+ * be non-zero and <= FJ_MSC_BACKUP_MAX). fj_msc_backup_read() reads it back into 'out'
  * (capacity 'cap'); on success *len is set to the file size. Callers must
  * have flushed pending writes first; these functions flush internally.
  *
