@@ -34,6 +34,7 @@
 #include "hardware/watchdog.h"
 
 #include "state.h"
+#include "crypto.h"
 #include "keys.h"
 #include "job.h"
 #include "ctap2.h"
@@ -717,10 +718,69 @@ static const char *credential_type(const fj_ctap2_cred_t *cred) {
     return "unknown";
 }
 
+static bool ssh_wire_string(uint8_t *buf, size_t cap, size_t *pos,
+                            const uint8_t *value, size_t len) {
+    if (len > UINT32_MAX || *pos > cap - 4 || len > cap - *pos - 4)
+        return false;
+    uint32_t n = (uint32_t)len;
+    buf[(*pos)++] = (uint8_t)(n >> 24);
+    buf[(*pos)++] = (uint8_t)(n >> 16);
+    buf[(*pos)++] = (uint8_t)(n >> 8);
+    buf[(*pos)++] = (uint8_t)n;
+    memcpy(buf + *pos, value, len);
+    *pos += len;
+    return true;
+}
+
+/* Return the base64(SHA256(SSH public-key blob)) portion of an OpenSSH
+ * fingerprint. The application is part of an SSH security-key public blob,
+ * so a non-resident credential cannot have a matching fingerprint here: its
+ * clear-text application lives only in the OpenSSH stub. */
+static bool ssh_fingerprint(const fj_ctap2_cred_t *cred, char out[44]) {
+    static const char b64[] =
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    static const uint8_t ed_type[] = "sk-ssh-ed25519@openssh.com";
+    static const uint8_t ec_type[] = "sk-ecdsa-sha2-nistp256@openssh.com";
+    static const uint8_t curve[] = "nistp256";
+    uint8_t blob[192], digest[32];
+    size_t pos = 0;
+    size_t app_len = cred->rp_len;
+    if (app_len == 0 || app_len > FJ_RP_MAX) return false;
+
+    if (cred->public_key[0] == FJ_PUBKEY_ED25519) {
+        if (!ssh_wire_string(blob, sizeof(blob), &pos, ed_type,
+                             sizeof(ed_type) - 1) ||
+            !ssh_wire_string(blob, sizeof(blob), &pos, cred->public_key + 1, 32))
+            return false;
+    } else if (cred->public_key[0] == FJ_PUBKEY_P256) {
+        if (!ssh_wire_string(blob, sizeof(blob), &pos, ec_type,
+                             sizeof(ec_type) - 1) ||
+            !ssh_wire_string(blob, sizeof(blob), &pos, curve, sizeof(curve) - 1) ||
+            !ssh_wire_string(blob, sizeof(blob), &pos, cred->public_key + 1, 65))
+            return false;
+    } else {
+        return false;
+    }
+    if (!ssh_wire_string(blob, sizeof(blob), &pos, cred->rp, app_len)) return false;
+    fj_sha256(blob, pos, digest);
+    size_t o = 0;
+    for (size_t i = 0; i < sizeof(digest); i += 3) {
+        uint32_t v = (uint32_t)digest[i] << 16;
+        if (i + 1 < sizeof(digest)) v |= (uint32_t)digest[i + 1] << 8;
+        if (i + 2 < sizeof(digest)) v |= digest[i + 2];
+        out[o++] = b64[(v >> 18) & 63];
+        out[o++] = b64[(v >> 12) & 63];
+        out[o++] = i + 1 < sizeof(digest) ? b64[(v >> 6) & 63] : '=';
+        out[o++] = i + 2 < sizeof(digest) ? b64[v & 63] : '=';
+    }
+    out[43] = '\0'; /* OpenSSH omits the final '=' padding for SHA-256. */
+    return true;
+}
+
 /* CREDS LIST / CREDS DEL <hex-id> — manage the credentials in the ACTIVE
  * profile only. */
 static void cmd_creds(const char *sub, char *rest) {
-    char buf[160];
+    char buf[224];
     if (!sub) { outln("ERR CREDS requires subcommand (LIST|DEL)"); return; }
 
     if (strcasecmp(sub, "list") == 0) {
@@ -739,16 +799,19 @@ static void cmd_creds(const char *sub, char *rest) {
                 int application_len = creds[i].rp_len <= FJ_RP_MAX
                                           ? (int)creds[i].rp_len
                                           : FJ_RP_MAX;
+                char fingerprint[44];
+                bool have_fingerprint = ssh_fingerprint(&creds[i], fingerprint);
                 snprintf(buf, sizeof(buf),
-                         "  [%02u] type=%s application=%.*s resident=%s id=%s",
+                         "  [%02u] type=%s application=%.*s resident=%s fp=%s id=%s",
                          i, credential_type(&creds[i]), application_len,
                          (const char *)creds[i].rp,
-                         creds[i].resident ? "yes" : "no", idhex);
+                         creds[i].resident ? "yes" : "no",
+                         have_fingerprint ? fingerprint : "<unavailable>", idhex);
             } else {
                 /* Non-resident credentials retain only the RP hash; their
                  * clear-text application is held by the OpenSSH key stub. */
                 snprintf(buf, sizeof(buf),
-                         "  [%02u] type=%s application=<not-stored> resident=%s id=%s",
+                         "  [%02u] type=%s application=<not-stored> resident=%s fp=<unavailable> id=%s",
                          i, credential_type(&creds[i]),
                          creds[i].resident ? "yes" : "no", idhex);
             }
