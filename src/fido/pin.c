@@ -42,7 +42,8 @@ static uint8_t pin_token[FJ_PIN_TOKEN_LEN];   /* the pinUvAuthToken */
 static bool    token_valid = false;
 
 void fj_pin_init(void) {
-    fj_random(auth_priv, sizeof(auth_priv));
+    if (!fj_ecdsa_generate_private(auth_priv))
+        memset(auth_priv, 0, sizeof(auth_priv));
     fj_random(pin_token, sizeof(pin_token));
     token_valid = true;
 }
@@ -77,8 +78,12 @@ static void encode_cose_ecdh(uint8_t *out, size_t cap, const uint8_t pub[65],
 static bool compute_shared_secret(const uint8_t platform_pub[65],
                                   uint8_t secret[32]) {
     uint8_t z[32];
-    if (!fj_ecdh_shared_secret(auth_priv, platform_pub, z)) return false;
+    if (!fj_ecdh_shared_secret(auth_priv, platform_pub, z)) {
+        fj_secure_zero(z, sizeof(z));
+        return false;
+    }
     fj_sha256(z, sizeof(z), secret);
+    fj_secure_zero(z, sizeof(z));
     return true;
 }
 
@@ -288,7 +293,8 @@ size_t fj_ctap2_client_pin(const uint8_t *req, size_t len,
             /* getKeyAgreement requires pinUvAuthProtocol to be present. */
             if (!proto_ok) return ctap_err(out, cap, ERR_MISSING_PARAMETER);
             /* Regenerate the ephemeral key so each transaction is fresh. */
-            fj_random(auth_priv, sizeof(auth_priv));
+            if (!fj_ecdsa_generate_private(auth_priv))
+                return ctap_err(out, cap, ERR_INVALID_PARAMETER);
             uint8_t pub[65];
             if (!fj_ecdsa_pubkey(auth_priv, pub))
                 return ctap_err(out, cap, ERR_INVALID_PARAMETER);

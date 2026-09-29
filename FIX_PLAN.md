@@ -1,7 +1,7 @@
 # Fjaeger – fix plan (from findings-current.md)
 
-Reviewed: 595ac91. All findings except N004(full) and N009(fuzz) are fixed
-and pushed (main now includes e0eee9e..e7cbf9a). Status below.
+Originally reviewed at 595ac91. This file now records the disposition of the
+findings; `TODO.md` is the active roadmap.
 
 ## P1 – FJ-N001 regression (close the test gap) [+ FJ-N009 portion]  ✅ DONE
 - Make the host-test AES-GCM stub AAD-sensitive (tag depends on key/nonce/AAD/plaintext; decrypt recomputes+compares before returning plaintext).
@@ -28,14 +28,14 @@ and pushed (main now includes e0eee9e..e7cbf9a). Status below.
 ## P6 – FJ-N007 explicit disk recovery command  ✅ DONE
 - `DISK FORMAT YES` (unlocked, disk key unwrapped, confirmation token), fail-closed otherwise; no implicit format from DISK UNLOCK.
 
-## P7 – FJ-N004 credProtect  ⏸ DEFERRED (removal reverted)
+## P7 – FJ-N004 credProtect  ✅ ACCEPTED POC DESIGN CONSTRAINT
 - Status: REMOVAL IS NOT VIABLE. Removing credProtect from GetInfo made
   `ssh-keygen -O resident` fail ("requested feature not supported") — OpenSSH
   requires the extension to permit resident keys. Advertisement restored so
   resident-enroll works.
-- Open: implement credProtect (parse extensions 0x06 -> per-credential policy
-  persisted in the AAD; enforce UV policies in getAssertion). Deferred; needs
-  a real UV path or explicit UV-required rejection.
+- Full policy enforcement is deliberately out of scope for the selected
+  OpenSSH POC flow: global device unlock is its authorization boundary and the
+  device has no internal UV mechanism. Revisit if that security model changes.
 
 ## P8 – FJ-N008 document user-presence  ✅ DONE
 - Document global-unlock = authorization boundary; LED is feedback, not presence. No code change (by design).
@@ -43,5 +43,7 @@ and pushed (main now includes e0eee9e..e7cbf9a). Status below.
 ## P9 – FJ-N010 README terminology  ✅ DONE
 - Replace stale "CTAP2 PIN reuses device PIN" wording with unlock passphrase / CTAP2 PIN / disk PIN / PUK.
 
-## P10 – FJ-N009 remainder + fuzzing  🔄 IN PROGRESS (AAD stub done; fuzz harnesses next)
-- Parser fuzz targets (cbor, CTAPHID, makeCredential, getAssertion, ClientPIN, credMgmt); keep ASAN/UBSAN.
+## P10 – FJ-N009 parser fuzzing  ✅ DONE (CTAPHID expansion remains optional)
+- CBOR and CTAP2 command fuzz targets run under libFuzzer+ASAN+UBSAN and a GCC
+  sanitizer driver in CI. A dedicated CTAPHID transport target remains on the
+  active roadmap as an additional coverage improvement.

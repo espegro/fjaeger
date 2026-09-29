@@ -21,7 +21,6 @@
 
 # Development log files, kept local (not pushed)
 /STATUS.md
-/TODO.md
 
 # Security/correctness review notes, kept local (not pushed)
 /findings*.md

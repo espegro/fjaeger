@@ -12,8 +12,11 @@
 
 static fj_ctap2_cred_t persisted[FJ_CTAP2_CREDS];
 static uint8_t random_byte = 1;
+static bool ctap2_pin_configured = true;
+static unsigned ed25519_sign_count = 0;
 
 fj_state_t fj_state_get(void) { return FJ_STATE_UNLOCKED; }
+bool fj_state_ctap2_pin_configured(void) { return ctap2_pin_configured; }
 
 void fj_state_brute_success(fj_brute_ctx_t ctx) { (void)ctx; }
 void fj_state_brute_failure(fj_brute_ctx_t ctx) { (void)ctx; }
@@ -176,6 +179,20 @@ bool fj_ecdsa_signature_der(const uint8_t signature[64], uint8_t *out,
     return true;
 }
 
+bool fj_ed25519_generate(uint8_t seed[32], uint8_t public_key[32]) {
+    memset(seed, 0x55, 32);
+    memset(public_key, 0x66, 32);
+    return true;
+}
+
+bool fj_ed25519_sign(const uint8_t seed[32], const uint8_t *message,
+                     size_t message_len, uint8_t signature[64]) {
+    (void)seed; (void)message; (void)message_len;
+    memset(signature, 0x77, 64);
+    ed25519_sign_count++;
+    return true;
+}
+
 static size_t make_request(uint8_t *buf, size_t cap) {
     uint8_t hash[32] = {0};
     uint8_t user_id[32] = {0};
@@ -218,7 +235,7 @@ static size_t assertion_request(uint8_t *buf, size_t cap) {
 }
 
 /* makeCredential request that creates a RESIDENT (rk) credential for "ssh:". */
-static size_t resident_request(uint8_t *buf, size_t cap) {
+static size_t resident_request(uint8_t *buf, size_t cap, bool ed25519) {
     size_t p = 0;
     buf[p++] = 0x01;                 /* authenticatorMakeCredential */
     buf[p++] = 0xa6;                 /* map(6) */
@@ -236,7 +253,7 @@ static size_t resident_request(uint8_t *buf, size_t cap) {
     buf[p++] = 0x67; memcpy(buf + p, "espegro", 7); p += 7;
     buf[p++] = 0x04; buf[p++] = 0x81; buf[p++] = 0xa2;                /* 4 pubKeyCredParams */
     buf[p++] = 0x63; memcpy(buf + p, "alg", 3); p += 3;
-    buf[p++] = 0x26;                                                 /* alg -7 */
+    buf[p++] = ed25519 ? 0x27 : 0x26;                    /* alg -8 / -7 */
     buf[p++] = 0x64; memcpy(buf + p, "type", 4); p += 4;
     buf[p++] = 0x6a; memcpy(buf + p, "public-key", 10); p += 10;
     buf[p++] = 0x05; buf[p++] = 0x80;                                /* 5 excludeList [] */
@@ -288,7 +305,7 @@ static void test_resident_aad(void) {
     fj_ctap2_init();
 
     /* enroll a resident credential and persist it */
-    len = resident_request(request, sizeof(request));
+    len = resident_request(request, sizeof(request), false);
     len = fj_ctap2_dispatch(request, len, response, sizeof(response));
     assert(len > 1 && response[0] == 0);          /* makeCredential ok */
     fj_ctap2_task();                               /* persist to flash store */
@@ -330,6 +347,42 @@ static void test_resident_aad(void) {
     puts("resident AAD round-trip + tamper: ok");
 }
 
+static void test_ed25519_credential(void) {
+    uint8_t request[512], response[512];
+    memset(persisted, 0, sizeof(persisted));
+    ed25519_sign_count = 0;
+    fj_ctap2_init();
+
+    size_t len = resident_request(request, sizeof(request), true);
+    len = fj_ctap2_dispatch(request, len, response, sizeof(response));
+    assert(len > 1 && response[0] == 0);
+    fj_ctap2_task();
+    assert(persisted[0].in_use && persisted[0].public_key[0] == 0xed);
+
+    len = discovery_request(request, sizeof(request));
+    len = fj_ctap2_dispatch(request, len, response, sizeof(response));
+    assert(len > 1 && response[0] == 0);
+    assert(ed25519_sign_count == 1);
+
+    /* Ed25519 assertions carry a raw 64-byte signature, not ECDSA DER. */
+    fj_cbor_reader r;
+    fj_cbor_item root;
+    fj_cbor_reader_init(&r, response + 1, len - 1);
+    assert(fj_cbor_next(&r, &root) && root.type == FJ_CBOR_MAP);
+    bool found_signature = false;
+    for (uint64_t i = 0; i < root.val; i++) {
+        fj_cbor_item key, value;
+        assert(fj_cbor_next(&r, &key));
+        assert(fj_cbor_next(&r, &value));
+        if (key.type == FJ_CBOR_UINT && key.val == 3) {
+            assert(value.type == FJ_CBOR_BSTR && value.val == 64);
+            found_signature = true;
+        }
+        assert(fj_cbor_skip(&r, &value));
+    }
+    assert(found_signature);
+}
+
 static void assert_response_map(const uint8_t *response, size_t len,
                                 size_t expected_pairs) {
     assert(len > 1 && response[0] == 0);
@@ -340,6 +393,46 @@ static void assert_response_map(const uint8_t *response, size_t len,
     assert(item.type == FJ_CBOR_MAP && item.val == expected_pairs);
 }
 
+static void assert_get_info_client_pin(const uint8_t *response, size_t len,
+                                       bool expected) {
+    static const uint8_t key[] = {0x69, 'c', 'l', 'i', 'e', 'n', 't', 'P', 'i', 'n'};
+    for (size_t i = 0; i + sizeof(key) < len; i++) {
+        if (memcmp(response + i, key, sizeof(key)) == 0) {
+            assert(response[i + sizeof(key)] == (expected ? 0xf5 : 0xf4));
+            return;
+        }
+    }
+    assert(!"clientPin missing from GetInfo");
+}
+
+static void test_cbor_limits(void) {
+    uint8_t nested[FJ_CBOR_MAX_DEPTH + 2];
+    fj_cbor_reader r;
+    fj_cbor_item item;
+
+    /* Exactly the configured number of nested containers is accepted. */
+    memset(nested, 0x81, FJ_CBOR_MAX_DEPTH);
+    nested[FJ_CBOR_MAX_DEPTH] = 0xf6; /* null */
+    fj_cbor_reader_init(&r, nested, FJ_CBOR_MAX_DEPTH + 1);
+    assert(fj_cbor_next(&r, &item));
+    assert(fj_cbor_skip(&r, &item));
+
+    /* One more level is rejected before it can consume unbounded stack. */
+    memset(nested, 0x81, FJ_CBOR_MAX_DEPTH + 1);
+    nested[FJ_CBOR_MAX_DEPTH + 1] = 0xf6;
+    fj_cbor_reader_init(&r, nested, sizeof(nested));
+    assert(fj_cbor_next(&r, &item));
+    assert(!fj_cbor_skip(&r, &item));
+
+    /* A declared payload larger than the input must never wrap a size check. */
+    static const uint8_t huge_bstr[] = {
+        0x5b, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff
+    };
+    fj_cbor_reader_init(&r, huge_bstr, sizeof(huge_bstr));
+    assert(fj_cbor_next(&r, &item));
+    assert(!fj_cbor_skip(&r, &item));
+}
+
 int main(void) {
     uint8_t request[512];
     uint8_t response[512];
@@ -348,9 +441,16 @@ int main(void) {
     memset(persisted, 0, sizeof(persisted));
     fj_ctap2_init();
 
+    test_cbor_limits();
+
     request[0] = 0x04;
+    ctap2_pin_configured = false;
     len = fj_ctap2_dispatch(request, 1, response, sizeof(response));
     assert_response_map(response, len, 6);
+    assert_get_info_client_pin(response, len, false);
+    ctap2_pin_configured = true;
+    len = fj_ctap2_dispatch(request, 1, response, sizeof(response));
+    assert_get_info_client_pin(response, len, true);
 
     size_t request_len = make_request(request, sizeof(request));
     len = fj_ctap2_dispatch(request, request_len, response, sizeof(response));
@@ -368,6 +468,7 @@ int main(void) {
     assert(response[4] == 0x62 && response[5] == 'i' && response[6] == 'd');
 
     test_resident_aad();
+    test_ed25519_credential();
 
     /* Factory reset must invalidate the live credential cache immediately,
      * without waiting for a reboot. */

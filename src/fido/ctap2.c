@@ -6,6 +6,7 @@
 #include "ctap2.h"
 #include "cbor.h"
 #include "crypto.h"
+#include "ed25519.h"
 #include "keys.h"
 #include "pin.h"
 #include "state.h"
@@ -14,7 +15,6 @@
 /* ------------------------------------------------------------------ */
 /* CTAP2 command bytes                                                 */
 /* ------------------------------------------------------------------ */
-#define CMD_MAKE_CREDENTIAL 0x01
 #define CMD_MAKE_CREDENTIAL 0x01
 #define CMD_GET_ASSERTION   0x02
 #define CMD_GET_INFO        0x04
@@ -56,9 +56,20 @@
 #define K_SIGNATURE        0x03
 #define K_USER_ENTITY      0x04
 
-/* COSE algorithm ES256 (ECDSA P-256 w/ SHA-256) */
+/* Supported COSE algorithms and the in-store public-key representation. The
+ * existing 65-byte field remains layout-compatible: uncompressed P-256 keys
+ * already start with 0x04; Ed25519 uses an explicit marker plus its 32 bytes. */
 #define COSE_ES256 (-7)
+#define COSE_EDDSA (-8)
 #define COSE_ALG_KEY 3
+#define FJ_PUBKEY_P256    0x04
+#define FJ_PUBKEY_ED25519 0xed
+
+typedef enum {
+    FJ_CRED_ALG_NONE = 0,
+    FJ_CRED_ALG_ES256,
+    FJ_CRED_ALG_ED25519,
+} fj_cred_alg_t;
 
 /* ------------------------------------------------------------------ */
 /* Credential store (persisted in flash via keys.c)                    */
@@ -120,6 +131,12 @@ static uint8_t work_signature_raw[64];
 static uint8_t work_signature_der[80];
 static uint8_t work_priv[FJ_ECDSA_KEY_BYTES];  /* decrypted private scalar */
 
+static fj_cred_alg_t credential_algorithm(const fj_ctap2_cred_t *cr) {
+    if (cr->public_key[0] == FJ_PUBKEY_P256) return FJ_CRED_ALG_ES256;
+    if (cr->public_key[0] == FJ_PUBKEY_ED25519) return FJ_CRED_ALG_ED25519;
+    return FJ_CRED_ALG_NONE;
+}
+
 static size_t ctap_error(uint8_t *out, size_t cap, uint8_t error) {
     if (cap < 1) return 0;
     out[0] = error;
@@ -179,7 +196,7 @@ void fj_ctap2_forget_all(void) {
     memset(work_to_sign, 0, sizeof(work_to_sign));
     memset(work_signature_raw, 0, sizeof(work_signature_raw));
     memset(work_signature_der, 0, sizeof(work_signature_der));
-    memset(work_priv, 0, sizeof(work_priv));
+    fj_secure_zero(work_priv, sizeof(work_priv));
     sign_counter = 0;
     ctap2_dirty = false;
     discovery_active = false;
@@ -258,7 +275,33 @@ static bool cred_decrypt_private(const fj_ctap2_cred_t *cr, uint8_t out[FJ_ECDSA
                                           cr->private_key_enc,
                                           FJ_ECDSA_KEY_BYTES, out);
     memset(aad, 0, sizeof(aad));
-    memset(cwk, 0, sizeof(cwk));
+    fj_secure_zero(cwk, sizeof(cwk));
+    return ok;
+}
+
+/* Sign the CTAP2 assertion message using the algorithm stored with the
+ * credential. ES256 signs SHA-256(message) and returns ASN.1 DER; Ed25519
+ * signs the complete message and returns its raw 64-byte signature. */
+static bool cred_sign_message(const fj_ctap2_cred_t *cr,
+                              const uint8_t *message, size_t message_len,
+                              size_t *signature_len) {
+    if (!cred_decrypt_private(cr, work_priv)) return false;
+
+    bool ok = false;
+    if (credential_algorithm(cr) == FJ_CRED_ALG_ED25519) {
+        ok = fj_ed25519_sign(work_priv, message, message_len,
+                             work_signature_der);
+        if (ok) *signature_len = FJ_ED25519_SIGNATURE_LEN;
+    } else if (credential_algorithm(cr) == FJ_CRED_ALG_ES256) {
+        uint8_t digest[FJ_HASH_LEN];
+        fj_sha256(message, message_len, digest);
+        ok = fj_ecdsa_sign(work_priv, digest, work_signature_raw) &&
+             fj_ecdsa_signature_der(work_signature_raw, work_signature_der,
+                                    sizeof(work_signature_der), signature_len);
+        fj_secure_zero(digest, sizeof(digest));
+    }
+
+    fj_secure_zero(work_priv, sizeof(work_priv));
     return ok;
 }
 
@@ -317,20 +360,29 @@ static unsigned count_resident_by_rp(const uint8_t rp_id_hash[FJ_HASH_LEN]) {
 }
 
 /* ------------------------------------------------------------------ */
-/* COSE EC2 public key encoding (P-256 / ES256)                        */
+/* COSE public key encoding (P-256/ES256 or OKP/Ed25519)               */
 /* ------------------------------------------------------------------ */
-/* Build the COSE_Key map for a P-256 public key. */
 static size_t encode_cose_key(uint8_t *out, size_t cap,
                               const uint8_t pub[65]) {
     fj_cbor_writer w;
     fj_cbor_writer_init(&w, out, cap);
 
-    fj_cbor_map(&w, 5);
-    fj_cbor_uint(&w, 1);  fj_cbor_uint(&w, 2);       /* kty: EC2 */
-    fj_cbor_uint(&w, 3);  fj_cbor_neg(&w, 6);        /* alg: -7 ES256 */
-    fj_cbor_neg(&w, 0);   fj_cbor_uint(&w, 1);       /* -1 crv: P-256 */
-    fj_cbor_neg(&w, 1);   fj_cbor_bstr(&w, pub + 1, 32);  /* -2 x */
-    fj_cbor_neg(&w, 2);   fj_cbor_bstr(&w, pub + 33, 32); /* -3 y */
+    if (pub[0] == FJ_PUBKEY_ED25519) {
+        fj_cbor_map(&w, 4);
+        fj_cbor_uint(&w, 1); fj_cbor_uint(&w, 1);  /* kty: OKP */
+        fj_cbor_uint(&w, 3); fj_cbor_neg(&w, 7);   /* alg: -8 EdDSA */
+        fj_cbor_neg(&w, 0);  fj_cbor_uint(&w, 6);  /* -1 crv: Ed25519 */
+        fj_cbor_neg(&w, 1);  fj_cbor_bstr(&w, pub + 1, 32); /* -2 x */
+    } else if (pub[0] == FJ_PUBKEY_P256) {
+        fj_cbor_map(&w, 5);
+        fj_cbor_uint(&w, 1);  fj_cbor_uint(&w, 2); /* kty: EC2 */
+        fj_cbor_uint(&w, 3);  fj_cbor_neg(&w, 6);  /* alg: -7 ES256 */
+        fj_cbor_neg(&w, 0);   fj_cbor_uint(&w, 1); /* -1 crv: P-256 */
+        fj_cbor_neg(&w, 1);   fj_cbor_bstr(&w, pub + 1, 32);  /* -2 x */
+        fj_cbor_neg(&w, 2);   fj_cbor_bstr(&w, pub + 33, 32); /* -3 y */
+    } else {
+        return 0;
+    }
 
     if (!fj_cbor_ok(&w)) return 0;
     return w.len;
@@ -428,7 +480,8 @@ static size_t build_get_info(uint8_t *out, size_t cap) {
     fj_cbor_tstr(&w, "up");   fj_cbor_bool(&w, true);
     fj_cbor_tstr(&w, "uv");   fj_cbor_bool(&w, false);
     fj_cbor_tstr(&w, "credMgmt"); fj_cbor_bool(&w, true);
-    fj_cbor_tstr(&w, "clientPin"); fj_cbor_bool(&w, true);
+    fj_cbor_tstr(&w, "clientPin");
+    fj_cbor_bool(&w, fj_state_ctap2_pin_configured());
 
     /* maxMsgSize */
     fj_cbor_uint(&w, 0x05);
@@ -461,7 +514,7 @@ static size_t make_credential(const uint8_t *req, size_t len,
     uint8_t user_id[FJ_USER_ID_LEN]; size_t user_id_len = 0;
     bool have_client_hash = false, have_rp = false, have_user_id = false;
     bool resident = false, excluded = false;
-    int alg = 0;
+    fj_cred_alg_t alg = FJ_CRED_ALG_NONE;
 
     for (size_t i = 0; i < pairs; i++) {
         fj_cbor_item key, val;
@@ -544,9 +597,12 @@ static size_t make_credential(const uint8_t *req, size_t len,
                         if (!read_text(&r, &pk, key_name, sizeof(key_name)))
                             goto bad_param;
                         if (!fj_cbor_next(&r, &pv)) goto bad_param;
-                        if (strcmp(key_name, "alg") == 0 &&
-                            pv.type == FJ_CBOR_NEG && pv.val == 6)
-                            alg = 1; /* ES256 supported */
+                        if (alg == FJ_CRED_ALG_NONE &&
+                            strcmp(key_name, "alg") == 0 &&
+                            pv.type == FJ_CBOR_NEG) {
+                            if (pv.val == 6) alg = FJ_CRED_ALG_ES256;
+                            else if (pv.val == 7) alg = FJ_CRED_ALG_ED25519;
+                        }
                         if (!fj_cbor_skip(&r, &pv)) goto bad_param;
                     }
                 }
@@ -607,7 +663,8 @@ static size_t make_credential(const uint8_t *req, size_t len,
     }
 
     if (!have_client_hash || !have_rp || rp_id_len == 0) goto missing;
-    if (alg == 0) return ctap_error(out, cap, ERR_UNSUPPORTED_ALG);
+    if (alg == FJ_CRED_ALG_NONE)
+        return ctap_error(out, cap, ERR_UNSUPPORTED_ALG);
     /* Resident credentials require a user id so they can be discovered and
      * matched by RP later. */
     if (resident && !have_user_id) return ctap_error(out, cap, ERR_MISSING_PARAMETER);
@@ -647,13 +704,23 @@ static size_t make_credential(const uint8_t *req, size_t len,
          * device PIN, so a private key cannot be protected at rest. */
         return ctap_error(out, cap, ERR_OPERATION_DENIED);
     }
-    if (!fj_ecdsa_generate_private(work_priv)) {
-        cr->in_use = false;
-        return ctap_error(out, cap, ERR_INVALID_PARAMETER);
+    bool generated = false;
+    if (alg == FJ_CRED_ALG_ED25519) {
+        uint8_t ed_public[FJ_ED25519_PUBLIC_LEN];
+        generated = fj_ed25519_generate(work_priv, ed_public);
+        if (generated) {
+            cr->public_key[0] = FJ_PUBKEY_ED25519;
+            memcpy(cr->public_key + 1, ed_public, sizeof(ed_public));
+        }
+        fj_secure_zero(ed_public, sizeof(ed_public));
+    } else {
+        generated = fj_ecdsa_generate_private(work_priv) &&
+                    fj_ecdsa_pubkey(work_priv, cr->public_key);
     }
-    if (!fj_ecdsa_pubkey(work_priv, cr->public_key)) {
+    if (!generated) {
         cr->in_use = false;
-        memset(work_priv, 0, sizeof(work_priv));
+        fj_secure_zero(work_priv, sizeof(work_priv));
+        fj_secure_zero(cwk, sizeof(cwk));
         return ctap_error(out, cap, ERR_INVALID_PARAMETER);
     }
     /* Bind the private key to its immutable metadata via AES-GCM AAD, so
@@ -671,12 +738,14 @@ static size_t make_credential(const uint8_t *req, size_t len,
                                      work_priv, FJ_ECDSA_KEY_BYTES,
                                      cr->private_key_enc, cr->private_key_tag)) {
         cr->in_use = false;
-        memset(work_priv, 0, sizeof(work_priv));
+        fj_secure_zero(work_priv, sizeof(work_priv));
+        fj_secure_zero(cwk, sizeof(cwk));
+        fj_secure_zero(aad, sizeof(aad));
         return ctap_error(out, cap, ERR_INVALID_PARAMETER);
     }
-    memset(aad, 0, sizeof(aad));
-    memset(work_priv, 0, sizeof(work_priv));
-    memset(cwk, 0, sizeof(cwk));
+    fj_secure_zero(aad, sizeof(aad));
+    fj_secure_zero(work_priv, sizeof(work_priv));
+    fj_secure_zero(cwk, sizeof(cwk));
 
     if (resident) {
         memcpy(cr->rp, rp_id, rp_id_len);
@@ -847,19 +916,11 @@ static size_t get_assertion(const uint8_t *req, size_t len,
     /* Signed data: authData || clientDataHash. */
     memcpy(work_to_sign, work_authdata, ad_len);
     memcpy(work_to_sign + ad_len, client_data_hash, FJ_HASH_LEN);
-    uint8_t sig_digest[FJ_HASH_LEN];
-    fj_sha256(work_to_sign, ad_len + FJ_HASH_LEN, sig_digest);
-
     size_t signature_len = 0;
-    /* Decrypt the private scalar, sign, then wipe the plaintext. */
-    if (!cred_decrypt_private(cr, work_priv) ||
-        !fj_ecdsa_sign(work_priv, sig_digest, work_signature_raw) ||
-        !fj_ecdsa_signature_der(work_signature_raw, work_signature_der,
-                                sizeof(work_signature_der), &signature_len)) {
-        memset(work_priv, 0, sizeof(work_priv));
+    if (!cred_sign_message(cr, work_to_sign, ad_len + FJ_HASH_LEN,
+                           &signature_len)) {
         goto bad_param;
     }
-    memset(work_priv, 0, sizeof(work_priv));
     fj_led_sign();
 
     /* Response: credential, authData, signature, the user entity for resident
@@ -945,19 +1006,11 @@ static size_t get_next_assertion(uint8_t *out, size_t cap) {
      * same message (getNextAssertion carries no clientDataHash itself). */
     memcpy(work_to_sign, work_authdata, ad_len);
     memcpy(work_to_sign + ad_len, discovery_client_data_hash, FJ_HASH_LEN);
-    uint8_t sig_digest[FJ_HASH_LEN];
-    fj_sha256(work_to_sign, ad_len + FJ_HASH_LEN, sig_digest);
-
     size_t signature_len = 0;
-    /* Decrypt the private scalar, sign, then wipe the plaintext. */
-    if (!cred_decrypt_private(cr, work_priv) ||
-        !fj_ecdsa_sign(work_priv, sig_digest, work_signature_raw) ||
-        !fj_ecdsa_signature_der(work_signature_raw, work_signature_der,
-                                sizeof(work_signature_der), &signature_len)) {
-        memset(work_priv, 0, sizeof(work_priv));
+    if (!cred_sign_message(cr, work_to_sign, ad_len + FJ_HASH_LEN,
+                           &signature_len)) {
         goto bad_param;
     }
-    memset(work_priv, 0, sizeof(work_priv));
     fj_led_sign();
 
     bool resident = (cr->resident && cr->user_id_len > 0);

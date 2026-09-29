@@ -299,7 +299,7 @@ static void cmd_help(void) {
     outln("       ssh-keygen -Y sign -f ~/.ssh/id_ecdsa_sk -n <ns> <file>");
     outln("       ssh-keygen -Y verify -f allowed_signers -I <name> -n <ns> \\");
     outln("                       -s <file>.sig < <file>");
-    outln("  Only ECDSA P-256 / ES256 is supported (no ed25519-sk).");
+    outln("  ECDSA P-256 / ES256 and Ed25519 / EdDSA security keys are supported.");
     outln("  A wrong profile returns no signature; select the owning profile first.");
     outln("");
     outln("Mutating commands (SETPASS, SETPIN, PUK, DISK SETPIN, PROFILE");

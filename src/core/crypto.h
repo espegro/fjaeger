@@ -2,7 +2,7 @@
  * Fjaeger - crypto wrappers around mbedTLS.
  *
  * Provides the small set of cryptographic operations the device needs:
- *   - ECDSA P-256 signing (U2F / SSH)
+ *   - ECDSA P-256 signing (U2F / SSH; Ed25519 lives in ed25519.h)
  *   - SHA-256 hashing
  *   - AES-128-XTS block encryption/decryption for the MSC drive
  *   - HKDF key derivation
@@ -20,6 +20,14 @@ extern "C" {
 
 #define FJ_HASH_LEN 32
 #define FJ_AES_KEY_LEN 32
+
+/* Clear secret material through volatile stores so the compiler cannot remove
+ * the writes as dead. Use this instead of memset() for keys, passphrases and
+ * completed cryptographic state. */
+static inline void fj_secure_zero(void *ptr, size_t len) {
+    volatile uint8_t *p = (volatile uint8_t *)ptr;
+    while (len--) *p++ = 0;
+}
 
 /* Compute SHA-256 digest of 'data'. */
 void fj_sha256(const uint8_t *data, size_t len, uint8_t out[FJ_HASH_LEN]);

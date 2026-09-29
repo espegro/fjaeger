@@ -283,6 +283,7 @@ bool fj_aes_cbc(const uint8_t key[32], const uint8_t iv[16],
     ret = mbedtls_aes_crypt_cbc(&ctx, encrypt ? MBEDTLS_AES_ENCRYPT
                                               : MBEDTLS_AES_DECRYPT,
                                 len, iv_copy, buf, buf);
+    fj_secure_zero(iv_copy, sizeof(iv_copy));
     mbedtls_aes_free(&ctx);
     return ret == 0;
 }
@@ -300,7 +301,7 @@ bool fj_hmac_sha256(const uint8_t *key, size_t key_len,
         uint8_t kh[32];
         mbedtls_sha256(key, key_len, kh, 0);
         memcpy(k, kh, 32);
-        memset(kh, 0, sizeof(kh));
+        fj_secure_zero(kh, sizeof(kh));
     } else {
         memcpy(k, key, key_len);
     }
@@ -308,7 +309,7 @@ bool fj_hmac_sha256(const uint8_t *key, size_t key_len,
         ipad[i] = k[i] ^ 0x36;
         opad[i] = k[i] ^ 0x5c;
     }
-    memset(k, 0, sizeof(k));
+    fj_secure_zero(k, sizeof(k));
 
     mbedtls_sha256_context ctx;
     mbedtls_sha256_init(&ctx);
@@ -326,9 +327,9 @@ bool fj_hmac_sha256(const uint8_t *key, size_t key_len,
     mbedtls_sha256_finish(&ctx, out);
 
     mbedtls_sha256_free(&ctx);
-    memset(ipad, 0, sizeof(ipad));
-    memset(opad, 0, sizeof(opad));
-    memset(inner, 0, sizeof(inner));
+    fj_secure_zero(ipad, sizeof(ipad));
+    fj_secure_zero(opad, sizeof(opad));
+    fj_secure_zero(inner, sizeof(inner));
     return true;
 }
 
@@ -407,7 +408,9 @@ bool fj_pbkdf2_sha256(const uint8_t *password, size_t pw_len,
          * resumable KDF from the main loop instead. This wrapper is used by
          * host tests and any caller that can tolerate the full derivation. */
     }
-    return fj_kdf_result(&k, out);
+    bool ok = fj_kdf_result(&k, out);
+    fj_secure_zero(&k, sizeof(k));
+    return ok;
 }
 
 bool fj_aes_gcm_encrypt_with_aad(const uint8_t key[32], const uint8_t nonce[12],
@@ -433,16 +436,15 @@ bool fj_aes_gcm_decrypt_with_aad(const uint8_t key[32], const uint8_t nonce[12],
     mbedtls_gcm_init(&ctx);
     int ret = mbedtls_gcm_setkey(&ctx, MBEDTLS_CIPHER_ID_AES, key, 256);
     if (ret != 0) { mbedtls_gcm_free(&ctx); return false; }
-    uint8_t check_tag[16];
-    ret = mbedtls_gcm_crypt_and_tag(&ctx, MBEDTLS_GCM_DECRYPT, len,
-                                    nonce, 12, aad, aad_len,
-                                    in, out, 16, check_tag);
-    if (ret != 0) { mbedtls_gcm_free(&ctx); return false; }
-    /* Authenticate the supplied tag in constant time. */
-    uint8_t acc = 0;
-    for (int i = 0; i < 16; i++) acc |= check_tag[i] ^ tag[i];
+    ret = mbedtls_gcm_auth_decrypt(&ctx, len, nonce, 12, aad, aad_len,
+                                   tag, 16, in, out);
     mbedtls_gcm_free(&ctx);
-    return acc == 0;
+    if (ret != 0) {
+        /* Do not leave unauthenticated plaintext in a caller-owned buffer. */
+        fj_secure_zero(out, len);
+        return false;
+    }
+    return true;
 }
 
 bool fj_aes_gcm_encrypt(const uint8_t key[32], const uint8_t nonce[12],

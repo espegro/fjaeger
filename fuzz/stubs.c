@@ -14,6 +14,7 @@ fj_ctap2_cred_t fuzz_persisted[FJ_CTAP2_CREDS];
 static uint8_t random_byte = 1;
 
 fj_state_t fj_state_get(void) { return FJ_STATE_UNLOCKED; }
+bool fj_state_ctap2_pin_configured(void) { return true; }
 void fj_state_brute_success(fj_brute_ctx_t ctx) { (void)ctx; }
 void fj_state_brute_failure(fj_brute_ctx_t ctx) { (void)ctx; }
 bool fj_state_brute_ok(fj_brute_ctx_t ctx) { (void)ctx; return true; }
@@ -145,4 +146,11 @@ bool fj_ecdsa_signature_der(const uint8_t signature[64], uint8_t *out,
     memcpy(out, der, sizeof(der));
     *out_len = sizeof(der);
     return true;
+}
+bool fj_ed25519_generate(uint8_t seed[32], uint8_t public_key[32]) {
+    memset(seed, 0x55, 32); memset(public_key, 0x66, 32); return true;
+}
+bool fj_ed25519_sign(const uint8_t seed[32], const uint8_t *message,
+                     size_t len, uint8_t signature[64]) {
+    (void)seed; (void)message; (void)len; memset(signature, 0x77, 64); return true;
 }

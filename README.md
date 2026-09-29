@@ -9,7 +9,7 @@ controlled over a serial command interface.
 - **CTAP2 (FIDO2) over HID** — `authenticatorGetInfo`, `makeCredential`,
   `getAssertion`, `getNextAssertion`, `authenticatorClientPIN` and
   `authenticatorCredentialManagement`, encoded in CBOR, for WebAuthn and
-  OpenSSH `sk-ecdsa` keys. Attestation uses the `none` format.
+  OpenSSH `sk-ecdsa` and `sk-ed25519` keys. Attestation uses the `none` format.
 - **Resident (discoverable) keys** — full end-to-end support verified with
   OpenSSH: `ssh-keygen -t ecdsa-sk -O resident`, `ssh-keygen -K` (download),
   signing and verification.
@@ -35,6 +35,13 @@ controlled over a serial command interface.
   onto a fresh device.
 - **Serial console (USB CDC)** — `LOCK`, `UNLOCK`, `SETPIN`, `RESET BOOTSEL`,
   `TIMEOUT`, profile management, and more.
+
+> **POC protocol scope:** CTAP2 ClientPIN supports retry reporting, key
+> agreement and token retrieval for the OpenSSH flow. PIN creation/change is
+> intentionally administered through the CDC `SETPIN` command rather than the
+> CTAP2 `setPIN`/`changePIN` subcommands. Global device unlock is the user
+> authorization boundary. `credProtect` is advertised for OpenSSH resident-key
+> compatibility but its UV policies are not enforced by this POC.
 
 ## Hardware
 
@@ -286,10 +293,10 @@ logged.
 
 ## SSH (sk-keys)
 
-The dongle is a CTAP2 authenticator with ECDSA P-256 keys, so it is used with
-**`sk-ecdsa-sha2-nistp256@openssh.com`** — **not** `ed25519-sk` (the device has
-no EdDSA key). The device must be **unlocked** (PIN over serial) and the
-**correct profile selected** before credential operations are allowed.
+The dongle supports both **`sk-ecdsa-sha2-nistp256@openssh.com`** (ES256) and
+**`sk-ssh-ed25519@openssh.com`** (Ed25519). The device must be **unlocked**
+(passphrase over serial) and the **correct profile selected** before credential
+operations are allowed.
 
 ### How the key model works
 
@@ -313,6 +320,10 @@ no EdDSA key). The device must be **unlocked** (PIN over serial) and the
 # 2. Find the FIDO device (e.g. /dev/hidraw2) and generate the key:
 ssh-keygen -t ecdsa-sk -O device=/dev/hidraw2 \
   -f ~/.ssh/id_ecdsa_sk -N '' -C fjaeger-test
+
+# Ed25519 alternative:
+ssh-keygen -t ed25519-sk -O device=/dev/hidraw2 \
+  -f ~/.ssh/id_ed25519_sk -N '' -C fjaeger-test
 ```
 
 This sends `makeCredential` (CTAP2) to the dongle, which:
@@ -329,6 +340,10 @@ The result is `~/.ssh/id_ecdsa_sk` (credential ID + public key) and
 ```bash
 ssh-keygen -t ecdsa-sk -O resident -O device=/dev/hidraw2 \
   -f ~/.ssh/id_ecdsa_sk -N '' -C fjaeger-test
+
+# Resident Ed25519 alternative:
+ssh-keygen -t ed25519-sk -O resident -O device=/dev/hidraw2 \
+  -f ~/.ssh/id_ed25519_sk -N '' -C fjaeger-test
 ```
 
 Resident keys are stored on the authenticator itself, so you can recover them
@@ -384,7 +399,7 @@ ssh-keygen -Y verify -f allowed_signers -I <name> -n test -s file.txt.sig < file
   response formats have host tests; OpenSSH enrollment, signing, verification,
   resident-key download (`ssh-keygen -K`) and real SSH login are physically
   tested on the RP2350 dongle.
-  - Only **ECDSA P-256 / ES256** is supported (no EdDSA/ed25519-sk).
+  - **ECDSA P-256 / ES256** and **Ed25519 / EdDSA** credentials are supported.
   - The device must be unlocked (passphrase) for `makeCredential`/`getAssertion` to be
     accepted.
   - Credentials are flash-persistent (up to 8) in a CRC-checked A/B format,

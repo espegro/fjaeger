@@ -73,7 +73,7 @@ void fj_state_init(void) {
     have_unlock_time = false;
     /* The device starts locked, so no master key is available until it is
      * unlocked with the passphrase or PUK. */
-    memset(master, 0, sizeof(master));
+    fj_secure_zero(master, sizeof(master));
     master_available = false;
 }
 
@@ -99,10 +99,13 @@ bool fj_state_job_step(fj_state_job_t *j);
 
 /* Shared job buffer for the synchronous API (not re-entrant). */
 static fj_state_job_t sync_job;
+static void state_job_scrub(fj_state_job_t *j);
 
 static bool state_job_sync(fj_state_job_t *j) {
     while (j->busy) fj_state_job_step(j);
-    return j->result == FJ_RES_OK;
+    bool ok = j->result == FJ_RES_OK;
+    state_job_scrub(j); /* also covers validation failures in job_start_*() */
+    return ok;
 }
 
 
@@ -144,7 +147,7 @@ void fj_state_lock(void) {
     /* The device lock is the security boundary for every subsystem. */
     fj_msc_lock();
     fj_led_pin_lock();
-    memset(master, 0, sizeof(master));
+    fj_secure_zero(master, sizeof(master));
     master_available = false;
     /* A lock is a complete security-session boundary: invalidate the CTAP2
      * pinUvAuthToken and any in-progress resident-discovery/credential-
@@ -180,10 +183,10 @@ void fj_state_factory_reset(void) {
     fj_msc_lock();
     fj_ctap2_forget_all();
     fj_keys_wipe();
-    memset(pass_hash, 0, sizeof(pass_hash));
-    memset(pass_salt, 0, sizeof(pass_salt));
-    memset(ctap2_pin_verifier, 0, sizeof(ctap2_pin_verifier));
-    memset(master, 0, sizeof(master));
+    fj_secure_zero(pass_hash, sizeof(pass_hash));
+    fj_secure_zero(pass_salt, sizeof(pass_salt));
+    fj_secure_zero(ctap2_pin_verifier, sizeof(ctap2_pin_verifier));
+    fj_secure_zero(master, sizeof(master));
     master_available = false;
     pass_configured = false;
     ctap2_pin_configured = false;
@@ -640,7 +643,7 @@ static void job_run_restore(fj_state_job_t *j) {
 /* Dispatch ----------------------------------------------------------------- */
 void fj_state_job_start(fj_state_job_t *j, fj_job_kind_t kind,
                         const char *a1, const char *a2, const char *a3) {
-    memset(j, 0, sizeof(*j));
+    fj_secure_zero(j, sizeof(*j));
     j->kind = kind;
     j->result = FJ_RES_ERR;
     j->busy = true;
@@ -660,8 +663,20 @@ void fj_state_job_start(fj_state_job_t *j, fj_job_kind_t kind,
     }
 }
 
+/* Retain only the non-secret completion status needed by the console/caller. */
+static void state_job_scrub(fj_state_job_t *j) {
+    fj_job_kind_t kind = j->kind;
+    fj_job_result_t result = j->result;
+    fj_secure_zero(j, sizeof(*j));
+    j->kind = kind;
+    j->result = result;
+}
+
 bool fj_state_job_step(fj_state_job_t *j) {
-    if (!j->busy) return false;
+    if (!j->busy) {
+        state_job_scrub(j);
+        return false;
+    }
     switch (j->kind) {
     case FJ_JOB_SETPASS:    job_run_setpass(j); break;
     case FJ_JOB_UNLOCK:     job_run_unlock(j); break;
@@ -672,5 +687,9 @@ bool fj_state_job_step(fj_state_job_t *j) {
     case FJ_JOB_RESTORE:    job_run_restore(j); break;
     default:                j->result = FJ_RES_ERR; j->busy = false; break;
     }
-    return j->busy;
+    if (!j->busy) {
+        state_job_scrub(j);
+        return false;
+    }
+    return true;
 }

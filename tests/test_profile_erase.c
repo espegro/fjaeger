@@ -91,6 +91,13 @@ bool fj_ecdsa_signature_der(const uint8_t s[64], uint8_t *out, size_t cap, size_
     (void)s; if (cap < sizeof(der)) return false;
     memcpy(out, der, sizeof(der)); *len = sizeof(der); return true;
 }
+bool fj_ed25519_generate(uint8_t seed[32], uint8_t public_key[32]) {
+    memset(seed, 0x55, 32); memset(public_key, 0x66, 32); return true;
+}
+bool fj_ed25519_sign(const uint8_t seed[32], const uint8_t *message,
+                     size_t len, uint8_t signature[64]) {
+    (void)seed; (void)message; (void)len; memset(signature, 0x77, 64); return true;
+}
 
 /* state.c dependencies (mirroring test_security.c). */
 absolute_time_t get_absolute_time(void) { return 0; }

@@ -51,6 +51,9 @@ extern const char __flash_disk_start;
 #define DISK_TOTAL_SECTORS     (DISK_DATA_BLOCKS * DISK_SECTORS_PER_BLOCK) /* 24544 */
 #define DISK_TABLE_START_BLOCK DISK_DATA_BLOCKS
 
+_Static_assert(CRC_TABLE_BLOCKS <= 8,
+               "CRC dirty-page bitmap must fit in uint8_t");
+
 /* FAT16 geometry (computed at init). */
 static uint16_t fat_sectors;
 static uint32_t root_dir_lba;    /* first root-directory sector */
@@ -89,7 +92,9 @@ static void write_block(uint32_t idx, const uint8_t clear[DISK_BLOCK_SIZE]);
 #define CRC_HEADER_SIZE 8      /* magic + count, before the CRC entries */
 
 static uint32_t block_crcs[DISK_DATA_BLOCKS];
-static bool crc_dirty = false;
+/* One bit per 4 KiB CRC-table page. A data-block update dirties only the page
+ * containing that block's CRC instead of wearing all four metadata sectors. */
+static uint8_t crc_dirty_pages = 0;
 static bool crc_valid = false;   /* block_crcs[] reflects the on-flash blocks */
 
 static uint32_t crc32_update(uint32_t crc, const uint8_t *data, size_t len) {
@@ -123,6 +128,7 @@ static void write_raw_block(uint32_t idx, const uint8_t data[DISK_BLOCK_SIZE]) {
 /* Persist the in-RAM CRC table to the reserved flash blocks. */
 static void crc_table_write(void) {
     for (uint32_t tb = 0; tb < CRC_TABLE_BLOCKS; tb++) {
+        if ((crc_dirty_pages & (uint8_t)(1u << tb)) == 0) continue;
         uint8_t buf[DISK_BLOCK_SIZE];
         memset(buf, 0xff, sizeof(buf));
         for (uint32_t i = 0; i < DISK_DATA_BLOCKS; i++) {
@@ -137,7 +143,7 @@ static void crc_table_write(void) {
         }
         write_raw_block(DISK_TABLE_START_BLOCK + tb, buf);
     }
-    crc_dirty = false;
+    crc_dirty_pages = 0;
 }
 
 /* Load the CRC table from flash. Returns true if a valid table was found. */
@@ -161,7 +167,7 @@ static bool crc_table_load(void) {
         }
         memcpy(&block_crcs[i], buf + (g % DISK_BLOCK_SIZE), 4);
     }
-    crc_dirty = false;
+    crc_dirty_pages = 0;
     crc_valid = true;
     return true;
 }
@@ -176,7 +182,7 @@ static void crc_table_build_from_disk(void) {
             block_crcs[i] = 0;
         }
     }
-    crc_dirty = true;
+    crc_dirty_pages = (uint8_t)((1u << CRC_TABLE_BLOCKS) - 1u);
     crc_valid = true;
 }
 
@@ -281,14 +287,15 @@ static void write_block(uint32_t idx, const uint8_t clear[DISK_BLOCK_SIZE]) {
     flash_range_program(offset, enc, DISK_BLOCK_SIZE);
     restore_interrupts(ints);
     block_crcs[idx] = crc32_block(clear);
-    crc_dirty = true;
+    uint32_t crc_byte = CRC_HEADER_SIZE + idx * sizeof(block_crcs[0]);
+    crc_dirty_pages |= (uint8_t)(1u << (crc_byte / DISK_BLOCK_SIZE));
 }
 
 /* Write all pending sectors to flash. Each touched 4 KiB block is written
  * once (reads current on-flash block, applies pending writes, encrypts),
  * then the CRC table is persisted if any block changed. */
 static void flush_pending_writes(void) {
-    if (wq_empty() && !crc_dirty) return;
+    if (wq_empty() && crc_dirty_pages == 0) return;
     for (unsigned i = 0; i < WRITE_QUEUE_SIZE; i++) {
         if (!wq[i].in_use) continue;
         uint32_t idx = block_index_for_lba(wq[i].lba);
@@ -302,7 +309,7 @@ static void flush_pending_writes(void) {
                 wq[j].in_use = false;
         }
     }
-    if (crc_dirty) crc_table_write();
+    if (crc_dirty_pages != 0) crc_table_write();
 }
 
 /* --- FAT16 image generation ------------------------------------------ */
@@ -729,6 +736,7 @@ bool fj_msc_unlock(const char *pin) {
     static fj_disk_job_t djsync;
     fj_disk_job_start(&djsync, FJ_JOB_DISK_UNLOCK, pin);
     while (djsync.busy) fj_disk_job_step(&djsync);
+    fj_disk_job_step(&djsync); /* scrub immediate job-start failures too */
     return djsync.result == FJ_RES_OK;
 }
 
@@ -739,6 +747,7 @@ fj_puk_result_t fj_msc_unblock_puk(const char *puk) {
     static fj_disk_job_t djsync;
     fj_disk_job_start(&djsync, FJ_JOB_DISK_UNBLOCK, puk);
     while (djsync.busy) fj_disk_job_step(&djsync);
+    fj_disk_job_step(&djsync);
     switch (djsync.result) {
         case FJ_RES_OK:     return FJ_PUK_OK;
         case FJ_RES_NO_PUK: return FJ_PUK_UNSET;
@@ -763,6 +772,7 @@ bool fj_msc_set_pin(const char *pin) {
     static fj_disk_job_t djsync;
     fj_disk_job_start(&djsync, FJ_JOB_DISK_SETPIN, pin);
     while (djsync.busy) fj_disk_job_step(&djsync);
+    fj_disk_job_step(&djsync);
     return djsync.result == FJ_RES_OK;
 }
 
@@ -911,7 +921,7 @@ static bool dkdf_chunk_done(fj_kdf_t *k) {
 }
 
 void fj_disk_job_start(fj_disk_job_t *j, fj_job_kind_t kind, const char *a1) {
-    memset(j, 0, sizeof(*j));
+    fj_secure_zero(j, sizeof(*j));
     j->kind = kind;
     j->result = FJ_RES_ERR;
     j->busy = true;
@@ -951,8 +961,20 @@ void fj_disk_job_start(fj_disk_job_t *j, fj_job_kind_t kind, const char *a1) {
     }
 }
 
+/* Retain only the completion status; all PIN/KDF/wrapping state is secret. */
+static void disk_job_scrub(fj_disk_job_t *j) {
+    fj_job_kind_t kind = j->kind;
+    fj_job_result_t result = j->result;
+    fj_secure_zero(j, sizeof(*j));
+    j->kind = kind;
+    j->result = result;
+}
+
 bool fj_disk_job_step(fj_disk_job_t *j) {
-    if (!j->busy) return false;
+    if (!j->busy) {
+        disk_job_scrub(j);
+        return false;
+    }
     switch (j->kind) {
     case FJ_JOB_DISK_UNLOCK:
         if (j->phase == 0) {
@@ -968,7 +990,7 @@ bool fj_disk_job_step(fj_disk_job_t *j) {
                     fj_keys_set_security(&sec);
                 }
                 fj_state_brute_failure(FJ_BRUTE_DISK);
-                memset(key, 0, sizeof(key));
+                fj_secure_zero(key, sizeof(key));
                 j->result = FJ_RES_BAD_PIN;
                 j->busy = false;
                 break;
@@ -982,7 +1004,7 @@ bool fj_disk_job_step(fj_disk_job_t *j) {
             }
             fj_state_brute_success(FJ_BRUTE_DISK);
             memcpy(disk_key, key, sizeof(disk_key));
-            memset(key, 0, sizeof(key));
+            fj_secure_zero(key, sizeof(key));
             if (!fj_msc_prepare(false)) { j->result = FJ_RES_ERR; j->busy = false; break; }
             disk_unlocked = true;
             disk_ready = true;
@@ -999,7 +1021,7 @@ bool fj_disk_job_step(fj_disk_job_t *j) {
             bool ok = fj_aes_gcm_encrypt_with_aad(wrap, j->nonce,
                         (const uint8_t *)DISK_WRAP_AAD, sizeof(DISK_WRAP_AAD) - 1,
                         disk_key, sizeof(disk_key), enc, tag);
-            memset(wrap, 0, sizeof(wrap));
+            fj_secure_zero(wrap, sizeof(wrap));
             if (!ok) { j->result = FJ_RES_ERR; j->busy = false; break; }
             if (!fj_keys_set_disk_secret(enc, j->salt[0], j->nonce, tag)) { j->result = FJ_RES_ERR; j->busy = false; break; }
             if (!fj_msc_prepare(j->first_time)) { j->result = FJ_RES_ERR; j->busy = false; break; }
@@ -1031,5 +1053,9 @@ bool fj_disk_job_step(fj_disk_job_t *j) {
         j->busy = false;
         break;
     }
-    return j->busy;
+    if (!j->busy) {
+        disk_job_scrub(j);
+        return false;
+    }
+    return true;
 }

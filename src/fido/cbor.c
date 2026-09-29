@@ -170,15 +170,18 @@ bool fj_cbor_next(fj_cbor_reader *r, fj_cbor_item *it) {
 bool fj_cbor_read_bytes(fj_cbor_reader *r, fj_cbor_item *it,
                         uint8_t *out, size_t max, size_t *out_len) {
     if (it->type != FJ_CBOR_BSTR && it->type != FJ_CBOR_TSTR) return false;
+    if (it->val > SIZE_MAX) return false;
     if (it->val > max) return false;
-    if (r->pos + it->val > r->len) return false;
+    if (r->pos > r->len) return false;
+    if ((size_t)it->val > r->len - r->pos) return false;
     if (it->val) memcpy(out, r->buf + r->pos, (size_t)it->val);
     if (out_len) *out_len = (size_t)it->val;
     r->pos += (size_t)it->val;
     return true;
 }
 
-bool fj_cbor_skip(fj_cbor_reader *r, fj_cbor_item *it) {
+static bool cbor_skip_depth(fj_cbor_reader *r, fj_cbor_item *it,
+                            unsigned depth) {
     size_t count;
     switch (it->type) {
         case FJ_CBOR_UINT:
@@ -186,24 +189,30 @@ bool fj_cbor_skip(fj_cbor_reader *r, fj_cbor_item *it) {
             return true; /* no payload */
         case FJ_CBOR_BSTR:
         case FJ_CBOR_TSTR: {
-            if (r->pos + it->val > r->len) return false;
+            if (it->val > SIZE_MAX) return false;
+            if (r->pos > r->len) return false;
+            if ((size_t)it->val > r->len - r->pos) return false;
             r->pos += (size_t)it->val;
             return true;
         }
         case FJ_CBOR_ARRAY:
+            if (depth >= FJ_CBOR_MAX_DEPTH || it->val > SIZE_MAX) return false;
             count = (size_t)it->val;
             for (size_t i = 0; i < count; i++) {
                 fj_cbor_item child;
                 if (!fj_cbor_next(r, &child)) return false;
-                if (!fj_cbor_skip(r, &child)) return false;
+                if (!cbor_skip_depth(r, &child, depth + 1)) return false;
             }
             return true;
         case FJ_CBOR_MAP:
+            if (depth >= FJ_CBOR_MAX_DEPTH || it->val > SIZE_MAX) return false;
             count = (size_t)it->val;
-            for (size_t i = 0; i < 2 * count; i++) {
-                fj_cbor_item child;
-                if (!fj_cbor_next(r, &child)) return false;
-                if (!fj_cbor_skip(r, &child)) return false;
+            for (size_t i = 0; i < count; i++) {
+                fj_cbor_item key, value;
+                if (!fj_cbor_next(r, &key)) return false;
+                if (!cbor_skip_depth(r, &key, depth + 1)) return false;
+                if (!fj_cbor_next(r, &value)) return false;
+                if (!cbor_skip_depth(r, &value, depth + 1)) return false;
             }
             return true;
         case FJ_CBOR_BOOL:
@@ -212,4 +221,8 @@ bool fj_cbor_skip(fj_cbor_reader *r, fj_cbor_item *it) {
         default:
             return false;
     }
+}
+
+bool fj_cbor_skip(fj_cbor_reader *r, fj_cbor_item *it) {
+    return cbor_skip_depth(r, it, 0);
 }

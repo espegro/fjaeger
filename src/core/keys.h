@@ -3,7 +3,7 @@
  *
  * The device organises its CTAP2 credentials into named profiles. A
  * profile is metadata plus an access filter: each credential keeps its own
- * random ECDSA P-256 private key, credential-ID and RP binding, and is
+ * random P-256 scalar or Ed25519 seed, credential-ID and RP binding, and is
  * associated with exactly one profile. Only credentials in the active
  * profile can be enrolled or used for signing.
  *
@@ -64,7 +64,7 @@ typedef struct {
     uint8_t private_key_enc[FJ_ECDSA_KEY_BYTES]; /* GCM(cwk, key) */
     uint8_t private_key_nonce[12];
     uint8_t private_key_tag[16];
-    uint8_t public_key[65];               /* 0x04 || X || Y */
+    uint8_t public_key[65];               /* P-256: 0x04||X||Y; Ed25519: 0xed||X */
     uint8_t rp_id_hash[32];               /* SHA-256 of the relying-party id */
     uint8_t rp[FJ_RP_MAX];                /* relying-party id in clear text */
     uint8_t rp_len;

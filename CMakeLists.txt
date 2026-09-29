@@ -53,12 +53,15 @@ add_executable(fjaeger
   src/core/state.c
   src/core/keys.c
   src/core/crypto.c
+  src/core/ed25519.c
   src/core/ms_time.c
   src/led/rgb_led.c
   src/fido/u2f.c
   src/fido/ctap2.c
   src/fido/cbor.c
   src/fido/pin.c
+  third_party/monocypher/monocypher.c
+  third_party/monocypher/monocypher-ed25519.c
 )
 
 target_include_directories(fjaeger PRIVATE
@@ -68,6 +71,7 @@ target_include_directories(fjaeger PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}/src/fido
   ${CMAKE_CURRENT_SOURCE_DIR}/src/led
   ${CMAKE_CURRENT_SOURCE_DIR}/src/mbedtls_config
+  ${CMAKE_CURRENT_SOURCE_DIR}/third_party/monocypher
 )
 
 # TinyUSB selects its config header by name from the include path

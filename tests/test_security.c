@@ -5,6 +5,7 @@
 #include <string.h>
 
 #include "crypto.h"
+#include "job.h"
 #include "keys.h"
 #include "state.h"
 #include "pico/time.h"
@@ -604,7 +605,28 @@ static void test_retry_domain_split(void) {
     puts("retry-domain split (passphrase vs CTAP2 PIN): ok");
 }
 
+static void test_completed_job_is_scrubbed(void) {
+    reset_fixture();
+    assert(fj_state_set_passphrase("testpass1"));
+    fj_state_lock();
+
+    fj_state_job_t job;
+    memset(&job, 0xa5, sizeof(job));
+    fj_state_job_start(&job, FJ_JOB_UNLOCK, "testpass1", NULL, NULL);
+    while (fj_state_job_step(&job)) {}
+
+    assert(job.kind == FJ_JOB_UNLOCK);
+    assert(job.result == FJ_RES_OK);
+    assert(!job.busy);
+    for (size_t i = 0; i < sizeof(job.a1); i++) assert(job.a1[i] == 0);
+    for (size_t i = 0; i < sizeof(job.kdf); i++)
+        assert(((const uint8_t *)job.kdf)[i] == 0);
+    for (size_t i = 0; i < sizeof(job.payload); i++)
+        assert(((const uint8_t *)&job.payload)[i] == 0);
+}
+
 int main(void) {
+    test_completed_job_is_scrubbed();
     test_retry_domain_split();
 
     test_pin_block_and_puk_recovery();

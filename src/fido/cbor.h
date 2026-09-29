@@ -21,6 +21,11 @@
 extern "C" {
 #endif
 
+/* CTAP messages are small and do not need arbitrary nesting. Keeping this
+ * bound low protects the RP2350's finite stack when unknown values are
+ * recursively skipped. */
+#define FJ_CBOR_MAX_DEPTH 16u
+
 /* ------------------------------------------------------------------ */
 /* Encoder                                                            */
 /* ------------------------------------------------------------------ */
