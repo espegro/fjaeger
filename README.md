@@ -347,20 +347,32 @@ ssh-keygen -t ed25519-sk -O resident -O device=/dev/hidraw2 \
 ```
 
 Resident keys are stored on the authenticator itself, so you can recover them
-onto any PC without keeping the key file. You will be prompted for the dongle's
-PIN (this is the CTAP2 client-PIN flow; on a device with no PIN set, any PIN is
-accepted).
+onto any PC without keeping the key file.
 
 Download resident keys from the dongle:
 
 ```bash
-ssh-keygen -K
+ssh-keygen -K -O device=/dev/hidraw2
 ```
 
 `-K` enumerates the discoverable credentials of the **active profile** (via
 `authenticatorCredentialManagement`) and rebuilds the private key files in the
 current directory. Only the credential handle and public key are exported — the
 private key never leaves the device.
+
+OpenSSH/libfido2 displays `Enter PIN for authenticator:` during `-K` even when
+the dongle has no CTAP2 PIN configured. This behaviour was verified on the
+physical RP2350 device:
+
+- with no CTAP2 PIN configured, enter any **non-empty** placeholder (for
+  example `0000`); Fjaeger accepts it but does not configure or persist it;
+- an empty response fails in OpenSSH/libfido2 before discovery completes;
+- once a CTAP2 PIN is configured, the entered value must be the correct PIN.
+
+The device must also be globally unlocked, and only resident credentials in
+the active profile are returned. A distinct application such as
+`-O application=ssh:github` makes the recovered filename descriptive (for
+example `id_ed25519_sk_rk_github`).
 
 ### How a key signs (authentication)
 
@@ -404,10 +416,11 @@ ssh-keygen -Y verify -f allowed_signers -I <name> -n test -s file.txt.sig < file
     accepted.
   - Credentials are flash-persistent (up to 12) in a CRC-checked A/B format,
     written defer-ably from the main loop.
-  - The CTAP2 client PIN is **independent** of the unlock passphrase: with no
-    CTAP2 PIN set any PIN is accepted (so `ssh-keygen -K` works on a fresh
-    device); with a PIN set it is verified. The passphrase and CTAP2 PIN have
-    separate persistent retry/block counters.
+  - The CTAP2 client PIN is **independent** of the unlock passphrase. During
+    `ssh-keygen -K`, OpenSSH still requires non-empty input when no CTAP2 PIN
+    is configured; Fjaeger accepts that placeholder without persisting it.
+    Once a PIN is configured, it is verified normally. The passphrase and
+    CTAP2 PIN have separate persistent retry/block counters.
   - **User presence:** this prototype treats "device unlocked" as the user
     authorization boundary for signing; there is no per-signature touch or
     button. The cyan LED pulse after signing is feedback that a signature
