@@ -48,6 +48,10 @@ extern "C" {
 #define FJ_USER_ID_LEN     32
 #define FJ_RP_MAX          64
 
+/* Marker byte in fj_ctap2_cred_t.public_key. */
+#define FJ_PUBKEY_P256     0x04
+#define FJ_PUBKEY_ED25519  0xed
+
 /* A CTAP2 (WebAuthn / sk-ecdsa) credential persisted in flash. Each
  * credential belongs to a profile (profile_id) but owns its own random
  * private key. Resident (discoverable) credentials additionally store the

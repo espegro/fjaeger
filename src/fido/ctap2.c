@@ -62,8 +62,6 @@
 #define COSE_ES256 (-7)
 #define COSE_EDDSA (-8)
 #define COSE_ALG_KEY 3
-#define FJ_PUBKEY_P256    0x04
-#define FJ_PUBKEY_ED25519 0xed
 
 typedef enum {
     FJ_CRED_ALG_NONE = 0,

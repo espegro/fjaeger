@@ -711,6 +711,12 @@ static int hex_val(char c) {
     return -1;
 }
 
+static const char *credential_type(const fj_ctap2_cred_t *cred) {
+    if (cred->public_key[0] == FJ_PUBKEY_ED25519) return "ed25519-sk";
+    if (cred->public_key[0] == FJ_PUBKEY_P256) return "ecdsa-sk";
+    return "unknown";
+}
+
 /* CREDS LIST / CREDS DEL <hex-id> — manage the credentials in the ACTIVE
  * profile only. */
 static void cmd_creds(const char *sub, char *rest) {
@@ -729,10 +735,23 @@ static void cmd_creds(const char *sub, char *rest) {
             for (j = 0; j < FJ_CRED_ID_LEN; j++)
                 snprintf(idhex + j * 2, 3, "%02x", creds[i].credential_id[j]);
             idhex[FJ_CRED_ID_LEN * 2] = '\0';
-            snprintf(buf, sizeof(buf), "  [%02u] %s rp=%.*s user=%.*s resident=%u",
-                     i, idhex, creds[i].rp_len, creds[i].rp,
-                     creds[i].user_id_len, creds[i].user_id,
-                     creds[i].resident ? 1u : 0u);
+            if (creds[i].rp_len > 0) {
+                int application_len = creds[i].rp_len <= FJ_RP_MAX
+                                          ? (int)creds[i].rp_len
+                                          : FJ_RP_MAX;
+                snprintf(buf, sizeof(buf),
+                         "  [%02u] type=%s application=%.*s resident=%s id=%s",
+                         i, credential_type(&creds[i]), application_len,
+                         (const char *)creds[i].rp,
+                         creds[i].resident ? "yes" : "no", idhex);
+            } else {
+                /* Non-resident credentials retain only the RP hash; their
+                 * clear-text application is held by the OpenSSH key stub. */
+                snprintf(buf, sizeof(buf),
+                         "  [%02u] type=%s application=<not-stored> resident=%s id=%s",
+                         i, credential_type(&creds[i]),
+                         creds[i].resident ? "yes" : "no", idhex);
+            }
             outln(buf);
             n++;
         }

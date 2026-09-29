@@ -263,6 +263,8 @@ Connect to the console (e.g. `screen /dev/ttyACM0 115200`):
 | `PROFILE SELECT <id>` | Select and persist the active profile |
 | `PROFILE RENAME <id> <name>` | Rename without changing credentials |
 | `PROFILE ERASE <id>` | Delete the profile and all its credentials |
+| `CREDS LIST` | List active-profile credentials with key type, application and ID |
+| `CREDS DEL <hex-id> yes` | Delete one credential from the active profile |
 | `TIMEOUT <seconds>` | Set auto-relock delay (default 900 seconds; 0 = off) |
 | `BACKUP <password>` | Write an encrypted backup (M + keys + profiles) to `FJAEGER.BAK` |
 | `RESTORE <pw> <pin> <puk>` | Restore a backup, setting a new PIN and PUK in one step |
@@ -373,6 +375,17 @@ The device must also be globally unlocked, and only resident credentials in
 the active profile are returned. A distinct application such as
 `-O application=ssh:github` makes the recovered filename descriptive (for
 example `id_ed25519_sk_rk_github`).
+
+The same association is visible directly on the serial console:
+
+```text
+fjaeger> CREDS LIST
+  [00] type=ed25519-sk application=ssh:github resident=yes id=a1b2...
+```
+
+For a non-resident credential, Fjaeger stores only the application/RP hash;
+`CREDS LIST` therefore reports `application=<not-stored>`. The OpenSSH stub
+retains the clear-text application in that case.
 
 ### How a key signs (authentication)
 
