@@ -43,12 +43,13 @@ static bool    token_valid = false;
 
 void fj_pin_init(void) {
     if (!fj_ecdsa_generate_private(auth_priv))
-        memset(auth_priv, 0, sizeof(auth_priv));
+        fj_secure_zero(auth_priv, sizeof(auth_priv));
     fj_random(pin_token, sizeof(pin_token));
     token_valid = true;
 }
 
 void fj_pin_reset_token(void) {
+    fj_secure_zero(pin_token, sizeof(pin_token));
     token_valid = false;
 }
 
