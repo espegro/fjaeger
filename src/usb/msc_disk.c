@@ -63,6 +63,7 @@ static uint32_t total_clusters;
 static bool disk_ready = false;
 static bool fs_initialised = false;
 static bool disk_unlocked = false;   /* set once the disk PIN is verified */
+static bool disk_io_error = false;
 
 /* Permanent disk key (two AES-128 keys for XTS). */
 static uint8_t disk_key[FJ_AES_KEY_BYTES];
@@ -81,7 +82,7 @@ static uint32_t block_index_for_lba(uint32_t lba) {
 
 /* Forward declarations (defined further below). */
 static bool read_block_apply(uint32_t idx, uint8_t clear[DISK_BLOCK_SIZE]);
-static void write_block(uint32_t idx, const uint8_t clear[DISK_BLOCK_SIZE]);
+static bool write_block(uint32_t idx, const uint8_t clear[DISK_BLOCK_SIZE]);
 
 /* ------------------------------------------------------------------ */
 /* Integrity: a persistent CRC-32 per 4 KiB data block.               */
@@ -269,7 +270,7 @@ static bool read_block_apply(uint32_t idx, uint8_t clear[DISK_BLOCK_SIZE]) {
 }
 
 /* Encrypt and write one 4 KiB block from clear text, updating its CRC. */
-static void write_block(uint32_t idx, const uint8_t clear[DISK_BLOCK_SIZE]) {
+static bool write_block(uint32_t idx, const uint8_t clear[DISK_BLOCK_SIZE]) {
     uint8_t enc[DISK_BLOCK_SIZE];
     for (uint32_t s = 0; s < DISK_SECTORS_PER_BLOCK; s++) {
         uint32_t lba = idx * DISK_SECTORS_PER_BLOCK + s;
@@ -278,7 +279,7 @@ static void write_block(uint32_t idx, const uint8_t clear[DISK_BLOCK_SIZE]) {
         memcpy(enc + s * DISK_SECTOR_SIZE, clear + s * DISK_SECTOR_SIZE,
                DISK_SECTOR_SIZE);
         if (!fj_xts_sector(disk_key, tweak, enc + s * DISK_SECTOR_SIZE, true)) {
-            return; /* failed to encrypt; leave on-flash copy intact */
+            return false; /* failed to encrypt; leave on-flash copy intact */
         }
     }
     uint32_t offset = DISK_FLASH_START + idx * DISK_BLOCK_SIZE;
@@ -289,19 +290,21 @@ static void write_block(uint32_t idx, const uint8_t clear[DISK_BLOCK_SIZE]) {
     block_crcs[idx] = crc32_block(clear);
     uint32_t crc_byte = CRC_HEADER_SIZE + idx * sizeof(block_crcs[0]);
     crc_dirty_pages |= (uint8_t)(1u << (crc_byte / DISK_BLOCK_SIZE));
+    return true;
 }
 
 /* Write all pending sectors to flash. Each touched 4 KiB block is written
  * once (reads current on-flash block, applies pending writes, encrypts),
  * then the CRC table is persisted if any block changed. */
-static void flush_pending_writes(void) {
-    if (wq_empty() && crc_dirty_pages == 0) return;
+static bool flush_pending_writes(void) {
+    if (wq_empty() && crc_dirty_pages == 0) return true;
     for (unsigned i = 0; i < WRITE_QUEUE_SIZE; i++) {
         if (!wq[i].in_use) continue;
         uint32_t idx = block_index_for_lba(wq[i].lba);
         uint8_t clear[DISK_BLOCK_SIZE];
-        if (read_block_apply(idx, clear)) {
-            write_block(idx, clear);
+        if (!read_block_apply(idx, clear) || !write_block(idx, clear)) {
+            disk_io_error = true;
+            return false; /* retain the writes; never acknowledge a later write */
         }
         /* Drop every queued write belonging to this block. */
         for (unsigned j = 0; j < WRITE_QUEUE_SIZE; j++) {
@@ -310,6 +313,8 @@ static void flush_pending_writes(void) {
         }
     }
     if (crc_dirty_pages != 0) crc_table_write();
+    disk_io_error = false;
+    return true;
 }
 
 /* --- FAT16 image generation ------------------------------------------ */
@@ -690,6 +695,7 @@ void fj_msc_init(void) {
     disk_ready = false;
     disk_unlocked = false;
     fs_initialised = false;
+    disk_io_error = false;
 }
 
 /* Derive the 32-byte disk key-wrapping key from the disk PIN and salt using
@@ -756,14 +762,16 @@ fj_puk_result_t fj_msc_unblock_puk(const char *puk) {
 }
 
 void fj_msc_lock(void) {
-    if (disk_ready) {
+    if (disk_unlocked) {
         /* Remove any backup file so it does not linger on the (still
          * encrypted) disk once the drive is locked. */
         fj_msc_backup_delete();
-        flush_pending_writes();
+        (void)flush_pending_writes();
     }
     disk_ready = false;
     disk_unlocked = false;
+    disk_io_error = false;
+    wq_reset();
     memset(disk_key, 0, sizeof(disk_key));
 }
 
@@ -779,7 +787,7 @@ bool fj_msc_format(void) {
     /* FJ-007: explicit reformat. The disk key must already be unwrapped; a
      * corrupt store is never auto-formatted, the user must act. */
     if (!disk_unlocked || !disk_ready) return false;
-    flush_pending_writes();
+    if (!flush_pending_writes()) return false;
     wq_reset();
     init_filesystem();          /* rebuild boot/FAT/root + CRC table */
     fs_initialised = true;
@@ -787,7 +795,7 @@ bool fj_msc_format(void) {
 }
 
 void fj_msc_task(void) {
-    if (disk_ready) flush_pending_writes();
+    if (disk_ready && !disk_io_error) (void)flush_pending_writes();
 }
 
 void tud_msc_inquiry_cb(uint8_t lun, uint8_t vendor_id[8],
@@ -822,9 +830,13 @@ bool tud_msc_start_stop_cb(uint8_t lun, uint8_t power_condition,
     (void)lun;
     (void)power_condition;
     if (load_eject && !start) {
-        /* unload */
-        disk_ready = false;
+        /* Defer the eject until the main loop has persisted queued writes.
+         * Flash operations must never run inside a USB callback. */
+        if (!wq_empty() || crc_dirty_pages != 0 || disk_io_error) return false;
+        fj_msc_set_ready(false);
     } else {
+        if (!start && (!wq_empty() || crc_dirty_pages != 0 || disk_io_error))
+            return false;
         fj_msc_set_ready(start);
     }
     return true;
@@ -833,7 +845,7 @@ bool tud_msc_start_stop_cb(uint8_t lun, uint8_t power_condition,
 int32_t tud_msc_read10_cb(uint8_t lun, uint32_t lba, uint32_t offset,
                           void *buffer, uint32_t bufsize) {
     (void)lun;
-    if (!disk_ready) return -1;
+    if (!disk_ready || disk_io_error) return -1;
     if (lba >= DISK_TOTAL_SECTORS || offset > DISK_SECTOR_SIZE ||
         bufsize > DISK_SECTOR_SIZE - offset) return -1;
 
@@ -848,13 +860,13 @@ int32_t tud_msc_read10_cb(uint8_t lun, uint32_t lba, uint32_t offset,
 bool tud_msc_is_writable_cb(uint8_t lun) {
     (void)lun;
     /* Writes only allowed while the drive is unlocked. */
-    return disk_ready;
+    return disk_ready && !disk_io_error;
 }
 
 int32_t tud_msc_write10_cb(uint8_t lun, uint32_t lba, uint32_t offset,
                            uint8_t *buffer, uint32_t bufsize) {
     (void)lun;
-    if (!disk_ready) return -1;
+    if (!disk_ready || disk_io_error) return -1;
     if (lba >= DISK_TOTAL_SECTORS || offset > DISK_SECTOR_SIZE ||
         bufsize > DISK_SECTOR_SIZE - offset) return -1;
 
@@ -873,10 +885,9 @@ int32_t tud_msc_write10_cb(uint8_t lun, uint32_t lba, uint32_t offset,
     }
 
     if (!wq_enqueue(lba, sector)) {
-        /* Queue full (should be rare because the main loop flushes). Fall
-         * back to flushing now to guarantee the write is not lost. */
-        flush_pending_writes();
-        if (!wq_enqueue(lba, sector)) return -1;
+        /* Never erase/program flash from inside the USB callback. The host
+         * receives a failed write and may retry after the main loop flushes. */
+        return -1;
     }
     return (int32_t)bufsize;
 }
@@ -892,9 +903,8 @@ int32_t tud_msc_scsi_cb(uint8_t lun, uint8_t const scsi_cmd[16],
 
 /* Set ready only when the drive has been unlocked with its PIN. */
 void fj_msc_set_ready(bool ready) {
-    /* On unmount/lock, flush any pending writes to flash first so no data
-     * is lost and the decrypted volume is never left exposed. */
-    if (!ready) flush_pending_writes();
+    /* Caller must defer unmount while writes are pending. */
+    if (!ready && (!wq_empty() || crc_dirty_pages != 0 || disk_io_error)) return;
     disk_ready = ready && disk_unlocked && fs_initialised;
 }
 
@@ -925,6 +935,11 @@ void fj_disk_job_start(fj_disk_job_t *j, fj_job_kind_t kind, const char *a1) {
     j->result = FJ_RES_ERR;
     j->busy = true;
     if (a1) { strncpy(j->a1, a1, sizeof(j->a1) - 1); j->a1[sizeof(j->a1) - 1] = '\0'; }
+    if (fj_state_get() != FJ_STATE_UNLOCKED) {
+        j->result = FJ_RES_BAD_SECRET;
+        j->busy = false;
+        return;
+    }
 
     switch (kind) {
     case FJ_JOB_DISK_UNLOCK: {
@@ -971,6 +986,12 @@ static void disk_job_scrub(fj_disk_job_t *j) {
 
 bool fj_disk_job_step(fj_disk_job_t *j) {
     if (!j->busy) {
+        disk_job_scrub(j);
+        return false;
+    }
+    if (fj_state_get() != FJ_STATE_UNLOCKED) {
+        j->result = FJ_RES_BAD_SECRET;
+        j->busy = false;
         disk_job_scrub(j);
         return false;
     }

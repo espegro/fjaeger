@@ -77,6 +77,7 @@ static bool job_is_disk = false;
 /* ------------------------------------------------------------------ */
 static void out(const char *s) {
     while (*s) {
+        if (!tud_cdc_connected()) return;
         if (!tud_cdc_write_available()) {
             tud_cdc_write_flush();
             tud_task();
@@ -97,6 +98,7 @@ static void outln(const char *s) {
  * stays off). */
 static void echo_char(char c) {
     while (!tud_cdc_write_available()) {
+        if (!tud_cdc_connected()) return;
         tud_cdc_write_flush();
         tud_task();
         tight_loop_contents();
@@ -1002,6 +1004,7 @@ void fj_console_task(void) {
                     run_secret(act, secret1);
                     clear_secrets();
                 }
+                if (job_active) return;
                 continue;
             }
             if (*len < LINE_MAX - 1) {
@@ -1020,6 +1023,7 @@ void fj_console_task(void) {
                 line_len = 0;
                 clear_line();
             }
+            if (job_active) return;
             if (!job_active && pending_secret == SEC_NONE) out(PROMPT);
         } else if (c == 0x08) {
             last_was_cr = false;

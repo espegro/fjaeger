@@ -45,6 +45,7 @@ static fj_state_t state = FJ_STATE_LOCKED;
 static uint32_t timeout_sec = FJ_DEFAULT_TIMEOUT_SEC;
 static absolute_time_t unlock_since;
 static bool have_unlock_time = false;
+static uint32_t lock_epoch = 0;
 
 /* Brute-force delay gate: exponential backoff on failed attempts, tracked
  * independently for the PIN, PUK and disk PIN. The delay is RAM-only and
@@ -127,9 +128,14 @@ bool fj_state_set_ctap2_pin(const char *pin) {
 
     uint8_t sha[FJ_HASH_LEN];
     fj_sha256((const uint8_t *)pin, len, sha);
+    if (!fj_keys_set_ctap2_pin(sha)) {
+        fj_secure_zero(sha, sizeof(sha));
+        return false;
+    }
     memcpy(ctap2_pin_verifier, sha, 16);
-    if (!fj_keys_set_ctap2_pin(ctap2_pin_verifier)) return false;
+    fj_secure_zero(sha, sizeof(sha));
     ctap2_pin_configured = true;
+    fj_pin_reset_token();
     return true;
 }
 
@@ -144,6 +150,7 @@ bool fj_state_ctap2_verify(const uint8_t verifier[16]) {
 }
 
 void fj_state_lock(void) {
+    lock_epoch++;
     /* The device lock is the security boundary for every subsystem. */
     fj_msc_lock();
     fj_led_pin_lock();
@@ -179,6 +186,7 @@ bool fj_state_pass_blocked(void) {
 }
 
 void fj_state_factory_reset(void) {
+    lock_epoch++;
     /* Flush and destroy live material before erasing its persistent copy. */
     fj_msc_lock();
     fj_ctap2_forget_all();
@@ -652,6 +660,7 @@ void fj_state_job_start(fj_state_job_t *j, fj_job_kind_t kind,
     j->kind = kind;
     j->result = FJ_RES_ERR;
     j->busy = true;
+    j->lock_epoch = lock_epoch;
     if (a1) { strncpy(j->a1, a1, sizeof(j->a1) - 1); j->a1[sizeof(j->a1) - 1] = '\0'; }
     if (a2) { strncpy(j->a2, a2, sizeof(j->a2) - 1); j->a2[sizeof(j->a2) - 1] = '\0'; }
     if (a3) { strncpy(j->a3, a3, sizeof(j->a3) - 1); j->a3[sizeof(j->a3) - 1] = '\0'; }
@@ -679,6 +688,17 @@ static void state_job_scrub(fj_state_job_t *j) {
 
 bool fj_state_job_step(fj_state_job_t *j) {
     if (!j->busy) {
+        state_job_scrub(j);
+        return false;
+    }
+    if (j->lock_epoch != lock_epoch ||
+        ((j->kind == FJ_JOB_SETPASS || j->kind == FJ_JOB_SETPUK ||
+          j->kind == FJ_JOB_BACKUP) && pass_configured &&
+         (state != FJ_STATE_UNLOCKED || !master_available)) ||
+        (j->kind == FJ_JOB_BACKUP && !fj_msc_is_ready()) ||
+        (j->kind == FJ_JOB_RESTORE && !fj_msc_is_ready())) {
+        j->result = FJ_RES_BAD_SECRET;
+        j->busy = false;
         state_job_scrub(j);
         return false;
     }

@@ -23,6 +23,7 @@ static int64_t now_us;
 static unsigned disk_lock_count;
 static unsigned ctap_forget_count;
 static unsigned wipe_count;
+static unsigned token_reset_count;
 static uint32_t stored_timeout;
 static bool have_timeout;
 static uint8_t stored_m_enc_pin[32];
@@ -238,7 +239,7 @@ void fj_ctap2_forget_all(void) { ctap_forget_count++; }
 void fj_ctap2_init(void) {}
 void fj_ctap2_forget_profile(unsigned profile_id) { (void)profile_id; ctap_forget_count++; }
 void fj_ctap2_invalidate_discovery(void) {}
-void fj_pin_reset_token(void) {}
+void fj_pin_reset_token(void) { token_reset_count++; }
 
 bool fj_keys_profile_erase(unsigned profile_id) {
     (void)profile_id;
@@ -625,7 +626,40 @@ static void test_completed_job_is_scrubbed(void) {
         assert(((const uint8_t *)&job.payload)[i] == 0);
 }
 
+static void test_lock_cancels_secret_jobs(void) {
+    reset_fixture();
+    assert(fj_state_set_passphrase("testpass1"));
+    assert(fj_state_unlock("testpass1"));
+    uint8_t original_master[32], after[32];
+    assert(fj_state_cwk(original_master));
+
+    fj_state_job_t job;
+    fj_state_job_start(&job, FJ_JOB_SETPASS, "replacement-pass", NULL, NULL);
+    fj_state_lock();
+    assert(!fj_state_job_step(&job));
+    assert(job.result != FJ_RES_OK);
+    assert(fj_state_unlock("testpass1"));
+    assert(fj_state_cwk(after));
+    assert(memcmp(original_master, after, sizeof(after)) == 0);
+
+    fj_state_job_start(&job, FJ_JOB_SETPUK, "replacement-puk", NULL, NULL);
+    now_us += 2000000;
+    assert(fj_state_set_timeout(1));
+    now_us += 1000000;
+    fj_state_tick();
+    assert(fj_state_get() == FJ_STATE_LOCKED);
+    assert(!fj_state_job_step(&job));
+    assert(job.result != FJ_RES_OK);
+    assert(!fj_keys_puk_configured());
+
+    assert(fj_state_unlock("testpass1"));
+    unsigned before = token_reset_count;
+    assert(fj_state_set_ctap2_pin("1234"));
+    assert(token_reset_count == before + 1);
+}
+
 int main(void) {
+    test_lock_cancels_secret_jobs();
     test_completed_job_is_scrubbed();
     test_retry_domain_split();
 

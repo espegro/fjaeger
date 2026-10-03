@@ -63,6 +63,7 @@ typedef struct {
     uint8_t phase;
     fj_job_result_t result;
     bool busy;
+    uint32_t lock_epoch;       /* cancel if the device locks during a job */
 
     char a1[FJ_SECRET_MAX], a2[FJ_SECRET_MAX], a3[FJ_SECRET_MAX];
 
