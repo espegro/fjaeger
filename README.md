@@ -185,7 +185,7 @@ To flash the pre-built firmware directly with `picotool` (no build needed):
 
 ```bash
 # put the dongle in BOOTSEL mode first
-picotool load -f releases/fjaeger-034ebf3.uf2
+picotool load -f releases/fjaeger-582dcb9.uf2
 picotool reboot
 ```
 
