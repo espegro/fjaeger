@@ -423,6 +423,54 @@ ssh-keygen -Y verify -f allowed_signers -I <name> -n test -s file.txt.sig < file
 `allowed_signers` must be of the form
 `name sk-ecdsa-sha2-nistp256@openssh.com <base64 key>`.
 
+## Testing
+
+### Host tests
+
+Six host tests compile the firmware sources with stubs and run on x86-64:
+
+```bash
+scripts/run_all_tests.sh
+```
+
+Tests cover:
+- Security: PIN/PUK recovery, lockout, factory wipe
+- CTAP2: CBOR parsing, makeCredential, getAssertion, resident keys
+- Profiles: isolation, credential binding, cache consistency
+- Crypto: PBKDF2/HMAC-SHA256 against RFC vectors
+- Security scrubbing: pin_token and auth_priv secure-zero on reset
+
+### Device verification
+
+After flashing, verify the device responds:
+
+```bash
+scripts/check_device.py
+```
+
+Shows version, lock state, profiles, and PUK status via serial.
+
+### Manual hardware testing
+
+For end-to-end PUK unlock and signing verification:
+
+```bash
+# See detailed procedure in:
+tests/MANUAL_TEST_PUK_SIGNING.md
+
+# Semi-automated test (requires manual serial steps):
+scripts/test_puk_signing.sh
+```
+
+Verifies that credentials can be decrypted and signed after PUK unlock recovers
+the master key M.
+
+### Security review
+
+A comprehensive security analysis is documented in `SECURITY_REVIEW.md`,
+covering authentication logic, credential wrapping key management, and known
+limitations.
+
 ## Status / known limitations
 
 - **Legacy U2F/CTAP1 is disabled.** The device advertises CTAPHID `NMSG` until
