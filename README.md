@@ -453,7 +453,13 @@ ssh-keygen -Y verify -f allowed_signers -I <name> -n test -s file.txt.sig < file
   the data region is written lazily. Data survives reboot.
   - **Deferred write-behind:** USB MSC callbacks queue sector writes; the
     actual flash erase/program happens in the main loop (`fj_msc_task`), never
-    inside a USB transaction. Data flushes on `LOCK`/unmount and continuously.
+    inside a USB transaction. Data flushes continuously and before unmount.
+    If a flush fails during `LOCK`, the USB volume closes immediately while
+    the firmware retains the disk key and queued writes in RAM for retries.
+    `STATUS`/`DISK STATUS` reports `disk_flush_pending`; keep the device powered
+    until it clears. If the error is permanent, `DISK LOCK FORCE YES` discards
+    the queued writes and wipes the RAM key. A power loss can still lose
+    writes that the host already sent.
   - **Corruption detection:** a persistent CRC-32 table (one per 4 KiB block,
     stored in cleartext in the last blocks of the partition) is checked when
     blocks are read, so corrupted blocks are detected rather than served to the

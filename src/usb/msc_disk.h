@@ -42,6 +42,10 @@ bool fj_msc_format(void);
 
 /* Lock/unmount the drive and discard the unwrapped disk key. */
 void fj_msc_lock(void);
+/* True while a failed flush keeps queued writes and the disk key in RAM. */
+bool fj_msc_lock_pending(void);
+/* Factory reset intentionally discards any unrecoverable queued disk writes. */
+void fj_msc_force_lock(void);
 
 /* Mount (true) or unmount (false) the volume to the host. */
 void fj_msc_set_ready(bool ready);

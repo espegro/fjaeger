@@ -235,6 +235,7 @@ bool fj_keys_get_master_puk_wrap(uint8_t enc[32], uint8_t salt[16]) {
 }
 
 void fj_msc_lock(void) { disk_lock_count++; }
+void fj_msc_force_lock(void) {}
 void fj_ctap2_forget_all(void) { ctap_forget_count++; }
 void fj_ctap2_init(void) {}
 void fj_ctap2_forget_profile(unsigned profile_id) { (void)profile_id; ctap_forget_count++; }

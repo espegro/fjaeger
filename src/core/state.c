@@ -189,6 +189,7 @@ void fj_state_factory_reset(void) {
     lock_epoch++;
     /* Flush and destroy live material before erasing its persistent copy. */
     fj_msc_lock();
+    fj_msc_force_lock();
     fj_ctap2_forget_all();
     fj_keys_wipe();
     fj_secure_zero(pass_hash, sizeof(pass_hash));

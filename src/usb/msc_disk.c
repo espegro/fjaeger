@@ -64,6 +64,8 @@ static bool disk_ready = false;
 static bool fs_initialised = false;
 static bool disk_unlocked = false;   /* set once the disk PIN is verified */
 static bool disk_io_error = false;
+static bool disk_lock_pending = false;
+static absolute_time_t lock_retry_at;
 
 /* Permanent disk key (two AES-128 keys for XTS). */
 static uint8_t disk_key[FJ_AES_KEY_BYTES];
@@ -696,6 +698,7 @@ void fj_msc_init(void) {
     disk_unlocked = false;
     fs_initialised = false;
     disk_io_error = false;
+    disk_lock_pending = false;
 }
 
 /* Derive the 32-byte disk key-wrapping key from the disk PIN and salt using
@@ -762,14 +765,40 @@ fj_puk_result_t fj_msc_unblock_puk(const char *puk) {
 }
 
 void fj_msc_lock(void) {
-    if (disk_unlocked) {
+    /* Close the USB volume immediately. If flash refuses a queued write,
+     * retain the disk key and queue in RAM for a later retry. */
+    disk_ready = false;
+    if (disk_unlocked && !disk_lock_pending) {
+        if (!flush_pending_writes()) {
+            disk_lock_pending = true;
+            lock_retry_at = get_absolute_time() + 1000000;
+            return;
+        }
         /* Remove any backup file so it does not linger on the (still
          * encrypted) disk once the drive is locked. */
-        fj_msc_backup_delete();
-        (void)flush_pending_writes();
+        /* Backup deletion requires the volume to be marked ready internally. */
+        disk_ready = true;
+        (void)fj_msc_backup_delete();
+        disk_ready = false;
     }
+    if (disk_unlocked && !flush_pending_writes()) {
+        disk_lock_pending = true;
+        lock_retry_at = get_absolute_time() + 1000000;
+        return;
+    }
+    disk_unlocked = false;
+    disk_lock_pending = false;
+    disk_io_error = false;
+    wq_reset();
+    memset(disk_key, 0, sizeof(disk_key));
+}
+
+bool fj_msc_lock_pending(void) { return disk_lock_pending; }
+
+void fj_msc_force_lock(void) {
     disk_ready = false;
     disk_unlocked = false;
+    disk_lock_pending = false;
     disk_io_error = false;
     wq_reset();
     memset(disk_key, 0, sizeof(disk_key));
@@ -795,7 +824,12 @@ bool fj_msc_format(void) {
 }
 
 void fj_msc_task(void) {
-    if (disk_ready && !disk_io_error) (void)flush_pending_writes();
+    if (disk_lock_pending) {
+        if (absolute_time_diff_us(lock_retry_at, get_absolute_time()) >= 0)
+            fj_msc_lock();
+    } else if (disk_ready && !disk_io_error) {
+        (void)flush_pending_writes();
+    }
 }
 
 void tud_msc_inquiry_cb(uint8_t lun, uint8_t vendor_id[8],
@@ -905,7 +939,8 @@ int32_t tud_msc_scsi_cb(uint8_t lun, uint8_t const scsi_cmd[16],
 void fj_msc_set_ready(bool ready) {
     /* Caller must defer unmount while writes are pending. */
     if (!ready && (!wq_empty() || crc_dirty_pages != 0 || disk_io_error)) return;
-    disk_ready = ready && disk_unlocked && fs_initialised;
+    disk_ready = ready && disk_unlocked && fs_initialised &&
+                 !disk_lock_pending && fj_state_get() == FJ_STATE_UNLOCKED;
 }
 
 bool fj_msc_is_ready(void) {
@@ -935,7 +970,7 @@ void fj_disk_job_start(fj_disk_job_t *j, fj_job_kind_t kind, const char *a1) {
     j->result = FJ_RES_ERR;
     j->busy = true;
     if (a1) { strncpy(j->a1, a1, sizeof(j->a1) - 1); j->a1[sizeof(j->a1) - 1] = '\0'; }
-    if (fj_state_get() != FJ_STATE_UNLOCKED) {
+    if (fj_state_get() != FJ_STATE_UNLOCKED || disk_lock_pending) {
         j->result = FJ_RES_BAD_SECRET;
         j->busy = false;
         return;

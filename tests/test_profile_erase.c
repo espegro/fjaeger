@@ -103,6 +103,7 @@ bool fj_ed25519_sign(const uint8_t seed[32], const uint8_t *message,
 absolute_time_t get_absolute_time(void) { return 0; }
 int64_t absolute_time_diff_us(absolute_time_t a, absolute_time_t b) { (void)a; return b; }
 void fj_msc_lock(void) {}
+void fj_msc_force_lock(void) {}
 /* Store the PIN/PUK so the real state.c unlock path can verify them. */
 static uint8_t stored_pin[32];
 static uint8_t stored_pin_salt[16];

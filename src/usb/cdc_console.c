@@ -273,6 +273,7 @@ static void cmd_help(void) {
     outln("  DISK UNLOCK <pin>          unlock and mount the encrypted drive");
     outln("  DISK UNBLOCK <puk>         clear a disk-PIN lock (the disk PIN is still needed)");
     outln("  DISK LOCK                  lock and unmount the drive");
+    outln("  DISK LOCK FORCE YES        discard pending writes after an I/O failure");
     outln("  DISK FORMAT YES             erase ALL drive data and rebuild the filesystem");
     outln("");
     outln("  PROFILE LIST               list profiles, the active one and credential counts");
@@ -312,7 +313,7 @@ static void cmd_help(void) {
 }
 
 static void cmd_status(void) {
-    char buf[256];
+    char buf[320];
     fj_security_t sec = {0};
     bool have_sec = fj_keys_get_security(&sec);
     snprintf(buf, sizeof(buf), "version: %s\r\n"
@@ -324,6 +325,7 @@ static void cmd_status(void) {
              "ctap_pin_fail: %u\r\n"
              "disk_blocked: %s\r\n"
              "disk_fail: %u\r\n"
+             "disk_flush_pending: %s\r\n"
              "puk: %s\r\n"
              "puk_fail: %u\r\n"
              "active_profile: %u\r\n"
@@ -335,6 +337,7 @@ static void cmd_status(void) {
              (have_sec && sec.pass_blocked) ? "yes" : "no", (unsigned)sec.pass_fail,
              (have_sec && sec.ctap_pin_blocked) ? "yes" : "no", (unsigned)sec.ctap_pin_fail,
              (have_sec && sec.disk_blocked) ? "yes" : "no", (unsigned)sec.disk_fail,
+             fj_msc_lock_pending() ? "yes (keep powered)" : "no",
              fj_keys_puk_configured() ? "set" : "unset", (unsigned)sec.puk_fail,
              fj_keys_active_profile(), fj_keys_profile_count(),
              (unsigned long)fj_state_timeout());
@@ -343,7 +346,9 @@ static void cmd_status(void) {
 
 static void cmd_lock(void) {
     fj_state_lock();
-    outln("OK locked");
+    outln(fj_msc_lock_pending()
+          ? "ERR device locked; disk flush pending, keep powered"
+          : "OK locked");
 }
 
 static void do_unlock(const char *passphrase) {
@@ -459,14 +464,15 @@ static void cmd_disk(const char *sub, char *rest) {
         return;
     }
     if (strcasecmp(sub, "status") == 0) {
-        char buf[96];
+        char buf[128];
         fj_security_t sec = {0};
         fj_keys_get_security(&sec);
         snprintf(buf, sizeof(buf), "disk: %s%s\r\n"
-                 "disk_fail: %u",
+                 "disk_fail: %u\r\nflush_pending: %s",
                  fj_msc_is_ready() ? "unlocked" : "locked",
                  sec.disk_blocked ? " (PIN blocked, use DISK UNBLOCK)" : "",
-                 (unsigned)sec.disk_fail);
+                 (unsigned)sec.disk_fail,
+                 fj_msc_lock_pending() ? "yes (keep powered)" : "no");
         outln(buf);
     } else if (strcasecmp(sub, "unlock") == 0) {
         if (!require_unlocked()) return;
@@ -481,8 +487,22 @@ static void cmd_disk(const char *sub, char *rest) {
         job_active = true;
         job_is_disk = true;
     } else if (strcasecmp(sub, "lock") == 0) {
+        const char *mode = next_token(&rest);
+        if (mode) {
+            const char *confirm = next_token(&rest);
+            if (strcasecmp(mode, "force") != 0 || !confirm ||
+                strcasecmp(confirm, "yes") != 0) {
+                outln("ERR usage: DISK LOCK FORCE YES");
+                return;
+            }
+            fj_msc_force_lock();
+            outln("OK disk locked; pending writes discarded");
+            return;
+        }
         fj_msc_lock();
-        outln("OK disk locked");
+        outln(fj_msc_lock_pending()
+              ? "ERR disk closed; flush pending, keep powered or use DISK LOCK FORCE YES"
+              : "OK disk locked");
     } else if (strcasecmp(sub, "setpin") == 0) {
         if (!require_unlocked()) return;
         const char *pin = next_token(&rest);
