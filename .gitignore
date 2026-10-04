@@ -28,3 +28,4 @@
 # libFuzzer auto-generated corpus files (keep only curated seeds)
 /fuzz/corpus/*
 !/fuzz/corpus/*.seed
+/tui/fjaeger-tui
