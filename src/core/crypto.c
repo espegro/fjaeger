@@ -185,8 +185,7 @@ fail:
 }
 
 bool fj_crypto_ok(void) {
-    /* A trivial self-check: derive the RNG path is operational by hashing a
-     * fixed input and comparing against a known vector. */
+    /* SHA-256 known-answer test; this does not test the RNG. */
     uint8_t out[FJ_HASH_LEN];
     const uint8_t in[] = "abc";
     const uint8_t expect[FJ_HASH_LEN] = {
@@ -195,8 +194,8 @@ bool fj_crypto_ok(void) {
         0xb0,0x03,0x61,0xa3,0x96,0x17,0x7a,0x9c,
         0xb4,0x10,0xff,0x61,0xf2,0x00,0x15,0xad,
     };
-    fj_sha256(in, sizeof(in) - 1, out);
-    return memcmp(out, expect, FJ_HASH_LEN) == 0;
+    return mbedtls_sha256(in, sizeof(in) - 1, out, 0) == 0 &&
+           memcmp(out, expect, FJ_HASH_LEN) == 0;
 }
 
 bool fj_xts_sector(const uint8_t data_key[32], const uint8_t tweak[16],
@@ -291,19 +290,19 @@ bool fj_aes_cbc(const uint8_t key[32], const uint8_t iv[16],
 bool fj_hmac_sha256(const uint8_t *key, size_t key_len,
                     const uint8_t *data, size_t len,
                     uint8_t out[32]) {
-    /* HMAC-SHA256 built directly on the mbedTLS SHA-256 context. This uses a
-     * ~100-byte stack frame instead of mbedtls_md_hmac's much larger
-     * mbedtls_md_context, which matters on the RP2350's limited RAM when a
-     * PBKDF2 pass runs deep in the unlock/backup call stack. */
-    uint8_t k[64], ipad[64], opad[64], inner[32];
+    /* Sequential SHA contexts avoid contention for the Pico accelerator. */
+    uint8_t k[64], ipad[64], opad[64], inner[32], kh[32];
+    bool ok = false;
+    mbedtls_sha256_context ctx;
+    memset(&ctx, 0, sizeof(ctx)); /* Pico's init is a no-op. */
+    mbedtls_sha256_init(&ctx);
     memset(k, 0, sizeof(k));
     if (key_len > 64) {
-        uint8_t kh[32];
-        mbedtls_sha256(key, key_len, kh, 0);
+        if (mbedtls_sha256(key, key_len, kh, 0) != 0) goto done;
         memcpy(k, kh, 32);
         fj_secure_zero(kh, sizeof(kh));
     } else {
-        memcpy(k, key, key_len);
+        if (key_len) memcpy(k, key, key_len);
     }
     for (int i = 0; i < 64; i++) {
         ipad[i] = k[i] ^ 0x36;
@@ -311,26 +310,29 @@ bool fj_hmac_sha256(const uint8_t *key, size_t key_len,
     }
     fj_secure_zero(k, sizeof(k));
 
-    mbedtls_sha256_context ctx;
-    mbedtls_sha256_init(&ctx);
-
     /* inner = SHA-256(ipad || message) */
-    mbedtls_sha256_starts(&ctx, 0);
-    mbedtls_sha256_update(&ctx, ipad, 64);
-    mbedtls_sha256_update(&ctx, data, len);
-    mbedtls_sha256_finish(&ctx, inner);
+    if (mbedtls_sha256_starts(&ctx, 0) != 0 ||
+        mbedtls_sha256_update(&ctx, ipad, 64) != 0 ||
+        mbedtls_sha256_update(&ctx, data, len) != 0 ||
+        mbedtls_sha256_finish(&ctx, inner) != 0) goto done;
 
     /* out = SHA-256(opad || inner) */
-    mbedtls_sha256_starts(&ctx, 0);
-    mbedtls_sha256_update(&ctx, opad, 64);
-    mbedtls_sha256_update(&ctx, inner, 32);
-    mbedtls_sha256_finish(&ctx, out);
+    if (mbedtls_sha256_starts(&ctx, 0) != 0 ||
+        mbedtls_sha256_update(&ctx, opad, 64) != 0 ||
+        mbedtls_sha256_update(&ctx, inner, 32) != 0 ||
+        mbedtls_sha256_finish(&ctx, out) != 0) goto done;
+    ok = true;
 
+done:
     mbedtls_sha256_free(&ctx);
+    fj_secure_zero(&ctx, sizeof(ctx)); /* Pico's free only releases hardware. */
+    fj_secure_zero(k, sizeof(k));
+    fj_secure_zero(kh, sizeof(kh));
     fj_secure_zero(ipad, sizeof(ipad));
     fj_secure_zero(opad, sizeof(opad));
     fj_secure_zero(inner, sizeof(inner));
-    return true;
+    if (!ok) fj_secure_zero(out, 32);
+    return ok;
 }
 
 bool fj_ct_equal(const void *a, const void *b, size_t n) {
@@ -341,55 +343,74 @@ bool fj_ct_equal(const void *a, const void *b, size_t n) {
     return diff == 0;
 }
 
+static void kdf_fail(fj_kdf_t *k) {
+    fj_secure_zero(k, sizeof(*k));
+    k->failed = true;
+}
+
+static void kdf_complete(fj_kdf_t *k) {
+    k->running = false;
+    fj_secure_zero(k->password, sizeof(k->password));
+    fj_secure_zero(k->u, sizeof(k->u));
+}
+
 bool fj_kdf_begin(fj_kdf_t *k, const uint8_t *password, size_t pw_len,
                   const uint8_t *salt, size_t salt_len, uint32_t iterations) {
-    if (!k || iterations == 0 || salt_len > FJ_KDF_SALT_MAX)
+    if (!k) return false;
+    kdf_fail(k); /* Invalid input must not leave an old result usable. */
+    if (iterations == 0 || salt_len > FJ_KDF_SALT_MAX ||
+        pw_len > FJ_KDF_PW_MAX || (!password && pw_len) || (!salt && salt_len))
         return false;
-    if (pw_len > FJ_KDF_PW_MAX)
-        return false;
-
-    memset(k, 0, sizeof(*k));
-    memcpy(k->password, password, pw_len);
+    k->failed = false;
+    if (pw_len) memcpy(k->password, password, pw_len);
     k->pw_len = pw_len;
-    memcpy(k->salt, salt, salt_len);
+    if (salt_len) memcpy(k->salt, salt, salt_len);
     k->salt_len = salt_len;
     k->iterations = iterations;
 
     /* U_1 = HMAC(password, salt || INT(1)); T_1 = U_1. */
     uint8_t block[FJ_KDF_SALT_MAX + 4];
-    memcpy(block, salt, salt_len);
+    if (salt_len) memcpy(block, salt, salt_len);
     block[salt_len] = 0;
     block[salt_len + 1] = 0;
     block[salt_len + 2] = 0;
     block[salt_len + 3] = 1;
-    if (!fj_hmac_sha256(password, pw_len, block, salt_len + 4, k->u))
+    if (!fj_hmac_sha256(password, pw_len, block, salt_len + 4, k->u)) {
+        kdf_fail(k);
         return false;
+    }
     memcpy(k->out, k->u, 32);
     k->i = 1;
-    k->running = true;
+    k->running = iterations > 1;
+    if (!k->running) kdf_complete(k);
     return true;
 }
 
 bool fj_kdf_step(fj_kdf_t *k) {
-    if (!k || !k->running) return false;
+    if (!k || !k->running || k->failed) return false;
 
-    /* iterations == 1 needs no inner rounds; the result is already in out. */
+    /* Defensively handle an already completed context. */
     if (k->i >= k->iterations) {
-        k->running = false;
+        kdf_complete(k);
         return false;
     }
 
     if (!fj_hmac_sha256(k->password, k->pw_len, k->u, 32, k->u)) {
-        k->running = false;
+        kdf_fail(k);
         return false;
     }
     for (int j = 0; j < 32; j++) k->out[j] ^= k->u[j];
     k->i++;
-    return k->i < k->iterations;
+    if (k->i == k->iterations) kdf_complete(k);
+    return k->running;
 }
 
 bool fj_kdf_result(const fj_kdf_t *k, uint8_t out[32]) {
-    if (!k || !out) return false;
+    if (!out) return false;
+    if (!k || k->failed || k->running || !k->iterations || k->i != k->iterations) {
+        fj_secure_zero(out, 32);
+        return false;
+    }
     memcpy(out, k->out, 32);
     return true;
 }
@@ -397,12 +418,13 @@ bool fj_kdf_result(const fj_kdf_t *k, uint8_t out[32]) {
 bool fj_pbkdf2_sha256(const uint8_t *password, size_t pw_len,
                       const uint8_t *salt, size_t salt_len,
                       uint32_t iterations, uint8_t out[32]) {
-    if (iterations == 0 || salt_len > FJ_KDF_SALT_MAX) return false;
-    if (pw_len > FJ_KDF_PW_MAX) return false;
-
+    if (!out) return false;
     fj_kdf_t k;
-    if (!fj_kdf_begin(&k, password, pw_len, salt, salt_len, iterations))
+    if (!fj_kdf_begin(&k, password, pw_len, salt, salt_len, iterations)) {
+        fj_secure_zero(out, 32);
+        fj_secure_zero(&k, sizeof(k));
         return false;
+    }
     while (fj_kdf_step(&k)) {
         /* No USB servicing here: firmware paths that must not block drive the
          * resumable KDF from the main loop instead. This wrapper is used by

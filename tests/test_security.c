@@ -692,7 +692,52 @@ static void test_restore_cancelled_each_phase(void) {
     }
 }
 
+static void test_kdf_failure_cancels_jobs(void) {
+    const struct { fj_job_kind_t kind; unsigned phases; } cases[] = {
+        {FJ_JOB_SETPASS,2}, {FJ_JOB_UNLOCK,2}, {FJ_JOB_SETPUK,2},
+        {FJ_JOB_UNLOCKPUK,2}, {FJ_JOB_VERIFY_PUK,1}, {FJ_JOB_BACKUP,1},
+        {FJ_JOB_RESTORE,5}
+    };
+    for (unsigned c=0; c<sizeof(cases)/sizeof(cases[0]); c++) {
+        for (unsigned phase=0; phase<cases[c].phases; phase++) {
+            reset_fixture();
+            assert(fj_state_set_passphrase("testpass1"));
+            assert(fj_state_unlock("testpass1"));
+            assert(fj_state_set_puk("recovery-code"));
+            assert(fj_state_backup_write("backup-pass"));
+            uint8_t old_hash[32], old_master[32], after[32];
+            memcpy(old_hash, stored_pin,32);
+            assert(fj_state_cwk(old_master));
+            fj_security_t old_security=security;
+            fj_job_kind_t kind=cases[c].kind;
+            const char *secret = kind==FJ_JOB_UNLOCK ? "testpass1" :
+                (kind==FJ_JOB_UNLOCKPUK || kind==FJ_JOB_VERIFY_PUK) ? "recovery-code" :
+                kind==FJ_JOB_RESTORE ? "backup-pass" : "replacement-secret";
+            fj_state_job_t job;
+            fj_state_job_start(&job,kind,secret,"replacement-pass","replacement-puk");
+            while (job.phase<phase) assert(fj_state_job_step(&job));
+            /* Model a failed SHA operation in the active KDF. */
+            job.kdf[phase].failed=true;
+            job.kdf[phase].running=false;
+            memset(job.kdf[phase].out,0xa5,32);
+            assert(!fj_state_job_step(&job));
+            assert(job.result==FJ_RES_ERR);
+            assert(memcmp(old_hash,stored_pin,32)==0);
+            assert(memcmp(&old_security,&security,sizeof(security))==0);
+            assert(backup_writes==1);
+            assert(fj_state_cwk(after));
+            assert(memcmp(old_master,after,32)==0);
+            for (size_t i=0;i<sizeof(job.kdf);i++)
+                assert(((uint8_t *)job.kdf)[i]==0);
+            fj_state_lock();
+            assert(fj_state_unlock("testpass1"));
+            assert(fj_state_unlock_puk("recovery-code")==FJ_PUK_OK);
+        }
+    }
+}
+
 int main(void) {
+    test_kdf_failure_cancels_jobs();
     test_restore_cancelled_each_phase();
     test_lock_cancels_secret_jobs();
     test_completed_job_is_scrubbed();

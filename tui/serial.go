@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"io"
 	"strings"
 	"sync"
 	"time"
@@ -21,8 +22,10 @@ const (
 
 // Device wraps a serial connection to the Fjaeger console.
 type Device struct {
-	mu   sync.Mutex
-	port serial.Port
+	mu         sync.Mutex
+	port       serial.Port
+	needsSync  bool
+	promptTail []byte
 }
 
 // Connect opens the serial port at path.
@@ -65,20 +68,46 @@ func (d *Device) readUntilPrompt() (string, error) {
 
 func (d *Device) readUntilDeadline(deadline time.Time) (string, error) {
 	var buf bytes.Buffer
+	buf.Write(d.promptTail)
+	d.needsSync = true
 	for time.Now().Before(deadline) {
 		tmp := make([]byte, 256)
 		n, err := d.port.Read(tmp)
 		if n > 0 {
 			buf.Write(tmp[:n])
 			if bytes.Contains(buf.Bytes(), []byte(prompt)) {
+				d.needsSync = false
+				d.promptTail = nil
 				return buf.String(), nil
 			}
 		}
 		if err != nil {
+			d.savePromptTail(buf.Bytes())
 			return "", fmt.Errorf("serial read: %w", err)
 		}
 	}
-	return "", errors.New("timed out waiting for device prompt")
+	d.savePromptTail(buf.Bytes())
+	return "", errors.New("timed out waiting for device prompt; command may still be running")
+}
+
+// Keep only a possible partial prompt, never the previous command's output.
+func (d *Device) savePromptTail(data []byte) {
+	d.promptTail = nil
+	for n := len(prompt) - 1; n > 0; n-- {
+		if bytes.HasSuffix(data, []byte(prompt[:n])) {
+			d.promptTail = append([]byte(nil), data[len(data)-n:]...)
+			return
+		}
+	}
+}
+
+func (d *Device) synchronize() error {
+	if d.needsSync {
+		if _, err := d.readUntilPrompt(); err != nil {
+			return fmt.Errorf("waiting for previous command to finish: %w", err)
+		}
+	}
+	return nil
 }
 
 // Exec sends one command line and returns the device reply (prompt removed).
@@ -88,11 +117,21 @@ func (d *Device) Exec(cmd string) (string, error) {
 	if d.port == nil {
 		return "", errors.New("not connected")
 	}
-	// Drop anything left over from a previous interaction.
-	_ = d.port.ResetInputBuffer()
-
-	if _, err := d.port.Write([]byte(cmd + "\r\n")); err != nil {
+	// Drain a timed-out command before sending anything new. Its late reply
+	// must never be mistaken for the response to this command.
+	if err := d.synchronize(); err != nil {
 		return "", err
+	}
+	if err := d.port.ResetInputBuffer(); err != nil {
+		return "", err
+	}
+
+	d.needsSync = true
+	line := []byte(cmd + "\r\n")
+	if n, err := d.port.Write(line); err != nil {
+		return "", err
+	} else if n != len(line) {
+		return "", io.ErrShortWrite
 	}
 	raw, err := d.readUntilPrompt()
 	if err != nil {
@@ -113,6 +152,9 @@ func (d *Device) Reset(cmd string) error {
 	defer d.mu.Unlock()
 	if d.port == nil {
 		return errors.New("not connected")
+	}
+	if err := d.synchronize(); err != nil {
+		return err
 	}
 	_, _ = d.port.Write([]byte(cmd + "\r\n"))
 	time.Sleep(500 * time.Millisecond)

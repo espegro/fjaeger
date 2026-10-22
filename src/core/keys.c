@@ -221,6 +221,8 @@ static bool write_store(void) {
 
     active_copy = (int)target;
     active_generation = generation;
+    /* Publish restored profile selection only after the transaction is saved. */
+    active_profile = store.active_profile;
     return true;
 }
 
@@ -299,6 +301,8 @@ bool fj_keys_backup_fill(fj_backup_payload_t *out) {
 
 bool fj_keys_backup_restore(const fj_backup_payload_t *in) {
     if (!store_loaded || !in) return false;
+    if (!in->active_profile_valid || in->active_profile >= FJ_NUM_PROFILES ||
+        !in->profiles[in->active_profile].in_use) return false;
     memcpy(store.ctap2, in->ctap2, sizeof(store.ctap2));
     memcpy(store.profiles, in->profiles, sizeof(store.profiles));
     store.active_profile = in->active_profile;

@@ -103,17 +103,19 @@ typedef struct {
     uint8_t salt[FJ_KDF_SALT_MAX];
     size_t  salt_len;
     uint32_t iterations;
-    uint32_t i;               /* index of the next inner iteration to run */
+    uint32_t i;               /* number of completed HMAC iterations */
     uint8_t  u[32];           /* current U block */
     uint8_t  out[32];         /* accumulated T */
     bool running;
+    bool failed;             /* sticky until the next fj_kdf_begin() */
 } fj_kdf_t;
 
 bool fj_kdf_begin(fj_kdf_t *k, const uint8_t *password, size_t pw_len,
                   const uint8_t *salt, size_t salt_len, uint32_t iterations);
 /* Advance one inner iteration. Returns true while more work remains; false
  * once complete (or on a fatal error, in which case running is also cleared).
- * fj_kdf_result() returns the derived key once finished. */
+ * fj_kdf_result() rejects unstarted, incomplete and failed derivations and
+ * clears the output on rejection. Callers must check failed before using out. */
 bool fj_kdf_step(fj_kdf_t *k);
 bool fj_kdf_result(const fj_kdf_t *k, uint8_t out[32]);
 

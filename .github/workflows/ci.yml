@@ -81,12 +81,11 @@ jobs:
             src/fido/cbor.c src/fido/pin.c -o /tmp/fjaeger-test-profile-erase
           /tmp/fjaeger-test-profile-erase
 
-          # The HMAC/PBKDF2 host test is self-contained (no Pico SDK/mbedTLS)
-          # and verifies the production HMAC/PBKDF2 construction against
-          # RFC 4231 (HMAC) and RFC 7914 (PBKDF2) vectors. The other tests
-          # stub these out, so this is the only check of the real algorithm.
+          # Exercise production HMAC/PBKDF2 and inject failures at the SHA API.
           cc $COMMON -Isrc/core \
-            tests/test_hmac.c -o /tmp/fjaeger-test-hmac
+            tests/test_hmac.c src/core/crypto.c -lmbedcrypto \
+            -Wl,--wrap=mbedtls_sha256,--wrap=mbedtls_sha256_starts,--wrap=mbedtls_sha256_update,--wrap=mbedtls_sha256_finish \
+            -o /tmp/fjaeger-test-hmac
           /tmp/fjaeger-test-hmac
 
           cc $COMMON -Isrc/core -Ithird_party/monocypher \
@@ -101,8 +100,14 @@ jobs:
             -o /tmp/fjaeger-test-crypto-gcm
           /tmp/fjaeger-test-crypto-gcm
 
-          cc $COMMON tests/test_pin_token_scrub.c -o /tmp/fjaeger-test-pin-token-scrub
+          cc $COMMON -Isrc/core -Isrc/fido -Isrc/led tests/test_pin_token_scrub.c \
+            src/fido/cbor.c fuzz/stubs.c \
+            -Wl,--wrap=fj_ecdh_shared_secret,--wrap=fj_aes_cbc,--wrap=fj_state_ctap2_verify \
+            -o /tmp/fjaeger-test-pin-token-scrub
           /tmp/fjaeger-test-pin-token-scrub
+          cc $COMMON -Itests/stubs -Isrc/core tests/test_keys_restore.c \
+            src/core/keys.c -o /tmp/fjaeger-test-keys-restore
+          /tmp/fjaeger-test-keys-restore
 
   tui-tests:
     name: Terminal tests

@@ -202,16 +202,18 @@ static size_t get_pin_token(const uint8_t *req, size_t len,
     if (sec.ctap_pin_blocked) return ctap_err(out, cap, ERR_PIN_BLOCKED);
     if (!fj_state_brute_ok(FJ_BRUTE_CTAP)) return ctap_err(out, cap, ERR_PIN_BLOCKED);
 
-    uint8_t secret[32];
+    uint8_t secret[32] = {0}, left16[16] = {0};
+    uint8_t tok_enc[FJ_PIN_TOKEN_LEN] = {0};
+    size_t result = ctap_err(out, cap, ERR_INVALID_PARAMETER);
+    bool minted = false;
     if (!compute_shared_secret(platform_pub, secret))
-        return ctap_err(out, cap, ERR_INVALID_PARAMETER);
+        goto cleanup;
 
     /* Decrypt LEFT(SHA-256(PIN),16). */
-    uint8_t left16[16];
     uint8_t zero_iv[16] = {0};
     memcpy(left16, pin_hash_enc, 16);
     if (!fj_aes_cbc(secret, zero_iv, left16, sizeof(left16), false))
-        return ctap_err(out, cap, ERR_INVALID_PARAMETER);
+        goto cleanup;
 
     /* Verify against the CTAP2 client-PIN verifier (LEFT(SHA-256(pin),16)).
      * The CTAP2 PIN is independent of the device unlock passphrase, so a
@@ -222,8 +224,9 @@ static size_t get_pin_token(const uint8_t *req, size_t len,
         if (sec.ctap_pin_fail >= FJ_MAX_PIN_FAILS) sec.ctap_pin_blocked = 1;
         fj_keys_set_security(&sec);
         fj_state_brute_failure(FJ_BRUTE_CTAP);
-        return ctap_err(out, cap, sec.ctap_pin_blocked ? ERR_PIN_BLOCKED
+        result = ctap_err(out, cap, sec.ctap_pin_blocked ? ERR_PIN_BLOCKED
                                                        : ERR_PIN_INVALID);
+        goto cleanup;
     }
 
     /* Correct (or dummy-mode): reset the retry counter and mint a token. */
@@ -234,23 +237,30 @@ static size_t get_pin_token(const uint8_t *req, size_t len,
     }
     fj_state_brute_success(FJ_BRUTE_CTAP);
     fj_random(pin_token, sizeof(pin_token));
-    token_valid = true;
+    minted = true;
+    token_valid = false;
 
     /* Return the token encrypted with the shared secret. */
-    uint8_t tok_enc[FJ_PIN_TOKEN_LEN];
     memcpy(tok_enc, pin_token, FJ_PIN_TOKEN_LEN);
     if (!fj_aes_cbc(secret, zero_iv, tok_enc, sizeof(tok_enc), true))
-        return ctap_err(out, cap, ERR_INVALID_PARAMETER);
+        goto cleanup;
 
-    if (cap < 2) return 0;
+    if (cap < 2) { result = 0; goto cleanup; }
     out[0] = 0;
     fj_cbor_writer w;
     fj_cbor_writer_init(&w, out + 1, cap - 1);
     fj_cbor_map(&w, 1);
     fj_cbor_uint(&w, RSP_PIN_TOKEN);
     fj_cbor_bstr(&w, tok_enc, sizeof(tok_enc));
-    if (!fj_cbor_ok(&w)) return 0;
-    return w.len + 1;
+    if (!fj_cbor_ok(&w)) { result = 0; goto cleanup; }
+    result = w.len + 1;
+    token_valid = true;
+cleanup:
+    fj_secure_zero(secret, sizeof(secret));
+    fj_secure_zero(left16, sizeof(left16));
+    fj_secure_zero(tok_enc, sizeof(tok_enc));
+    if (minted && !token_valid) fj_pin_reset_token();
+    return result;
 }
 
 size_t fj_ctap2_client_pin(const uint8_t *req, size_t len,
@@ -337,8 +347,8 @@ bool fj_pin_verify_auth(const uint8_t *message, size_t message_len,
                         const uint8_t param[16]) {
     if (!token_valid) return false;
     uint8_t mac[32];
-    if (!fj_hmac_sha256(pin_token, FJ_PIN_TOKEN_LEN, message, message_len, mac)) return false;
-    bool ok = fj_ct_equal(mac, param, 16);
-    memset(mac, 0, sizeof(mac));
+    bool ok = fj_hmac_sha256(pin_token, FJ_PIN_TOKEN_LEN, message, message_len, mac) &&
+              fj_ct_equal(mac, param, 16);
+    fj_secure_zero(mac, sizeof(mac));
     return ok;
 }

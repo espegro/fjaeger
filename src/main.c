@@ -31,10 +31,12 @@ int main(void) {
     board_init();
     stdio_init_all();
 
+    /* Fail closed before accessing keys or exposing USB services. */
+    if (!fj_crypto_ok()) panic("SHA-256 self-test failed");
+
     /* Initialise the security-key subsystems. */
     fj_keys_init();
     fj_state_init();
-    fj_crypto_ok();          /* verify mbedTLS initialised */
     fj_msc_init();
     fj_u2f_init();
     fj_ctap2_init();

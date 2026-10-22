@@ -339,7 +339,7 @@ bool fj_state_backup_restore(const char *password, const char *new_pass,
 static bool kdf_chunk_done(fj_kdf_t *k) {
     unsigned n = 0;
     while (k->running && n++ < FJ_JOB_KDF_CHUNK) fj_kdf_step(k);
-    return !k->running;
+    return !k->running && !k->failed;
 }
 
 static bool job_begin_kdf(fj_state_job_t *j, unsigned slot,
@@ -709,6 +709,12 @@ bool fj_state_job_step(fj_state_job_t *j) {
     case FJ_JOB_BACKUP:     job_run_backup(j); break;
     case FJ_JOB_RESTORE:    job_run_restore(j); break;
     default:                j->result = FJ_RES_ERR; j->busy = false; break;
+    }
+    for (unsigned i = 0; i < sizeof(j->kdf) / sizeof(j->kdf[0]); i++) {
+        if (j->kdf[i].failed) {
+            j->result = FJ_RES_ERR;
+            j->busy = false;
+        }
     }
     if (!j->busy) {
         state_job_scrub(j);

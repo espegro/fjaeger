@@ -2,17 +2,20 @@ package main
 
 import (
 	"errors"
-	"go.bug.st/serial"
 	"io"
 	"strings"
 	"testing"
 	"time"
+
+	"go.bug.st/serial"
 )
 
 type fakePort struct {
 	serial.Port
-	reply string
-	err   error
+	reply   string
+	err     error
+	writes  int
+	onWrite func()
 }
 
 func (p *fakePort) Read(b []byte) (int, error) {
@@ -20,8 +23,14 @@ func (p *fakePort) Read(b []byte) (int, error) {
 	p.reply = p.reply[n:]
 	return n, p.err
 }
-func (p *fakePort) Write(b []byte) (int, error) { return len(b), nil }
-func (p *fakePort) ResetInputBuffer() error     { return nil }
+func (p *fakePort) Write(b []byte) (int, error) {
+	p.writes++
+	if p.onWrite != nil {
+		p.onWrite()
+	}
+	return len(b), nil
+}
+func (p *fakePort) ResetInputBuffer() error { return nil }
 
 func TestExecReplies(t *testing.T) {
 	for _, tc := range []struct {
@@ -58,5 +67,46 @@ func TestReadErrorPreserved(t *testing.T) {
 	_, err := d.readUntilPrompt()
 	if !errors.Is(err, io.EOF) {
 		t.Fatalf("got %v", err)
+	}
+}
+
+func TestLateReplyDrainedBeforeNextCommand(t *testing.T) {
+	p := &fakePort{reply: "OLD\r\nOK old\r\nfja"}
+	d := Device{port: p}
+	_, err := d.readUntilDeadline(time.Now().Add(time.Millisecond))
+	if err == nil {
+		t.Fatal("expected timeout")
+	}
+	// The prompt itself straddles the timeout. Nothing may be discarded
+	// until its remaining bytes have been consumed.
+	p.reply = "eger> "
+	p.onWrite = func() {
+		if p.reply != "" {
+			t.Fatal("wrote before consuming old prompt")
+		}
+		p.reply = "STATUS\r\nOK new\r\nfjaeger> "
+	}
+	reply, err := d.Exec("STATUS")
+	if err != nil || reply != "OK new" || p.writes != 1 {
+		t.Fatalf("reply=%q err=%v writes=%d", reply, err, p.writes)
+	}
+}
+
+func TestNoWriteWhilePreviousCommandUnfinished(t *testing.T) {
+	p := &fakePort{reply: "partial"}
+	d := Device{port: p}
+	_, err := d.readUntilDeadline(time.Now().Add(time.Millisecond))
+	if err == nil {
+		t.Fatal("expected timeout")
+	}
+	p.err = io.EOF
+	if _, err := d.Exec("STATUS"); err == nil {
+		t.Fatal("expected sync error")
+	}
+	if err := d.Reset("REBOOT"); err == nil {
+		t.Fatal("expected sync error")
+	}
+	if p.writes != 0 {
+		t.Fatal("sent command while response incomplete")
 	}
 }

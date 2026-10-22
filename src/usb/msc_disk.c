@@ -790,7 +790,7 @@ void fj_msc_lock(void) {
     disk_lock_pending = false;
     disk_io_error = false;
     wq_reset();
-    memset(disk_key, 0, sizeof(disk_key));
+    fj_secure_zero(disk_key, sizeof(disk_key));
 }
 
 bool fj_msc_lock_pending(void) { return disk_lock_pending; }
@@ -801,7 +801,7 @@ void fj_msc_force_lock(void) {
     disk_lock_pending = false;
     disk_io_error = false;
     wq_reset();
-    memset(disk_key, 0, sizeof(disk_key));
+    fj_secure_zero(disk_key, sizeof(disk_key));
 }
 
 bool fj_msc_set_pin(const char *pin) {
@@ -961,7 +961,7 @@ static bool dkdf_begin(fj_disk_job_t *j, unsigned slot, const char *pin,
 static bool dkdf_chunk_done(fj_kdf_t *k) {
     unsigned n = 0;
     while (k->running && n++ < FJ_JOB_KDF_CHUNK) fj_kdf_step(k);
-    return !k->running;
+    return !k->running && !k->failed;
 }
 
 void fj_disk_job_start(fj_disk_job_t *j, fj_job_kind_t kind, const char *a1) {
@@ -1107,6 +1107,12 @@ bool fj_disk_job_step(fj_disk_job_t *j) {
         j->result = FJ_RES_ERR;
         j->busy = false;
         break;
+    }
+    for (unsigned i = 0; i < sizeof(j->kdf) / sizeof(j->kdf[0]); i++) {
+        if (j->kdf[i].failed) {
+            j->result = FJ_RES_ERR;
+            j->busy = false;
+        }
     }
     if (!j->busy) {
         disk_job_scrub(j);
