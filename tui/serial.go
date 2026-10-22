@@ -4,6 +4,7 @@ package main
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"time"
@@ -33,7 +34,10 @@ func Connect(path string, baud int) (*Device, error) {
 	if err != nil {
 		return nil, err
 	}
-	port.SetReadTimeout(readTimeout)
+	if err := port.SetReadTimeout(readTimeout); err != nil {
+		_ = port.Close()
+		return nil, err
+	}
 	return &Device{port: port}, nil
 }
 
@@ -56,24 +60,25 @@ func (d *Device) Disconnect() {
 
 // readUntilPrompt reads bytes until the console prompt appears.
 func (d *Device) readUntilPrompt() (string, error) {
+	return d.readUntilDeadline(time.Now().Add(execTimeout))
+}
+
+func (d *Device) readUntilDeadline(deadline time.Time) (string, error) {
 	var buf bytes.Buffer
-	deadline := time.Now().Add(execTimeout)
 	for time.Now().Before(deadline) {
 		tmp := make([]byte, 256)
 		n, err := d.port.Read(tmp)
 		if n > 0 {
 			buf.Write(tmp[:n])
 			if bytes.Contains(buf.Bytes(), []byte(prompt)) {
-				break
+				return buf.String(), nil
 			}
-			continue
 		}
 		if err != nil {
-			// Non-fatal (timeout); keep trying until the deadline elapses.
-			continue
+			return "", fmt.Errorf("serial read: %w", err)
 		}
 	}
-	return buf.String(), nil
+	return "", errors.New("timed out waiting for device prompt")
 }
 
 // Exec sends one command line and returns the device reply (prompt removed).
@@ -93,7 +98,13 @@ func (d *Device) Exec(cmd string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return cleanReply(raw), nil
+	reply := cleanReply(raw)
+	for _, line := range strings.Split(reply, "\n") {
+		if line == "ERR" || strings.HasPrefix(line, "ERR ") {
+			return reply, errors.New(line)
+		}
+	}
+	return reply, nil
 }
 
 // Reset sends a reboot command and drops the connection.

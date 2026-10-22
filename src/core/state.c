@@ -167,11 +167,11 @@ void fj_state_lock(void) {
 }
 
 bool fj_state_profile_erase(unsigned profile_id) {
-    /* A single consistent operation: purge the live CTAP2 cache first so a
-     * deferred flush can never write erased credentials back to flash, then
-     * remove the profile and its credentials from the persistent store. */
+    /* Reject invalid erasures before touching the cache. After the store
+     * accepts the deletion, purge the cache before the next deferred flush. */
+    if (!fj_keys_profile_erase(profile_id)) return false;
     fj_ctap2_forget_profile(profile_id);
-    return fj_keys_profile_erase(profile_id);
+    return true;
 }
 
 bool fj_state_unlock(const char *passphrase) {
@@ -601,13 +601,10 @@ static void job_run_restore(fj_state_job_t *j) {
                                 (uint8_t *)&j->payload)) {
             j->result = FJ_RES_ERR; j->busy = false; return;
         }
-        memcpy(master, j->payload.master, sizeof(master));
-        master_available = true;
         fj_random(j->salt[1], 16);
         fj_random(j->salt[2], 16);
         fj_random(j->salt[3], 16);
         fj_random(j->salt[4], 16);
-        memcpy(pass_salt, j->salt[1], 16);
         if (!job_begin_kdf(j, 1, j->a2, j->salt[1])) { j->result = FJ_RES_ERR; j->busy = false; return; }
         j->phase = 1; return;
     case 1:
@@ -627,21 +624,21 @@ static void job_run_restore(fj_state_job_t *j) {
         {
             uint8_t enc1[32], enc2[32];
             for (int i = 0; i < 32; i++) {
-                enc1[i] = master[i] ^ j->kdf[2].out[i];
-                enc2[i] = master[i] ^ j->kdf[4].out[i];
+                enc1[i] = j->payload.master[i] ^ j->kdf[2].out[i];
+                enc2[i] = j->payload.master[i] ^ j->kdf[4].out[i];
             }
             fj_store_begin();
             if (!fj_keys_backup_restore(&j->payload)) { fj_store_abort(); j->result = FJ_RES_ERR; j->busy = false; return; }
-            memcpy(master, j->payload.master, sizeof(master));
-            master_available = true;
             if (!fj_keys_set_passphrase(j->kdf[1].out, j->salt[1])) { fj_store_abort(); j->result = FJ_RES_ERR; j->busy = false; return; }
-            pass_configured = true;
-            memcpy(pass_hash, j->kdf[1].out, 32);
-            memcpy(pass_salt, j->salt[1], 16);
             if (!fj_keys_set_master_pin_wrap(enc1, j->salt[2])) { fj_store_abort(); j->result = FJ_RES_ERR; j->busy = false; return; }
             if (!fj_keys_set_puk(j->kdf[3].out, j->salt[3])) { fj_store_abort(); j->result = FJ_RES_ERR; j->busy = false; return; }
             if (!fj_keys_set_master_puk_wrap(enc2, j->salt[4])) { fj_store_abort(); j->result = FJ_RES_ERR; j->busy = false; return; }
             if (!fj_store_commit()) { j->result = FJ_RES_ERR; j->busy = false; return; }
+            memcpy(master, j->payload.master, sizeof(master));
+            master_available = true;
+            pass_configured = true;
+            memcpy(pass_hash, j->kdf[1].out, 32);
+            memcpy(pass_salt, j->salt[1], 16);
             fj_ctap2_forget_all();
             fj_ctap2_init();
             state = FJ_STATE_UNLOCKED;

@@ -100,6 +100,22 @@ jobs:
             tests/test_crypto_gcm.c src/core/crypto.c -lmbedcrypto \
             -o /tmp/fjaeger-test-crypto-gcm
           /tmp/fjaeger-test-crypto-gcm
+
+          cc $COMMON tests/test_pin_token_scrub.c -o /tmp/fjaeger-test-pin-token-scrub
+          /tmp/fjaeger-test-pin-token-scrub
+
+  tui-tests:
+    name: Terminal tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: tui/go.mod
+          cache-dependency-path: tui/go.sum
+      - run: go test ./...
+        working-directory: tui
+
   fuzz:
     name: Parser fuzzing (FJ-N009)
     runs-on: ubuntu-latest

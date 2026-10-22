@@ -560,7 +560,15 @@ static void test_backup_restore(void) {
     /* A wrong password must fail and not clobber M. */
     uint8_t m_before[32];
     assert(fj_state_cwk(m_before));
-    assert(!fj_state_backup_restore("wrong-pass", "x", "y"));
+    assert(!fj_state_backup_restore("wrong-pass", "valid-new-pass", "valid-new-puk"));
+    assert(fj_state_cwk(m2));
+    assert(memcmp(m_before, m2, 32) == 0);
+    fj_state_lock();
+    assert(fj_state_unlock("restored-pin"));
+    assert(fj_state_cwk(m2));
+    assert(memcmp(m_before, m2, 32) == 0);
+    fj_state_lock();
+    assert(fj_state_unlock_puk("restored-puk") == FJ_PUK_OK);
     assert(fj_state_cwk(m2));
     assert(memcmp(m_before, m2, 32) == 0);
 }
@@ -659,7 +667,33 @@ static void test_lock_cancels_secret_jobs(void) {
     assert(token_reset_count == before + 1);
 }
 
+static void test_restore_cancelled_each_phase(void) {
+    for (unsigned phase = 0; phase <= 4; phase++) {
+        reset_fixture();
+        assert(fj_state_set_passphrase("testpass1"));
+        assert(fj_state_unlock("testpass1"));
+        assert(fj_state_backup_write("backup-pass"));
+        uint8_t before[32], after[32];
+        assert(fj_state_cwk(before));
+        fj_state_job_t job;
+        fj_state_job_start(&job, FJ_JOB_RESTORE, "backup-pass", "new-passphrase", "new-recovery");
+        while (job.phase < phase) assert(fj_state_job_step(&job));
+        assert(fj_state_set_timeout(1));
+        now_us += 1000000;
+        fj_state_tick();
+        assert(fj_state_get() == FJ_STATE_LOCKED);
+        assert(!fj_state_job_step(&job));
+        assert(job.result != FJ_RES_OK);
+        for (size_t i = 0; i < sizeof(job.payload); i++)
+            assert(((uint8_t *)&job.payload)[i] == 0);
+        assert(fj_state_unlock("testpass1"));
+        assert(fj_state_cwk(after));
+        assert(memcmp(before, after, sizeof(before)) == 0);
+    }
+}
+
 int main(void) {
+    test_restore_cancelled_each_phase();
     test_lock_cancels_secret_jobs();
     test_completed_job_is_scrubbed();
     test_retry_domain_split();

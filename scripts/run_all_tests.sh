@@ -3,6 +3,8 @@
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
+TEST_BUILD_DIR=$(mktemp -d /tmp/fjaeger-tests.XXXXXX)
+trap 'rm -rf -- "$TEST_BUILD_DIR"' EXIT
 
 TESTS=(
     "test_security:tests/test_security.c src/core/state.c:-Itests/stubs -Isrc/core -Isrc/fido -Isrc/usb -Isrc/led"
@@ -11,6 +13,8 @@ TESTS=(
     "test_profile_erase:tests/test_profile_erase.c src/core/state.c src/fido/ctap2.c src/fido/cbor.c src/fido/pin.c:-Itests/stubs -Isrc/core -Isrc/fido -Isrc/usb -Isrc/led"
     "test_hmac:tests/test_hmac.c::-Isrc/core"
     "test_pin_token_scrub:tests/test_pin_token_scrub.c::"
+    "test_ed25519:tests/test_ed25519.c src/core/ed25519.c third_party/monocypher/monocypher.c third_party/monocypher/monocypher-ed25519.c::-Isrc/core -Ithird_party/monocypher"
+    "test_crypto_gcm:tests/test_crypto_gcm.c src/core/crypto.c:-lmbedcrypto:-Isrc/core"
 )
 
 echo "=== Running Fjaeger Host Tests ==="
@@ -25,30 +29,28 @@ for test_spec in "${TESTS[@]}"; do
     echo -n "Building $name... "
 
     # Build command
-    BUILD_CMD="cc -std=c11 -Wall -Wextra -Werror"
+    BUILD_CMD="${CC:-cc} -std=c11 -Wall -Wextra -Werror ${CFLAGS:-}"
     if [ -n "$includes" ]; then
         BUILD_CMD="$BUILD_CMD $includes"
     fi
-    if [ -n "$libs" ]; then
-        BUILD_CMD="$BUILD_CMD $libs"
-    fi
-    BUILD_CMD="$BUILD_CMD $sources -o /tmp/fjaeger-$name"
+    BUILD_CMD="$BUILD_CMD $sources $libs -o $TEST_BUILD_DIR/$name"
 
-    if $BUILD_CMD 2>&1 | grep -q error; then
+    if ! $BUILD_CMD > "$TEST_BUILD_DIR/$name.build.log" 2>&1; then
         echo "FAILED (build)"
+        cat "$TEST_BUILD_DIR/$name.build.log"
         FAILED+=("$name (build)")
         continue
     fi
     echo "ok"
 
     echo -n "Running $name... "
-    if ! /tmp/fjaeger-$name > /tmp/fjaeger-$name.log 2>&1; then
+    if ! "$TEST_BUILD_DIR/$name" > "$TEST_BUILD_DIR/$name.log" 2>&1; then
         echo "FAILED"
-        cat /tmp/fjaeger-$name.log
+        cat "$TEST_BUILD_DIR/$name.log"
         FAILED+=("$name")
     else
         # Extract the final "ok" line
-        RESULT=$(tail -1 /tmp/fjaeger-$name.log)
+        RESULT=$(tail -1 "$TEST_BUILD_DIR/$name.log")
         echo "$RESULT"
         PASSED+=("$name")
     fi

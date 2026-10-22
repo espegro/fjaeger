@@ -10,7 +10,7 @@
  *   - profile 0 is active, so a makeCredential enrolls credC into the live
  *     cache (marked dirty, not yet flushed);
  *   - profile 1 is selected and profile 0 is erased
- *     (fj_state_profile_erase -> forget_profile + persistent erase);
+ *     (fj_state_profile_erase -> persistent erase + forget_profile);
  *   - fj_ctap2_task() runs the deferred flush;
  *   - credA (profile 1) must survive; credB and credC (profile 0) must be
  *     gone from the persistent store after the flush.
@@ -30,6 +30,7 @@
 
 /* --- simulated persistent store ------------------------------------- */
 static fj_ctap2_cred_t persisted[FJ_CTAP2_CREDS];
+static unsigned active_profile = 0;
 
 void fj_keys_ctap2_load(fj_ctap2_cred_t *out) {
     memcpy(out, persisted, sizeof(persisted));
@@ -43,6 +44,7 @@ bool fj_keys_ctap2_save(const fj_ctap2_cred_t *creds) {
 /* Simulate what keys.c does on erase: drop the profile's credentials from
  * the persistent store. */
 bool fj_keys_profile_erase(unsigned profile) {
+    if (profile == active_profile) return false;
     for (unsigned i = 0; i < FJ_CTAP2_CREDS; i++) {
         if (persisted[i].in_use && persisted[i].profile_id == profile)
             memset(&persisted[i], 0, sizeof(fj_ctap2_cred_t));
@@ -51,7 +53,6 @@ bool fj_keys_profile_erase(unsigned profile) {
 }
 
 /* --- misc stubs ------------------------------------------------------ */
-static unsigned active_profile = 0;
 
 unsigned fj_keys_active_profile(void) { return active_profile; }
 
@@ -342,6 +343,9 @@ int main(void) {
     assert(fj_state_unlock("testpass1"));
     assert(fj_state_get() == FJ_STATE_UNLOCKED);
     fj_ctap2_init();          /* load persisted (A profile 1, B profile 0) */
+    assert(!fj_state_profile_erase(active_profile));
+    fj_ctap2_task();
+    assert(count_profile(1) == 1);
 
     /* Enroll credC in profile 0 (live cache, dirty, not yet flushed). */
     active_profile = 0;
