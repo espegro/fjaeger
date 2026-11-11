@@ -15,6 +15,7 @@ static PIO led_pio = pio0;
 static uint led_sm;
 static bool usb_mounted;
 static bool usb_suspended;
+static bool presence_waiting;
 static uint32_t last_grb = 0xffffffffu;
 static uint32_t pulse_until_ms;
 static uint8_t pulse_r, pulse_g, pulse_b;
@@ -59,9 +60,16 @@ void fj_led_activity(void) { led_pulse(0, 0, 28, 100); }   /* blue: USB */
 void fj_led_pin_unlock(void) { led_pulse(0, 40, 0, 250); } /* green flash */
 void fj_led_pin_lock(void)   { led_pulse(40, 0, 0, 200); } /* red flash */
 void fj_led_sign(void)       { led_pulse(0, 30, 30, 600); } /* cyan flash (SSH sign presence) */
+void fj_led_set_presence_waiting(bool waiting) { presence_waiting = waiting; }
 
 void fj_led_task(void) {
     uint32_t now = to_ms_since_boot(get_absolute_time());
+
+    if (presence_waiting) {
+        bool on = (now / 250u) % 2u == 0;
+        put_rgb(on ? 32 : 0, 0, on ? 32 : 0); /* purple: press BOOT */
+        return;
+    }
 
     if ((int32_t)(pulse_until_ms - now) > 0) {
         put_rgb(pulse_r, pulse_g, pulse_b);   /* event pulse */

@@ -40,6 +40,8 @@
 #include "ctap2.h"
 #include "msc_disk.h"
 #include "rgb_led.h"
+#include "boot_button.h"
+#include "u2f.h"
 
 #define LINE_MAX 96
 
@@ -49,6 +51,9 @@ static char line[LINE_MAX];
 static size_t line_len = 0;
 static bool was_connected = false;
 static bool last_was_cr = false;
+static bool presence_auto_pending;
+static uint32_t presence_auto_started, presence_release_since;
+static bool presence_release_seen;
 
 /* Secret-entry mode: the device echoes input itself (so the terminal's local
  * echo can stay OFF), masking secret characters with '*', and requiring two
@@ -257,7 +262,7 @@ static void cmd_help(void) {
     outln("    input, so keep the terminal's local echo OFF.");
     outln("");
     outln("Commands:");
-    outln("  HELP|?                     this help");
+    outln("  HELP|?                     this help (HELP SSH for SSH usage)");
     outln("  STATUS                     device & disk state, active profile, timeout");
     outln("");
     outln("  LOCK                       lock the device (and close the drive)");
@@ -267,6 +272,7 @@ static void cmd_help(void) {
     outln("  UNLOCKPUK <puk>            unlock via the recovery PUK (clears a lockout)");
     outln("  PUK <code>                 set or change the recovery PUK");
     outln("  TIMEOUT <sec>              auto-lock delay in seconds (default 900; 0 = off)");
+    outln("  PRESENCE <auto|button>     require BOOT for FIDO operations");
     outln("");
     outln("  DISK STATUS                show drive lock state");
     outln("  DISK SETPIN <pin>          set or change the drive's disk PIN");
@@ -290,6 +296,13 @@ static void cmd_help(void) {
     outln("  RESET                      reboot the device");
     outln("  RESET BOOTSEL              reboot into the USB bootloader for flashing");
     outln("");
+    outln("Most settings and profile changes require the device to be unlocked.");
+    outln("PRESENCE button: purple blink means press and release BOOT.");
+    outln("Hold BOOT while sending PRESENCE auto, then release to confirm.");
+    outln("Five wrong passphrases or PINs block; five wrong PUKs wipe the device.");
+}
+
+static void cmd_help_ssh(void) {
     outln("SSH usage (OpenSSH talks to the key directly, not through this console):");
     outln("  1. Make sure the device is UNLOCKED (passphrase) and the right");
     outln("     PROFILE is SELECTED.");
@@ -306,7 +319,7 @@ static void cmd_help(void) {
     outln("         name to enroll several keys under one profile.");
     outln("       -C <comment>  local label only (end of the .pub file), not");
     outln("         stored on the device.");
-    outln("  3. Use it for SSH login; the agent signs with the key on the device.");
+    outln("  3. Use it for SSH login; the device signs with the selected key.");
     outln("  4. Copy a resident key back to the PC with:");
     outln("       ssh-keygen -K            (may prompt for the CTAP2 PIN)");
     outln("  5. Verify a signature (on the PC):");
@@ -315,11 +328,6 @@ static void cmd_help(void) {
     outln("                       -s <file>.sig < <file>");
     outln("  ECDSA P-256 / ES256 and Ed25519 / EdDSA security keys are supported.");
     outln("  A wrong profile returns no signature; select the owning profile first.");
-    outln("");
-    outln("Mutating commands (SETPASS, SETPIN, PUK, DISK SETPIN, PROFILE");
-    outln("CREATE/SELECT/RENAME/ERASE, TIMEOUT, BACKUP) require the device to be");
-    outln("unlocked. Five wrong passphrase/PIN attempts block; five wrong PUKs");
-    outln("wipe the device (factory reset).");
 }
 
 static void cmd_status(void) {
@@ -340,7 +348,8 @@ static void cmd_status(void) {
              "puk_fail: %u\r\n"
              "active_profile: %u\r\n"
              "profiles: %u\r\n"
-             "timeout: %lus",
+             "timeout: %lus\r\n"
+             "presence: %s",
              FJ_VERSION_STRING,
              fj_state_get() == FJ_STATE_UNLOCKED ? "unlocked" : "locked",
              fj_msc_is_ready() ? "unlocked" : "locked",
@@ -350,7 +359,8 @@ static void cmd_status(void) {
              fj_msc_lock_pending() ? "yes (keep powered)" : "no",
              fj_keys_puk_configured() ? "set" : "unset", (unsigned)sec.puk_fail,
              fj_keys_active_profile(), fj_keys_profile_count(),
-             (unsigned long)fj_state_timeout());
+             (unsigned long)fj_state_timeout(),
+             fj_keys_presence_button() ? "button" : "auto");
     outln(buf);
 }
 
@@ -720,6 +730,35 @@ static void cmd_timeout(const char *arg) {
     outln(buf);
 }
 
+static void cmd_presence(const char *arg) {
+    if (!require_unlocked()) return;
+    if (!arg || (strcasecmp(arg, "auto") && strcasecmp(arg, "button"))) {
+        outln("ERR usage: PRESENCE <auto|button>");
+        return;
+    }
+    if (fj_u2f_presence_pending()) {
+        outln("ERR FIDO request awaiting confirmation");
+        return;
+    }
+    if (fj_keys_presence_button() && strcasecmp(arg, "auto") == 0) {
+        if (!fj_boot_button_pressed()) {
+            outln("ERR hold BOOT while sending PRESENCE auto");
+            return;
+        }
+        /* Never program flash while BOOT is held: it shares flash CS. */
+        presence_auto_pending = true;
+        presence_release_seen = false;
+        presence_auto_started = to_ms_since_boot(get_absolute_time());
+        outln("Release BOOT to confirm automatic presence");
+        return;
+    }
+    if (!fj_keys_set_presence_button(strcasecmp(arg, "button") == 0)) {
+        outln("ERR presence setting could not be saved");
+        return;
+    }
+    outln(fj_keys_presence_button() ? "OK presence = button" : "OK presence = auto");
+}
+
 static void cmd_reset(const char *arg) {
     /* RESET BOOTSEL reboots into the ROM USB bootloader for re-flashing. */
     if (arg && strcasecmp(arg, "bootsel") == 0) {
@@ -895,7 +934,10 @@ static void dispatch(char *cmdline) {
     if (!tok) return;
 
     if (strcasecmp(tok, "help") == 0 || strcmp(tok, "?") == 0) {
-        cmd_help();
+        const char *topic = next_token(&p);
+        if (!topic) cmd_help();
+        else if (strcasecmp(topic, "ssh") == 0) cmd_help_ssh();
+        else outln("ERR unknown help topic; try HELP SSH");
     } else if (strcasecmp(tok, "status") == 0) {
         cmd_status();
     } else if (strcasecmp(tok, "lock") == 0) {
@@ -931,6 +973,8 @@ static void dispatch(char *cmdline) {
         cmd_creds(next_token(&p), p);
     } else if (strcasecmp(tok, "timeout") == 0) {
         cmd_timeout(next_token(&p));
+    } else if (strcasecmp(tok, "presence") == 0) {
+        cmd_presence(next_token(&p));
     } else if (strcasecmp(tok, "backup") == 0) {
         cmd_backup(next_token(&p));
     } else if (strcasecmp(tok, "restore") == 0) {
@@ -955,6 +999,25 @@ void fj_console_init(void) {
 }
 
 void fj_console_task(void) {
+    if (presence_auto_pending) {
+        uint32_t now = to_ms_since_boot(get_absolute_time());
+        if (!tud_cdc_connected() || fj_state_get() != FJ_STATE_UNLOCKED ||
+            fj_u2f_presence_pending() || now - presence_auto_started >= 30000u) {
+            presence_auto_pending = false;
+            outln("ERR presence change cancelled");
+        } else if (fj_boot_button_pressed()) {
+            presence_release_seen = false;
+        } else if (!presence_release_seen) {
+            presence_release_seen = true;
+            presence_release_since = now;
+        } else if (now - presence_release_since >= 30u) {
+            presence_auto_pending = false;
+            outln(fj_keys_set_presence_button(false) ? "OK presence = auto" :
+                  "ERR presence setting could not be saved");
+            out(PROMPT);
+        }
+        return;
+    }
     if (tud_cdc_connected()) {
         if (!was_connected) {
             /* First connect: print the banner and a prompt. */

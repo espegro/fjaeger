@@ -27,6 +27,7 @@ void fj_u2f_task(void);
 
 /* Whether an outbound report is ready to send. */
 bool fj_u2f_ready(void);
+bool fj_u2f_presence_pending(void);
 
 /* Copy the next pending outbound 64-byte report. Returns true if copied. */
 bool fj_u2f_pop_report(uint8_t out[64]);

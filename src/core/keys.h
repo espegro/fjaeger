@@ -193,6 +193,8 @@ bool fj_keys_get_puk(uint8_t pbkdf2_hash[32], uint8_t salt[16]);
  * been stored, in which case the state layer uses its 15-minute default. */
 bool fj_keys_get_timeout(uint32_t *seconds);
 bool fj_keys_set_timeout(uint32_t seconds);
+bool fj_keys_presence_button(void);
+bool fj_keys_set_presence_button(bool enabled);
 
 /* Factory reset: erase every profile, credential, the disk secret and the
  * PIN. After this the device is fully unprovisioned; the next boot creates

@@ -58,7 +58,7 @@ typedef struct {
     uint8_t  puk_fail;             /* wrong PUK attempts */
     /* Persistent auto-lock override (v6). */
     uint32_t timeout_sec;
-    uint8_t  timeout_configured;   /* distinguishes TIMEOUT 0 from default */
+    uint8_t  timeout_configured;   /* bit 0: configured; bit 7: BOOT presence */
     /* Selected profile (v7). */
     uint8_t  active_profile;
     uint8_t  active_profile_valid;
@@ -450,7 +450,7 @@ bool fj_keys_get_puk(uint8_t pbkdf2_hash[32], uint8_t salt[16]) {
 }
 
 bool fj_keys_get_timeout(uint32_t *seconds) {
-    if (!store_loaded || !store.timeout_configured || !seconds) return false;
+    if (!store_loaded || !(store.timeout_configured & 1u) || !seconds) return false;
     *seconds = store.timeout_sec;
     return true;
 }
@@ -458,8 +458,30 @@ bool fj_keys_get_timeout(uint32_t *seconds) {
 bool fj_keys_set_timeout(uint32_t seconds) {
     if (!store_loaded) return false;
     store.timeout_sec = seconds;
-    store.timeout_configured = 1;
+    store.timeout_configured |= 1u;
     return store_write_commit();
+}
+
+bool fj_keys_presence_button(void) {
+    return store_loaded && (store.timeout_configured & 0x80u) != 0;
+}
+
+bool fj_keys_set_presence_button(bool enabled) {
+    if (!store_loaded) return false;
+    uint8_t previous = store.timeout_configured;
+    uint32_t previous_seconds = store.timeout_sec;
+    /* Old firmware treats any nonzero flag as configured. Preserve its
+     * default timeout interpretation if it is installed again. */
+    if (enabled && !(store.timeout_configured & 1u)) {
+        store.timeout_sec = 900;
+        store.timeout_configured |= 1u;
+    }
+    if (enabled) store.timeout_configured |= 0x80u;
+    else store.timeout_configured &= 0x7fu;
+    if (store_write_commit()) return true;
+    store.timeout_configured = previous;
+    store.timeout_sec = previous_seconds;
+    return false;
 }
 
 void fj_keys_wipe(void) {

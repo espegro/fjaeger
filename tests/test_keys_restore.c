@@ -16,6 +16,20 @@ void flash_range_program(uint32_t offset, const uint8_t *data, size_t count) {
 int main(void) {
     memset(test_flash, 0xff, sizeof(test_flash));
     fj_keys_init();
+    assert(!fj_keys_presence_button());
+    assert(fj_keys_set_presence_button(true));
+    fj_keys_init();
+    assert(fj_keys_presence_button());
+    uint32_t timeout = 0;
+    assert(fj_keys_get_timeout(&timeout) && timeout == 900);
+    assert(fj_keys_set_timeout(123));
+    fj_keys_init();
+    assert(fj_keys_presence_button());
+    assert(fj_keys_get_timeout(&timeout) && timeout == 123);
+    assert(fj_keys_set_presence_button(false));
+    fj_keys_init();
+    assert(!fj_keys_presence_button());
+    assert(fj_keys_get_timeout(&timeout) && timeout == 123);
     assert(fj_keys_profile_create(1, "Restored"));
     assert(fj_keys_profile_select(1));
     fj_backup_payload_t backup = {0};

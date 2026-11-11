@@ -18,5 +18,6 @@ void fj_led_activity(void);
 void fj_led_pin_unlock(void);
 void fj_led_pin_lock(void);
 void fj_led_sign(void);
+void fj_led_set_presence_waiting(bool waiting);
 
 #endif

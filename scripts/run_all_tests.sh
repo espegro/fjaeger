@@ -7,6 +7,7 @@ TEST_BUILD_DIR=$(mktemp -d /tmp/fjaeger-tests.XXXXXX)
 trap 'rm -rf -- "$TEST_BUILD_DIR"' EXIT
 
 TESTS=(
+    "test_presence:tests/test_presence.c src/fido/u2f.c::-Itests/presence_stubs -Isrc/core -Isrc/fido -Isrc/led"
     "test_security:tests/test_security.c src/core/state.c:-Itests/stubs -Isrc/core -Isrc/fido -Isrc/usb -Isrc/led"
     "test_ctap2:tests/test_ctap2.c src/fido/ctap2.c src/fido/cbor.c src/fido/pin.c:-Isrc/core -Isrc/fido -Isrc/led"
     "test_profile:tests/test_profile.c src/fido/ctap2.c src/fido/cbor.c src/fido/pin.c:-Isrc/core -Isrc/fido -Isrc/led"

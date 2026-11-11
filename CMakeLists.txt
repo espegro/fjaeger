@@ -57,6 +57,7 @@ add_executable(fjaeger
   src/core/ms_time.c
   src/led/rgb_led.c
   src/fido/u2f.c
+  src/fido/boot_button.c
   src/fido/ctap2.c
   src/fido/cbor.c
   src/fido/pin.c

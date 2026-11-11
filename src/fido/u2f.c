@@ -7,6 +7,9 @@
 #include "keys.h"
 #include "state.h"
 #include "tusb.h"
+#include "boot_button.h"
+#include "rgb_led.h"
+#include "pico/stdlib.h"
 
 /* ------------------------------------------------------------------ */
 /* U2FHID frame / command constants                                    */
@@ -27,6 +30,8 @@
 #define U2FHID_INIT  0x06
 #define U2FHID_WINK  0x08
 #define U2FHID_CBOR  0x10
+#define U2FHID_CANCEL 0x11
+#define U2FHID_KEEPALIVE 0x3b
 #define U2FHID_SYNC  0x3C
 #define U2FHID_ERROR 0x3F
 
@@ -81,6 +86,14 @@ static bool out_pending = false;
 /* CTAP2 crypto is stack-intensive on the RP2350.  Keep the transport reply
  * workspace in BSS; dispatch is synchronous, so it is never re-entered. */
 static uint8_t cbor_response[512];
+
+/* One pending request, independent of the HID assembly buffer. */
+static rx_t presence_rx;
+static bool presence_pending, presence_armed, presence_sample, presence_confirmed;
+static uint32_t presence_started, presence_last_keepalive, presence_changed;
+static unsigned presence_profile;
+#define PRESENCE_TIMEOUT_MS 30000u
+#define PRESENCE_DEBOUNCE_MS 30u
 
 /* ------------------------------------------------------------------ */
 /* Small helpers                                                       */
@@ -166,6 +179,8 @@ void fj_u2f_init(void) {
     memset(&rx, 0, sizeof(rx));
     out_head = out_tail = 0;
     out_pending = false;
+    presence_pending = false;
+    fj_led_set_presence_waiting(false);
 }
 
 bool fj_u2f_ready(void) {
@@ -282,11 +297,56 @@ static void handle_cbor(uint32_t cid, const uint8_t *payload, uint16_t len) {
     send_hid(cid, U2FHID_CBOR, cbor_response, (uint16_t)rlen);
 }
 
+static void presence_end(void) {
+    presence_pending = false;
+    fj_led_set_presence_waiting(false);
+}
+
+bool fj_u2f_presence_pending(void) { return presence_pending; }
+
+static bool needs_presence(uint8_t cmd, const uint8_t *p, uint16_t len) {
+    if (cmd == U2FHID_CBOR)
+        return len && (p[0] == 0x01 || p[0] == 0x02 || p[0] == 0x08);
+    return cmd == U2FHID_MSG && len >= 2 && p[0] == U2F_CLA && p[1] == U2F_REGISTER;
+}
+
+static void presence_begin(void) {
+    presence_rx = rx;
+    presence_pending = true;
+    presence_armed = false;
+    presence_confirmed = false;
+    presence_sample = fj_boot_button_pressed();
+    presence_started = presence_changed = to_ms_since_boot(get_absolute_time());
+    presence_last_keepalive = presence_started - 100;
+    presence_profile = fj_keys_active_profile();
+    fj_led_set_presence_waiting(true);
+}
+
 /* Process a complete assembled inbound message. */
 static void process_rx(void) {
     uint32_t cid = rx.cid;
     uint8_t cmd = rx.cmd & ~TYPE_MASK;
     uint16_t len = rx.len;
+
+    if (presence_pending) {
+        if (cmd == U2FHID_CANCEL && cid == presence_rx.cid && len == 0) {
+            uint8_t error = 0x2d; /* CTAP2_ERR_KEEPALIVE_CANCEL */
+            if ((presence_rx.cmd & ~TYPE_MASK) == U2FHID_CBOR)
+                send_hid(cid, U2FHID_CBOR, &error, 1);
+            else
+                send_apdu_status(cid, SW_CONDITIONS_NOT_SAT);
+            presence_end();
+        } else {
+            send_error(cid, ERR_CHANNEL_BUSY);
+        }
+        return;
+    }
+
+    if (fj_keys_presence_button() && fj_state_get() == FJ_STATE_UNLOCKED &&
+        needs_presence(cmd, rx.buf, len)) {
+        presence_begin();
+        return;
+    }
 
     switch (cmd) {
         case U2FHID_INIT: handle_init(cid); break;
@@ -361,6 +421,43 @@ void fj_u2f_hid_rx(const uint8_t *report, size_t len) {
 }
 
 void fj_u2f_task(void) {
+    if (presence_pending) {
+        uint32_t now = to_ms_since_boot(get_absolute_time());
+        bool pressed = fj_boot_button_pressed();
+        if (pressed != presence_sample) {
+            presence_sample = pressed;
+            presence_changed = now;
+        }
+        if (!tud_mounted() || fj_state_get() != FJ_STATE_UNLOCKED ||
+            fj_keys_active_profile() != presence_profile ||
+            now - presence_started >= PRESENCE_TIMEOUT_MS) {
+            uint32_t cid = presence_rx.cid;
+            uint8_t cmd = presence_rx.cmd & ~TYPE_MASK;
+            presence_end();
+            if (tud_mounted()) {
+                if (cmd == U2FHID_CBOR) {
+                    uint8_t error = 0x2f; /* CTAP2_ERR_ACTION_TIMEOUT */
+                    send_hid(cid, U2FHID_CBOR, &error, 1);
+                } else send_apdu_status(cid, SW_CONDITIONS_NOT_SAT);
+            }
+        } else if (now - presence_changed >= PRESENCE_DEBOUNCE_MS) {
+            if (presence_sample && presence_armed) presence_confirmed = true;
+            else if (!presence_sample && !presence_confirmed) presence_armed = true;
+            else if (!presence_sample && presence_confirmed) {
+                presence_end();
+                uint8_t cmd = presence_rx.cmd & ~TYPE_MASK;
+                if (cmd == U2FHID_CBOR)
+                    handle_cbor(presence_rx.cid, presence_rx.buf, presence_rx.len);
+                else
+                    handle_msg(presence_rx.cid, presence_rx.buf, presence_rx.len);
+            }
+        }
+        if (presence_pending && now - presence_last_keepalive >= 100u) {
+            uint8_t status = 2; /* STATUS_UPNEEDED */
+            send_hid(presence_rx.cid, U2FHID_KEEPALIVE, &status, 1);
+            presence_last_keepalive = now;
+        }
+    }
     if (!out_pending || !tud_hid_ready()) return;
 
     uint8_t report[U2FHID_FRAME_LEN];

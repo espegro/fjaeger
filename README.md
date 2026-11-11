@@ -246,7 +246,7 @@ Connect to the console (e.g. `screen /dev/ttyACM0 115200`):
 
 | Command | Description |
 |---------|-------------|
-| `HELP` | List commands |
+| `HELP` | List commands (`HELP SSH` for SSH usage) |
 | `STATUS` | Show device + drive state, active profile, profiles, timeout |
 | `LOCK` | Lock the device (and close the drive) |
 | `UNLOCK <passphrase>` | Unlock the **device** for key operations (not the drive) |
@@ -266,6 +266,7 @@ Connect to the console (e.g. `screen /dev/ttyACM0 115200`):
 | `CREDS LIST` | List active-profile credentials with key type, application and ID |
 | `CREDS DEL <hex-id> yes` | Delete one credential from the active profile |
 | `TIMEOUT <seconds>` | Set auto-relock delay (default 900 seconds; 0 = off) |
+| `PRESENCE <auto\|button>` | Select automatic presence or BOOT-button confirmation (device must be unlocked) |
 | `BACKUP <password>` | Write an encrypted backup (M + keys + profiles) to `FJAEGER.BAK` |
 | `RESTORE <pw> <pin> <puk>` | Restore a backup, setting a new PIN and PUK in one step |
 | `RESET` | Reboot the device |
@@ -285,6 +286,15 @@ Connect to the console (e.g. `screen /dev/ttyACM0 115200`):
 Auto-lock defaults to 15 minutes. The `TIMEOUT` value is stored in the flash
 store and survives both reboot and a normal firmware flash. `TIMEOUT 0` is
 stored as an explicit disable.
+
+`PRESENCE auto` is the default and retains the existing unlocked-device
+behavior. To require a physical confirmation, unlock the device and issue
+`PRESENCE button`. The setting is persistent and shown by `STATUS`. A flashing
+purple LED requests a fresh BOOT press and release for credential creation, assertions,
+and the OpenSSH CTAP1 selection probe; some workflows may ask more than once.
+Requests time out after 30 seconds and may be cancelled by the client. To
+return to automatic mode, hold BOOT while sending `PRESENCE auto` over the
+console. The BOOT press is separate from the device unlock passphrase.
 
 The console echoes input itself, so keep local echo OFF in your terminal
 (the terminal would otherwise show secrets in cleartext). Secret entry
@@ -491,10 +501,9 @@ limitations.
     is configured; Fjaeger accepts that placeholder without persisting it.
     Once a PIN is configured, it is verified normally. The passphrase and
     CTAP2 PIN have separate persistent retry/block counters.
-  - **User presence:** this prototype treats "device unlocked" as the user
-    authorization boundary for signing; there is no per-signature touch or
-    button. The cyan LED pulse after signing is feedback that a signature
-    happened, not a presence authorization.
+  - **User presence:** `PRESENCE auto` treats an unlocked device as present.
+    `PRESENCE button` requires a fresh BOOT press for the FIDO operations
+    listed above. The cyan LED pulse after signing is feedback.
 - The MSC drive is a **12 MiB persistent FAT16 partition** in on-board flash,
   encrypted on the fly with AES-XTS using a **dedicated disk key** (independent
   of profiles). Metadata (boot, FAT, root) is initialized once on first boot;
