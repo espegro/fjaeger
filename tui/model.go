@@ -52,7 +52,7 @@ type fieldDef struct {
 type kind int
 
 const (
-	kCmd      kind = iota
+	kCmd kind = iota
 	kStatus
 	kConsole
 	kReset
@@ -90,6 +90,18 @@ var menu = []act{
 	{kCmd, "Backup to drive", []fieldDef{{"Backup password", true}}, false, func(v []string) string { return "BACKUP " + v[0] }},
 	{kCmd, "Restore from drive", []fieldDef{{"Backup password", true}, {"New passphrase", true}, {"New PUK", true}}, false, func(v []string) string { return "RESTORE " + v[0] + " " + v[1] + " " + v[2] }},
 	{kind: kSep},
+	{kCmd, "HMAC: list credentials", nil, false, func([]string) string { return "HMAC LIST" }},
+	{kCmd, "HMAC: initialize (BOOT required)", nil, true, func([]string) string { return "HMAC init" }},
+	{kCmd, "HMAC: PIN + BOOT", nil, true, func([]string) string { return "HMAC pin-button" }},
+	{kCmd, "HMAC: PIN only", nil, true, func([]string) string { return "HMAC pin" }},
+	{kCmd, "HMAC: automatic (no PIN)", nil, true, func([]string) string { return "HMAC auto" }},
+	{kCmd, "HMAC: armed (no PIN)", nil, true, func([]string) string { return "HMAC armed" }},
+	{kCmd, "HMAC: delete credential", []fieldDef{{"32-character hex credential ID", false}}, true, func(v []string) string { return "HMAC DELETE " + v[0] }},
+	{kind: kSep},
+	{kCmd, "Presence: BOOT button", nil, false, func([]string) string { return "PRESENCE button" }},
+	{kCmd, "Presence: automatic (hold BOOT)", nil, false, func([]string) string { return "PRESENCE auto" }},
+	{kind: kSep},
+	{kCmd, "FACTORY RESET (erase keys)", nil, true, func([]string) string { return "FACTORY RESET YES" }},
 	{kConsole, "Raw console", nil, false, nil},
 	{kReset, "Reboot device (app mode)", nil, false, func([]string) string { return "RESET" }},
 	{kReset, "Reboot to USB bootloader", nil, false, func([]string) string { return "RESET BOOTSEL" }},
@@ -104,18 +116,19 @@ type model struct {
 	status   Status
 	statusOK bool
 
-	ports     []string
-	portIdx   int
-	manual    string
+	ports   []string
+	portIdx int
+	manual  string
 
 	screen  screen
 	menuIdx int
 
-	cur       act
-	values    []string
-	promptIdx int
-	confirm   bool
-	resetAfter bool
+	cur                 act
+	values              []string
+	promptIdx           int
+	confirm             bool
+	resetAfter          bool
+	waitingConfirmation bool
 
 	output string
 	err    error
@@ -339,7 +352,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tickMsg:
 		var cmds []tea.Cmd
-		if m.device != nil && m.device.Connected() && (m.screen == scrMain || (m.screen == scrShow && m.live)) {
+		if !m.waitingConfirmation && (m.screen == scrMain || (m.screen == scrShow && m.live)) && m.device != nil && m.device.Connected() {
 			cmds = append(cmds, m.fetchStatus())
 		}
 		cmds = append(cmds, tickCmd())
@@ -385,6 +398,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case resultMsg:
+		m.waitingConfirmation = false
 		m.output = string(msg)
 		m.err = nil
 		if m.resetAfter {
@@ -406,6 +420,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case errMsg:
+		m.waitingConfirmation = false
 		m.err = msg
 		if m.screen == scrConsole {
 			m.consoleLog = append(m.consoleLog, errStyle.Render(msg.Error()))
@@ -556,7 +571,7 @@ func (m model) activate(idx int) (tea.Model, tea.Cmd) {
 		}
 		m.values = make([]string, len(a.fields))
 		m.promptIdx = 0
-		m.confirm = false
+		m.confirm = len(a.fields) == 0 && a.askYes
 		m.screen = scrPrompt
 		return m, nil
 	}
@@ -615,12 +630,22 @@ func (m model) submit(cmd string) (tea.Model, tea.Cmd) {
 		m.resetAfter = true
 		return m, m.resetDevice(cmd)
 	}
+	if strings.HasPrefix(cmd, "HMAC ") || cmd == "FACTORY RESET YES" {
+		m.screen = scrShow
+		m.err = nil
+		m.live = false
+		m.output = "Waiting for device. If requested, press and release BOOT within 30 seconds."
+		m.waitingConfirmation = true
+	}
 	return m, m.execCommand(cmd)
 }
 
 // ---------------------------------------------------------------- show / console
 
 func (m model) updateShow(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if m.waitingConfirmation {
+		return m, nil
+	}
 	switch msg.Type {
 	case tea.KeyEsc, tea.KeyEnter:
 		m.screen = scrMain
@@ -879,7 +904,7 @@ func itoaN(n int) string {
 }
 
 func (m model) connLine() string {
-	if m.device != nil && m.device.Connected() {
+	if m.device != nil {
 		extra := ""
 		if m.statusOK {
 			extra = fmt.Sprintf(" · %s · drive %s · profile %s",

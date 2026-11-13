@@ -45,6 +45,7 @@
 #include "hmac_store.h"
 #include "hmac_runtime.h"
 #include "hmac_presence.h"
+#include "factory_confirm.h"
 
 #define LINE_MAX 96
 
@@ -61,6 +62,7 @@ static fj_hmac_presence_t hmac_confirmation;
 static bool hmac_change_pending, hmac_change_init;
 static bool hmac_change_delete;
 static uint8_t hmac_delete_id[16];
+static fj_factory_confirm_t factory_confirmation;
 static fj_hmac_mode_t hmac_change_mode;
 
 /* Secret-entry mode: the device echoes input itself (so the terminal's local
@@ -309,6 +311,7 @@ static void cmd_help(void) {
     outln("");
     outln("  RESET                      reboot the device");
     outln("  RESET BOOTSEL              reboot into the USB bootloader for flashing");
+    outln("  FACTORY RESET YES          erase all keys and settings after BOOT confirmation");
     outln("");
     outln("Most settings and profile changes require the device to be unlocked.");
     outln("PRESENCE button: purple blink means press and release BOOT.");
@@ -879,6 +882,26 @@ static void cmd_reset(const char *arg) {
     while (1) tight_loop_contents();
 }
 
+static void cmd_factory(char *rest) {
+    char *action=next_token(&rest);
+    char *yes=next_token(&rest);
+    char *extra=next_token(&rest);
+    if (!fj_factory_confirm_command(action,yes,extra)) {
+        outln("ERR usage: FACTORY RESET YES"); return;
+    }
+    if (!require_unlocked()) return;
+    uint32_t now=to_ms_since_boot(get_absolute_time());
+    if (!fj_factory_confirm_begin(&factory_confirmation,true,tud_cdc_connected(),
+                                   fj_u2f_presence_pending(),fj_state_session_epoch(),
+                                   fj_boot_button_pressed(),now)) {
+        outln("ERR factory reset cannot start while confirmation is busy"); return;
+    }
+    fj_led_set_presence_waiting(true);
+    outln("WARNING: deletes all keys, profiles, PINs, PUK and disk key.");
+    outln("Encrypted disk contents become inaccessible; firmware and OTP remain.");
+    outln("Press and release BOOT within 30 seconds to confirm factory reset.");
+}
+
 static int hex_val(char c) {
     if (c >= '0' && c <= '9') return c - '0';
     if (c >= 'a' && c <= 'f') return c - 'a' + 10;
@@ -1091,6 +1114,8 @@ static void dispatch(char *cmdline) {
         cmd_restore(password,passphrase,puk);
     } else if (strcasecmp(tok, "reset") == 0) {
         cmd_reset(next_token(&p));
+    } else if (strcasecmp(tok, "factory") == 0) {
+        cmd_factory(p);
     } else {
         outln("ERR unknown command (try HELP)");
     }
@@ -1109,6 +1134,24 @@ void fj_console_init(void) {
 }
 
 void fj_console_task(void) {
+    if (factory_confirmation.presence.active) {
+        uint32_t now=to_ms_since_boot(get_absolute_time());
+        fj_factory_confirm_result_t result=fj_factory_confirm_poll(&factory_confirmation,
+            fj_state_get()==FJ_STATE_UNLOCKED,tud_cdc_connected(),fj_u2f_presence_pending(),
+            fj_state_session_epoch(),fj_boot_button_pressed(),now);
+        if (result==FJ_FACTORY_CONFIRM_CANCELLED) {
+            if (!fj_u2f_presence_pending()) fj_led_set_presence_waiting(false);
+            outln("ERR factory reset cancelled");
+            if (tud_cdc_connected()) out(PROMPT);
+        } else if (result==FJ_FACTORY_CONFIRM_APPROVED) {
+            fj_led_set_presence_waiting(false);
+            /* Wipe failures halt here; boot recovery resumes the journal. */
+            fj_state_factory_reset();
+            outln("OK factory reset complete; device unconfigured and locked");
+            out(PROMPT);
+        }
+        return;
+    }
     if (hmac_change_pending) {
         uint32_t now=to_ms_since_boot(get_absolute_time());
         if (!tud_cdc_connected() || fj_state_get()!=FJ_STATE_UNLOCKED ||

@@ -17,7 +17,7 @@ const (
 	prompt      = "fjaeger> "
 	defaultBaud = 115200
 	readTimeout = 350 * time.Millisecond
-	execTimeout = 15 * time.Second
+	execTimeout = 45 * time.Second
 )
 
 // Device wraps a serial connection to the Fjaeger console.

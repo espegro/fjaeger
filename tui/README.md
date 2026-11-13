@@ -26,7 +26,11 @@ no runtime dependencies beyond glibc.
 
 Menu covers: status (live), lock/unlock (pass and PUK), set passphrase / CTAP2 PIN /
 PUK, auto-lock timeout, backup/restore, reboot / reboot-to-bootsel, and a raw
-console.
+console. HMAC listing, initialization, policy changes, credential deletion,
+presence selection and factory reset are available in the main menu. These
+commands can also be used in the raw console. Factory reset requires an unlocked
+device, an explicit TUI confirmation and a fresh BOOT press and release. See
+the [hmac guide](../docs/hmac-luks.md) and [reset guide](../docs/backup-reset.md).
 
 Profiles, Credentials and Disk each open a single, dedicated screen (arrow
 up/down navigation where a list is shown):

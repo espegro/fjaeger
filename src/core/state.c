@@ -220,6 +220,8 @@ void fj_state_factory_reset(void) {
     fj_keys_init();
     if (!fj_keys_ready()) fj_factory_wipe_halt();
     if (!fj_hmac_store_init()) fj_factory_wipe_halt();
+    memset(brute_fail_count,0,sizeof(brute_fail_count));
+    memset(brute_allowed_at,0,sizeof(brute_allowed_at));
 }
 
 bool fj_state_cwk(uint8_t out[32]) {

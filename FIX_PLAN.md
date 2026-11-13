@@ -1,5 +1,8 @@
 # Fjaeger – fix plan (from findings-current.md)
 
+> Historical analysis; details may no longer describe the current firmware.
+> See the [README](README.md) and current guides for operational guidance.
+
 Originally reviewed at 595ac91. This file now records the disposition of the
 findings; `TODO.md` is the active roadmap.
 

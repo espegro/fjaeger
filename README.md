@@ -4,6 +4,19 @@ A USB security key based on the **RP2350** (16 MB flash). It combines a
 **FIDO2/CTAP2 authenticator for SSH** with a small **encrypted USB drive**,
 controlled over a serial command interface.
 
+> **Development prototype:** Secure Boot and hardware-protected hmac roots are
+> not implemented. The experimental hmac policies can permit operation while
+> the device is locked. Do not rely on this device as the only way to unlock
+> important data.
+
+## Documentation
+
+- [Getting started](docs/getting-started.md): initialize and use a device.
+- [hmac-secret and LUKS](docs/hmac-luks.md): policies, enrollment and credential management.
+- [Backup and factory reset](docs/backup-reset.md): recovery scope and reset procedure.
+- [Development](docs/development.md): builds, tests and hardware verification.
+- [Terminal controller](tui/README.md): optional Go TUI.
+
 ## Features
 
 - **CTAP2 (FIDO2) over HID** — `authenticatorGetInfo`, `makeCredential`,
@@ -21,8 +34,9 @@ controlled over a serial command interface.
   on-board flash, encrypted with AES-XTS using a **dedicated disk key** that is
   independent of profiles. It is only mounted while the device is unlocked.
   Data survives reboot.
-- **Lock/unlock model** — when locked, signing, decryption and writing are
-  denied. Unlocking requires the PIN over serial.
+- **Lock/unlock model** — ordinary profile credentials and the drive require the device
+  to be unlocked. Separate hmac credentials follow their own policy and may
+  operate while locked. Unlocking uses the device passphrase over serial.
 - **Brute-force protection** — the unlock passphrase and disk PIN lock after five wrong
   attempts. A shared recovery PUK can clear the lock; five wrong PUK attempts
   trigger a factory wipe. Failed attempts are also paced by an exponential
@@ -32,7 +46,7 @@ controlled over a serial command interface.
   can set a new PIN without losing keys.
 - **Encrypted backup/restore** — `BACKUP <password>` writes an encrypted
   `FJAEGER.BAK` to the MSC drive; `RESTORE <password> <pin> <puk>` restores it
-  onto a fresh device.
+  subject to the prerequisites and limitations in the [backup guide](docs/backup-reset.md).
 - **Serial console (USB CDC)** — `LOCK`, `UNLOCK`, `SETPIN`, `RESET BOOTSEL`,
   `TIMEOUT`, profile management, and more.
 
@@ -84,8 +98,9 @@ src/
 
 - Private keys are stored in RP2350 flash and only ever used for signing inside
   the firmware; they are never exported over serial.
-- **Device lock** (`LOCK`/`UNLOCK`): when locked, no ECDSA signing happens.
-  Unlock with the PIN over serial.
+- **Device lock** (`LOCK`/`UNLOCK`): ordinary profile credentials require
+  the device to be unlocked. Separate hmac credentials have independent policy
+  and can sign assertions while locked.
 - **Disk lock** (`DISK LOCK`/`DISK UNLOCK`): the encrypted MSC drive is only
   mounted/readable/writable after `DISK UNLOCK`. `DISK UNLOCK` requires the
   device to be unlocked; `LOCK` and auto-relock also close the drive.
@@ -93,11 +108,11 @@ src/
   store, independent of profiles. Switching or deleting profiles does not change
   drive data.
 - The unlock passphrase, disk PIN and recovery PUK are derived with salted
-  PBKDF2-HMAC-SHA256 (a fresh random salt per field), so a dumped flash store
-  cannot be brute-forced offline with a fast hash. The disk key is wrapped with
+  PBKDF2-HMAC-SHA256 (a fresh random salt per field), providing slower offline guessing for those secrets. The disk key is wrapped with
   the PBKDF2-derived disk-PIN key. The CTAP2 client-PIN verifier is
   `LEFT(SHA-256(pin),16)` because the CTAP2 PIN protocol only transmits that
-  value. PBKDF2 runs in the main loop and takes a couple of seconds on the
+  value; a flash dump therefore permits fast offline guessing of the CTAP2 PIN.
+  PBKDF2 runs in the main loop and takes a couple of seconds on the
   RP2350.
 - The SSH/CTAP2 credential private keys are encrypted **at rest** by a random
   master key M (AES-GCM). M is stored in flash wrapped independently by the
@@ -122,7 +137,7 @@ src/
 - **ARM GNU toolchain** (`arm-none-eabi-gcc`) — e.g. `apt install gcc-arm-none-eabi`.
 - **Pico SDK ≥ 2.1.0** (preferably **2.2.0**) with RP2350/TinyUSB support.
 - **`picotool`** on `PATH` (only needed to flash).
-- The host tests only need a C11 compiler (`cc`).
+- The host tests need a C11 compiler (`cc`) and mbedTLS development libraries.
 
 The Pico SDK is **not vendored** in this repository. Either clone it next to
 this checkout and set `PICO_SDK_PATH`, or let CMake fetch it automatically.
@@ -191,29 +206,8 @@ picotool reboot
 
 ### Host tests
 
-The host tests compile the firmware sources with `cc` against stubbed
-crypto/state layers, so they run on x86-64 without hardware:
-
-```bash
-cc -std=c11 -Wall -Wextra -Werror -Itests/stubs -Isrc/core -Isrc/fido -Isrc/usb -Isrc/led \
-  tests/test_security.c src/core/state.c -o /tmp/fjaeger-test-security
-/tmp/fjaeger-test-security            # -> "security host tests: ok"
-
-cc -std=c11 -Wall -Wextra -Werror -Isrc/core -Isrc/fido -Isrc/led \
-  tests/test_ctap2.c src/fido/ctap2.c src/fido/cbor.c src/fido/pin.c \
-  -o /tmp/fjaeger-test-ctap2
-/tmp/fjaeger-test-ctap2               # -> "ctap2 host tests: ok"
-
-cc -std=c11 -Wall -Wextra -Werror -Isrc/core -Isrc/fido -Isrc/led \
-  tests/test_profile.c src/fido/ctap2.c src/fido/cbor.c src/fido/pin.c \
-  -o /tmp/fjaeger-test-profile
-/tmp/fjaeger-test-profile             # -> "profile host tests: ok"
-
-cc -std=c11 -Wall -Wextra -Werror -Itests/stubs -Isrc/core -Isrc/fido -Isrc/usb -Isrc/led \
-  tests/test_profile_erase.c src/core/state.c src/fido/ctap2.c src/fido/cbor.c src/fido/pin.c \
-  -o /tmp/fjaeger-test-profile-erase
-/tmp/fjaeger-test-profile-erase       # -> "profile erase/flush host test: ok"
-```
+Run `bash scripts/run_all_tests.sh`; see [development](docs/development.md)
+for dependencies, firmware builds and hardware test limitations.
 
 ### Do you lose your keys when re-flashing the firmware?
 
@@ -226,8 +220,8 @@ You lose your keys only when one of these happens:
 - **`scripts/reflash_wipe.sh`** — erases the whole 16 MB flash (firmware +
   drive + store) before flashing.
 - **An incompatible future store format** without a migration path.
-- **A console factory wipe** — five wrong PUK attempts erase all profiles,
-  credentials and the disk key.
+- **A factory wipe** — `FACTORY RESET YES` with physical confirmation, or
+  five wrong PUK attempts, removes the key material. See [reset](docs/backup-reset.md).
 
 The v17 store migrates a valid v16 store on startup. It validates the new copy
 before erasing the old sectors. Do not downgrade to v16 after migration: older
@@ -273,17 +267,18 @@ Connect to the console (e.g. `screen /dev/ttyACM0 115200`):
 | `RESTORE <pw> <pin> <puk>` | Restore a backup, setting a new PIN and PUK in one step |
 | `RESET` | Reboot the device |
 | `RESET BOOTSEL` | Reboot into the USB bootloader (for flashing) |
+| `FACTORY RESET YES` | Erase keys and settings after unlock and a fresh BOOT press |
 
 > **Independent disk lock:** `UNLOCK <pin>` only unlocks the **device** (for
 > FIDO/SSH signing). The encrypted drive is a separate step: `DISK UNLOCK`.
 > `LOCK` and auto-relock also close the drive, and `DISK UNLOCK` requires the
 > device to be unlocked.
 
-> **Backup/restore:** `BACKUP <password>` writes an encrypted `FJAEGER.BAK` to
-> the mounted drive (device must be unlocked). Copy the file out to a PC — it
-> is **deleted automatically when the drive locks**. On a fresh device, put
-> `FJAEGER.BAK` back on the drive, unlock it, then `RESTORE <password> <new-pin>
-> <new-puk>` to recover all keys and set new secrets in one step.
+> **Backup/restore:** The encrypted backup contains profile and credential
+> material, including initialized hmac credentials. It is not a disk image and
+> does not contain the disk encryption key or CTAP2 PIN. Copy it off the device
+> before locking the drive. See the [backup and reset guide](docs/backup-reset.md)
+> for restoration prerequisites and limitations.
 
 > **Experimental hmac storage:** `HMAC init` requires an unlocked device, a
 > configured FIDO PIN and a fresh BOOT press and release. Its development root
@@ -296,6 +291,11 @@ Connect to the console (e.g. `screen /dev/ttyACM0 115200`):
 > requires a target already initialized in the same development mode and
 > leaves the device locked. Backup/restore and disposable LUKS key checks were
 > tested on one development device; boot and initramfs remain untested.
+
+`FACTORY RESET YES` requires an unlocked device and a new BOOT press and
+release. It erases profiles, FIDO and hmac credentials, PINs, PUK and disk
+encryption keys. Encrypted disk data remains in flash but becomes inaccessible;
+firmware, OTP and external backups are not erased. `RESET` only reboots.
 
 Each LUKS2 FIDO token records its credential ID and salt in the LUKS header.
 Before deleting a credential, compare its hexadecimal ID from `HMAC LIST` with
@@ -502,8 +502,8 @@ limitations.
 
 ## Status / known limitations
 
-- **Legacy U2F/CTAP1 is disabled.** The device advertises CTAPHID `NMSG` until
-  (if ever) the CTAP1 code is replaced with a full implementation.
+- **Legacy U2F/CTAP1 is incomplete.** Only VERSION and the REGISTER selection
+  probe are supported; full CTAP1 registration and authentication are unavailable.
 - **CTAP2** implements `authenticatorGetInfo`, `makeCredential`,
   `getAssertion`, `getNextAssertion`, `authenticatorClientPIN` and
   `authenticatorCredentialManagement` with `none` attestation. Parsers and
@@ -511,8 +511,8 @@ limitations.
   resident-key download (`ssh-keygen -K`) and real SSH login are physically
   tested on the RP2350 dongle.
   - **ECDSA P-256 / ES256** and **Ed25519 / EdDSA** credentials are supported.
-  - The device must be unlocked (passphrase) for `makeCredential`/`getAssertion` to be
-    accepted.
+  - Ordinary profile credentials require an unlocked device. Separate hmac
+    credentials follow the policy described in the [hmac guide](docs/hmac-luks.md).
   - Credentials are flash-persistent (up to 64) in a CRC-checked A/B format,
     written defer-ably from the main loop.
   - The CTAP2 client PIN is **independent** of the unlock passphrase. During
@@ -545,48 +545,13 @@ limitations.
   - Writing large files is slow and wears flash, because every sector update
     requires a flash erase.
 
-## Security hardening: what RP2350 Secure Boot + fuses could add
+## Hardware security status
 
-This is a prototype. **The firmware has no hardware-backed anti-tamper:** the
-dongle can be put into BOOTSEL mode (`RESET BOOTSEL`) and re-flashed with any
-firmware, so a would-be "seal" (blocking new enrollments/backup) is a policy
-feature, not a real barrier against an attacker who can re-flash. Credential
-private keys are still protected at rest by the master key M (PIN/PUK), but
-anyone who can run their own firmware on the chip could ignore that policy.
-
-The RP2350 can mitigate this, if you are willing to permanently configure it:
-
-- **Secure Boot (signed execution).** Only firmware signed with a key you
-  control is allowed to boot. Untrusted firmware is refused, so a "seal"
-  state cannot be bypassed by flashing an attacker's image. Requires
-  generating and protecting a signing key (offline/HSM).
-- **`BOOT_CPROT` fuses.** Hardware access control over flash via the boot
-  ROM: `CPROT_READ` blocks flash dumps over BOOTSEL; `CPROT_READ_WRITE` also
-  blocks boot-ROM writes, so the device can only be updated through a signed
-  update path. Can be set independently of Secure Boot.
-- **`BROM_LOCK`.** Locks down boot-ROM functionality so flash cannot be read
-  or modified through it.
-
-Together, Secure Boot + `BOOT_CPROT_READ_WRITE` (+ `BROM_LOCK`) would make a
-seal genuinely enforced (no code can run except the signed firmware that
-respects it) and make dumping the encrypted key material via BOOTSEL much
-harder.
-
-What it would **not** solve:
-
-- **Physical chip-off / probing.** An attacker with lab equipment who reads
-  the flash die directly is not stopped by these fuses. At-rest protection of
-  the keys still relies on the master key M and the PIN/PUK.
-- **A leaked signing key.** If the signing key is compromised, an attacker can
-  sign their own firmware and bypass everything.
-- **A "seal" still needs a strong unseal secret** (e.g. an admin PIN/PUK) and
-  should never be removable by simply rebooting.
-
-> **Practical note:** Secure Boot and the fuses are **one-time-programmable
-> and effectively irreversible** — mistakes can brick the device or lock you
-> out of firmware updates. They must be developed on a separate test dongle,
-> after the regular re-flash workflow is replaced by a signed-update path.
-> None of this is enabled in this repository.
+Secure Boot, a signed update path and a hardware-protected hmac root are not
+implemented or enabled. Current development hmac roots reside in ordinary flash.
+Flash CRCs detect accidental corruption; they do not authenticate data or
+prevent rollback. Treat the hardware as a development platform and keep
+independent recovery access to anything protected by it.
 
 ## Acknowledgements
 

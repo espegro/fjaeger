@@ -28,8 +28,8 @@ func (m model) View() string {
 	return ""
 }
 
-func (m model) pad() string      { return " " }
-func tip(s string) string        { return dimStyle.Render(s) }
+func (m model) pad() string { return " " }
+func tip(s string) string   { return dimStyle.Render(s) }
 
 func (m model) viewConnect() string {
 	var body strings.Builder
@@ -61,8 +61,21 @@ func (m model) viewMain() string {
 	body.WriteString("Commands\n")
 	body.WriteString(strings.Repeat("─", m.widthAtLeast(40)) + "\n")
 
-	// Center the menu if there's room.
-	for i, a := range menu {
+	// Keep the selected command visible on terminals shorter than the menu.
+	visible := m.height - 8
+	if visible < 1 {
+		visible = len(menu)
+	}
+	start := 0
+	if m.menuIdx >= visible {
+		start = m.menuIdx - visible + 1
+	}
+	end := start + visible
+	if end > len(menu) {
+		end = len(menu)
+	}
+	for i := start; i < end; i++ {
+		a := menu[i]
 		line := ""
 		if a.kind == kSep {
 			line = " " + dimStyle.Render(strings.Repeat("·", 6))
@@ -95,6 +108,14 @@ func (m model) viewPrompt() string {
 	b.WriteString(titleStyle.Render(a.label))
 	b.WriteString("\n\n")
 	if m.confirm {
+		if strings.HasPrefix(a.label, "HMAC:") {
+			b.WriteString("  Changing policy can change the derived LUKS key. Keep recovery access.\n")
+			b.WriteString("  Press and release BOOT after confirming.\n\n")
+		}
+		if strings.HasPrefix(a.label, "FACTORY RESET") {
+			b.WriteString(errStyle.Render("  Erases credentials, PINs, PUK and the disk key. Disk data becomes inaccessible.\n"))
+			b.WriteString("  Press and release BOOT after confirming.\n\n")
+		}
 		b.WriteString("  " + errStyle.Render("Confirm? ") + selStyle.Render("(y/N)") + "\n\n")
 		b.WriteString(tip("y to proceed, any other key to cancel"))
 		b.WriteString("\n\n  Summary: " + dimStyle.Render(a.build(m.values)))
@@ -124,7 +145,7 @@ func (m model) viewPrompt() string {
 func (m model) viewShow() string {
 	var b strings.Builder
 	if m.err != nil {
-		b.WriteString(errStyle.Render("Error: " + m.err.Error()) + "\n\n")
+		b.WriteString(errStyle.Render("Error: "+m.err.Error()) + "\n\n")
 	} else {
 		b.WriteString(m.truncateOutput())
 	}
@@ -157,7 +178,7 @@ func (m model) viewConsole() string {
 	return headerBar(m) + "\n\n" + b.String()
 }
 
-func (m model) connectedAs() bool { return m.device != nil && m.device.Connected() }
+func (m model) connectedAs() bool { return m.device != nil }
 
 func (m model) widthAtLeast(n int) int {
 	if m.width > n {
@@ -341,7 +362,7 @@ func (m model) viewDisk() string {
 
 	ds := m.diskStatus
 	if m.diskErr != nil {
-		b.WriteString(errStyle.Render("Error: " + m.diskErr.Error()) + "\n\n")
+		b.WriteString(errStyle.Render("Error: "+m.diskErr.Error()) + "\n\n")
 	}
 	if m.diskStatus.Disk == "" && m.diskErr == nil {
 		b.WriteString(dimStyle.Render("(no status yet — press g to refresh)") + "\n\n")

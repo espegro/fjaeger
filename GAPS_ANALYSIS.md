@@ -1,5 +1,8 @@
 # Gaps Analysis - What's Missing in Current Build
 
+> Historical analysis; details may no longer describe the current firmware.
+> See the [README](README.md) and current guides for operational guidance.
+
 Analysis date: 2026-10-03 (firmware 582dcb9)
 
 ## 🔴 Critical Security Gaps

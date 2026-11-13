@@ -57,6 +57,7 @@ add_executable(fjaeger
   src/core/restore_prepared.c
   src/core/restore_bundle.c
   src/core/factory_wipe.c
+  src/core/factory_confirm.c
   src/core/combined_backup.c
   src/core/combined_device_backup.c
   src/core/combined_device_restore.c

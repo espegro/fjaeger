@@ -419,6 +419,8 @@ static void test_wrong_puk_factory_wipes_live_state(void) {
         assert(fj_state_verify_puk("wrong-puk") == FJ_PUK_WRONG);
     }
     now_us += 40000000;
+    fj_state_brute_failure(FJ_BRUTE_CTAP);
+    assert(!fj_state_brute_ok(FJ_BRUTE_CTAP));
     assert(fj_state_verify_puk("wrong-puk") == FJ_PUK_WIPED);
     assert(wipe_count == 1);
     assert(hmac_forget_count == 1);
@@ -426,6 +428,7 @@ static void test_wrong_puk_factory_wipes_live_state(void) {
     assert(!fj_state_pin_configured());
     assert(fj_state_get() == FJ_STATE_LOCKED);
     assert(fj_state_timeout() == FJ_DEFAULT_TIMEOUT_SEC);
+    assert(fj_state_brute_ok(FJ_BRUTE_CTAP));
     assert(!have_pin && !have_puk);
 }
 

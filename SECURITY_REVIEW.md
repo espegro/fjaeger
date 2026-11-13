@@ -1,5 +1,8 @@
 # Security Review - 2026-10-03
 
+> Historical analysis; details may no longer describe the current firmware.
+> See the [README](README.md) and current guides for operational guidance.
+
 ## Summary
 
 Security analysis of Fjaeger's authentication and credential management logic, with focus on potential vulnerabilities in lock/unlock state handling, PIN/PUK recovery, and credential wrapping key (CWK) management.
