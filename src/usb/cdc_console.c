@@ -385,9 +385,36 @@ static void cmd_help_hmac(void) {
 }
 
 static void cmd_status(void) {
-    char buf[320];
+    char buf[420];
     fj_security_t sec = {0};
     bool have_sec = fj_keys_get_security(&sec);
+    const fj_hmac_policy_t *hmac_policy = fj_hmac_runtime_policy();
+    fj_hmac_root_mode_t hmac_root_mode = 0;
+    bool hmac_enabled = hmac_policy != NULL &&
+                        fj_hmac_runtime_root_mode(&hmac_root_mode);
+    fj_hmac_credential_info_t hmac_credentials[FJ_HMAC_STORE_CAPACITY];
+    size_t hmac_count = 0;
+    bool hmac_count_known = fj_hmac_store_list(hmac_credentials,
+                                               FJ_HMAC_STORE_CAPACITY,
+                                               &hmac_count);
+    char hmac_count_text[16];
+    if (hmac_count_known) snprintf(hmac_count_text, sizeof(hmac_count_text), "%u", (unsigned)hmac_count);
+    else snprintf(hmac_count_text, sizeof(hmac_count_text), "unknown");
+    const char *hmac_mode = "off";
+    const char *hmac_root = "none";
+    const char *hmac_armed = "no";
+    if (hmac_enabled) {
+        switch (hmac_policy->mode) {
+        case FJ_HMAC_PIN_BUTTON: hmac_mode = "pin-button"; break;
+        case FJ_HMAC_PIN: hmac_mode = "pin"; break;
+        case FJ_HMAC_AUTO: hmac_mode = "auto"; break;
+        case FJ_HMAC_ARMED: hmac_mode = "armed"; break;
+        default: hmac_mode = "unknown"; break;
+        }
+        hmac_root = hmac_root_mode == FJ_HMAC_ROOT_DEVELOPMENT ? "development" :
+                    hmac_root_mode == FJ_HMAC_ROOT_OTP ? "otp" : "unknown";
+        hmac_armed = hmac_policy->armed ? "yes" : "no";
+    }
     snprintf(buf, sizeof(buf), "version: %s\r\n"
              "state: %s\r\n"
              "disk: %s\r\n"
@@ -403,7 +430,12 @@ static void cmd_status(void) {
              "active_profile: %u\r\n"
              "profiles: %u\r\n"
              "timeout: %lus\r\n"
-             "presence: %s",
+             "presence: %s\r\n"
+             "hmac: %s\r\n"
+             "hmac_policy: %s\r\n"
+             "hmac_root: %s\r\n"
+             "hmac_armed: %s\r\n"
+             "hmac_credentials: %s",
              FJ_VERSION_STRING,
              fj_state_get() == FJ_STATE_UNLOCKED ? "unlocked" : "locked",
              fj_msc_is_ready() ? "unlocked" : "locked",
@@ -414,7 +446,9 @@ static void cmd_status(void) {
              fj_keys_puk_configured() ? "set" : "unset", (unsigned)sec.puk_fail,
              fj_keys_active_profile(), fj_keys_profile_count(),
              (unsigned long)fj_state_timeout(),
-             fj_keys_presence_button() ? "button" : "auto");
+             fj_keys_presence_button() ? "button" : "auto",
+             hmac_enabled ? "enabled" : "disabled", hmac_mode, hmac_root,
+             hmac_armed, hmac_count_text);
     outln(buf);
 }
 

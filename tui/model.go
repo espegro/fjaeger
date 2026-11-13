@@ -884,6 +884,11 @@ func (m *model) renderStatus() {
 	}
 	fmt.Fprintf(&b, "Device state: %s\n", s.State)
 	fmt.Fprintf(&b, "Drive:        %s\n", s.Disk)
+	fmt.Fprintf(&b, "HMAC:         %s\n", statusOrUnknown(s.HMAC))
+	fmt.Fprintf(&b, "HMAC policy:  %s\n", statusOrUnknown(s.HMACPolicy))
+	fmt.Fprintf(&b, "HMAC root:    %s\n", statusOrUnknown(s.HMACRoot))
+	fmt.Fprintf(&b, "HMAC armed:   %s\n", statusOrUnknown(s.HMACArmed))
+	fmt.Fprintf(&b, "HMAC creds:   %s\n", statusOrUnknown(s.HMACCreds))
 	if s.FlushPending {
 		b.WriteString("  (write flush pending — keep powered)\n")
 	}
@@ -894,6 +899,13 @@ func (m *model) renderStatus() {
 	fmt.Fprintf(&b, "PUK fails:          %d\n", s.PUKFail)
 	fmt.Fprintf(&b, "Disk PIN fails:     %d\n", s.DiskFail)
 	m.output = b.String()
+}
+
+func statusOrUnknown(s string) string {
+	if s == "" {
+		return "?"
+	}
+	return s
 }
 
 func itoaN(n int) string {

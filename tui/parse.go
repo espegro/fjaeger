@@ -18,6 +18,12 @@ type Status struct {
 	DiskFail     int
 	FlushPending bool
 	PUK          string
+	Presence     string
+	HMAC         string
+	HMACPolicy   string
+	HMACRoot     string
+	HMACArmed    string
+	HMACCreds    string
 	Profile      int
 	Profiles     int
 	Timeout      int
@@ -45,6 +51,12 @@ func ParseStatus(reply string) Status {
 	s.DiskFail = atoi(vals["disk_fail"])
 	s.FlushPending = strings.HasPrefix(vals["disk_flush_pending"], "yes")
 	s.PUK = vals["puk"]
+	s.Presence = vals["presence"]
+	s.HMAC = vals["hmac"]
+	s.HMACPolicy = vals["hmac_policy"]
+	s.HMACRoot = vals["hmac_root"]
+	s.HMACArmed = vals["hmac_armed"]
+	s.HMACCreds = vals["hmac_credentials"]
 	s.Profile = atoi(vals["active_profile"])
 	s.Profiles = atoi(vals["profiles"])
 	if v := atoi(strings.TrimSuffix(vals["timeout"], "s")); v >= 0 {

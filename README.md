@@ -240,7 +240,7 @@ Connect to the console (e.g. `screen /dev/ttyACM0 115200`):
 | Command | Description |
 |---------|-------------|
 | `HELP` | List commands (`HELP SSH` for SSH usage) |
-| `STATUS` | Show device + drive state, active profile, profiles, timeout |
+| `STATUS` | Show device + drive state, active profile, timeout and HMAC configuration |
 | `LOCK` | Lock the device (and close the drive) |
 | `UNLOCK <passphrase>` | Unlock the **device** for key operations (not the drive) |
 | `SETPIN <pin>` | Set/change PIN |
