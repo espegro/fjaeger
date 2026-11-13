@@ -288,8 +288,10 @@ Connect to the console (e.g. `screen /dev/ttyACM0 115200`):
 > **Experimental hmac storage:** `HMAC init` requires an unlocked device, a
 > configured FIDO PIN and a fresh BOOT press and release. Its development root
 > is stored without hardware protection. Policy changes require the same
-> confirmation. FIDO `hmac-secret` is experimental. PIN policy currently also requires BOOT; auto and
-> armed deliberately permit unattended assertions with UP=0. Once initialized,
+> confirmation. FIDO `hmac-secret` is experimental. PIN, auto and armed
+> deliberately permit assertions without BOOT and report UP=0. PIN mode requires
+> a verified PIN for hmac-secret, but a no-UP preflight can identify and sign
+> with the separate RP-bound credential without one. Once initialized,
 > backups include the separate store; restoring such a backup currently
 > requires a target already initialized in the same development mode and
 > leaves the device locked. Backup/restore and disposable LUKS key checks were

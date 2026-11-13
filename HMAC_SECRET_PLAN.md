@@ -9,8 +9,9 @@ provides combined backup/restore and credential list/delete, and has been
 tested with libfido2, systemd and disposable LUKS2 files on one device.
 The tests verified keys without activating a device mapper or testing boot.
 The development root is unprotected, OTP provisioning/migration and secure
-boot remain unfinished, and PIN-only policy still requires a BOOT press.
-Auto/armed permit the explicitly accepted UP=0 unattended behavior. More
+boot remain unfinished. PIN-only policy now permits UP=0 with verified PIN;
+its separate RP-bound preflight can sign without PIN but yields no hmac-secret.
+PIN/auto/armed permit the explicitly accepted UP=0 behavior. More
 recovery, host-reboot and hardware fault testing is required before production.
 
 ## Objective and boundaries
@@ -207,7 +208,7 @@ coordination; the standalone hmac tombstone is not by itself a global reset.
    CTAP 2.1 hmac-secret requires rejecting requests with up=false, whereas
    systemd explicitly sends up=false when user presence is disabled. The
    unattended lab modes therefore use a deliberate, user-accepted and clearly
-   documented compatibility deviation; only allow it in explicit auto/armed lab policy,
+   documented compatibility deviation; allow it only in explicit PIN/auto/armed policy,
    return UP=0, and test interoperability. Interactive modes remain strict.
 7. Test against host-side known vectors and malformed input, authentication
    failures, replay/session transitions, profile and reset boundaries, backup,

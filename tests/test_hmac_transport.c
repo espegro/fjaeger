@@ -84,6 +84,13 @@ int main(void) {
     fj_hmac_assertion_request_t signed_request={0}; memcpy(signed_request.client_data_hash,client,32);
     verify_signature(&signed_request,&result,credential.public_key);
     verify_output(&signed_request,&result,material+32,plain_salt);
+    assert(fj_hmac_policy_init(&policy,FJ_HMAC_PIN,false,test_now));
+    send_request(req,w.len+1); n=response(out,sizeof(out)); assert(n>1 && out[0]==0 && !waiting);
+    fj_cbor_reader_init(&r,out+1,n-1);assert(fj_cbor_next(&r,&item));
+    assert(fj_cbor_next(&r,&item) && item.val==1);assert(fj_cbor_next(&r,&item) && fj_cbor_skip(&r,&item));
+    assert(fj_cbor_next(&r,&item) && item.val==2);
+    assert(fj_cbor_next(&r,&item) && fj_cbor_read_bytes(&r,&item,auth,sizeof(auth),&alen));
+    assert(auth[32]==0x84); /* UV verified, no physical presence */
     /* systemd asks for a no-UP assertion without extensions as preflight. */
     req[0]=2;fj_cbor_writer_init(&w,req+1,sizeof(req)-1);fj_cbor_map(&w,4);
     fj_cbor_uint(&w,1);fj_cbor_tstr(&w,"example.org");
@@ -95,6 +102,8 @@ int main(void) {
     assert(fj_hmac_policy_init(&policy,FJ_HMAC_ARMED,false,test_now));
     send_request(req,preflight_len); n=response(out,sizeof(out)); assert(n==1 && out[0]==0x27);
     assert(fj_hmac_policy_init(&policy,FJ_HMAC_AUTO,false,test_now));
+    send_request(req,preflight_len); n=response(out,sizeof(out)); assert(n>1 && out[0]==0 && !waiting);
+    assert(fj_hmac_policy_init(&policy,FJ_HMAC_PIN,false,test_now));
     send_request(req,preflight_len); n=response(out,sizeof(out)); assert(n>1 && out[0]==0 && !waiting);
     fj_cbor_reader_init(&r,out+1,n-1);assert(fj_cbor_next(&r,&item));
     assert(fj_cbor_next(&r,&item) && item.val==1);assert(fj_cbor_next(&r,&item) && fj_cbor_skip(&r,&item));

@@ -15,8 +15,8 @@ bool fj_hmac_preflight(const uint8_t id[16],const uint8_t rp[32],const uint8_t c
     uint8_t data[69]={0},digest[32]={0},sig[64]={0};
     fj_hmac_credential_t cred={0}; bool ok=false;
     if (!id || !rp || !client || !policy ||
-        (policy->mode!=FJ_HMAC_AUTO && policy->mode!=FJ_HMAC_ARMED) ||
-        fj_hmac_policy_decide(policy,false,false)!=FJ_HMAC_ALLOW ||
+        (policy->mode!=FJ_HMAC_PIN && policy->mode!=FJ_HMAC_AUTO && policy->mode!=FJ_HMAC_ARMED) ||
+        (policy->mode==FJ_HMAC_ARMED && !policy->armed) ||
         !fj_hmac_store_get(id,&cred) || !fj_ct_equal(cred.rp_id_hash,rp,32) ||
         !fj_hmac_store_open_root(mode,otp,root) ||
         !fj_hmac_credential_open(&cred,root,material) ||
@@ -47,11 +47,10 @@ bool fj_hmac_assertion(const fj_hmac_assertion_request_t *r,const fj_hmac_policy
     if (!r || !policy || (r->extension.salt_len!=32 && r->extension.salt_len!=64)) goto done;
     bool uv=r->has_pin_auth && fj_pin_verify_user_auth(r->client_data_hash,32,r->pin_auth);
     /* An explicitly supplied invalid authorization is never ignored, even in
-     * an unattended policy. Only explicit auto/armed permits up=false. */
+     * an unattended policy. PIN/auto/armed explicitly permit up=false. */
     if ((r->has_pin_auth && !uv) || (r->uv_requested && !uv) ||
-        (r->up_requested && !r->user_present &&
-         (policy->mode==FJ_HMAC_PIN || policy->mode==FJ_HMAC_PIN_BUTTON)) ||
-        (!r->up_requested && policy->mode!=FJ_HMAC_AUTO && policy->mode!=FJ_HMAC_ARMED) ||
+        (r->up_requested && !r->user_present && policy->mode==FJ_HMAC_PIN_BUTTON) ||
+        (!r->up_requested && policy->mode==FJ_HMAC_PIN_BUTTON) ||
         fj_hmac_policy_decide(policy,uv,r->user_present)!=FJ_HMAC_ALLOW) goto done;
     if (!fj_hmac_store_get(r->credential_id,&credential) ||
         !fj_ct_equal(credential.rp_id_hash,r->rp_id_hash,32) ||

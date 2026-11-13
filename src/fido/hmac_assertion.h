@@ -26,8 +26,9 @@ bool fj_hmac_assertion(const fj_hmac_assertion_request_t *request,
                        const fj_hmac_policy_t *policy,
                        fj_hmac_root_mode_t mode,const uint8_t otp[32],
                        fj_hmac_assertion_result_t *result);
-/* CTAP preflight without hmac-secret: only explicit auto/armed policies may
- * sign without presence. This never exposes ordinary credentials or secrets. */
+/* CTAP preflight without hmac-secret: PIN/auto/armed policies may sign without
+ * presence or PIN, solely to identify this RP-bound credential to systemd.
+ * This never exposes ordinary credentials or an hmac-secret output. */
 bool fj_hmac_preflight(const uint8_t id[16],const uint8_t rp_hash[32],
                        const uint8_t client_hash[32],const fj_hmac_policy_t *policy,
                        fj_hmac_root_mode_t mode,const uint8_t otp[32],

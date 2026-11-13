@@ -210,7 +210,16 @@ int main(void) {
     assert(!fj_hmac_assertion(&req,&policy,FJ_HMAC_ROOT_OTP,otp,&result));
     assert(fj_hmac_policy_init(&policy,FJ_HMAC_PIN,false,0));
     req.up_requested=true; req.user_present=false;
+    assert(fj_hmac_assertion(&req,&policy,FJ_HMAC_ROOT_OTP,otp,&result));
+    assert(result.auth_data[32]==0x84); verify_output(&req,&result,material+32,salt);
+    req.up_requested=false;
+    assert(fj_hmac_assertion(&req,&policy,FJ_HMAC_ROOT_OTP,otp,&result));
+    assert(result.auth_data[32]==0x84);
+    req.has_pin_auth=false;
     assert(!fj_hmac_assertion(&req,&policy,FJ_HMAC_ROOT_OTP,otp,&result));
+    req.has_pin_auth=true; pin_ok=false;
+    assert(!fj_hmac_assertion(&req,&policy,FJ_HMAC_ROOT_OTP,otp,&result));
+    pin_ok=true; req.up_requested=true;
     req.user_present=true;
     assert(fj_hmac_assertion(&req,&policy,FJ_HMAC_ROOT_OTP,otp,&result));
     assert(result.auth_data[32]==0x85); verify_output(&req,&result,material+32,salt);

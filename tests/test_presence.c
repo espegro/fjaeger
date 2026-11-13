@@ -89,7 +89,6 @@ int main(void) {
     frame(1,0x10,hmget,2); assert(waiting); session_epoch++; tick(1);
     assert(!waiting && hmac_dispatched==2); drain();
     hmac_policy.mode=FJ_HMAC_PIN;
-    frame(1,0x10,hmget,2); assert(waiting);
-    frame(1,0x11,NULL,0); assert(!waiting && reply(0x10,0x2d));
+    frame(1,0x10,hmget,2); assert(!waiting && hmac_dispatched==3 && !hmac_present && reply(0x10,0));
     puts("presence transport tests: ok");
 }

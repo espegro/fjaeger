@@ -257,22 +257,22 @@ static void cmd_help(void) {
     outln("A USB security key: SSH/CTAP2 credentials and an encrypted drive.");
     outln("");
     outln("Concepts:");
-    outln("  * The device is LOCKED or UNLOCKED. While locked, no signing,");
-    outln("    enrollment or drive access is allowed. UNLOCK with the passphrase.");
+    outln("  * While locked, SSH/WebAuthn keys and the drive remain inaccessible.");
+    outln("    A separate hmac-secret credential may work while locked: HELP HMAC.");
     outln("  * The UNLOCK PASSPHRASE protects your SSH keys. The PUK recovers it");
     outln("    if you forget or lock it out (5 wrong attempts block it).");
     outln("  * The CTAP2 PIN is separate: it only authenticates the FIDO/WebAuthn");
     outln("    protocol (e.g. ssh-keygen -K). It does NOT unlock the device.");
     outln("  * The encrypted MSC drive has its OWN disk PIN, separate from the");
     outln("    device. It must be unlocked to mount/use it.");
-    outln("  * Credentials live in named PROFILES. Only the active profile's");
-    outln("    credentials can be used or discovered.");
+    outln("  * SSH/WebAuthn credentials live in named PROFILES. The separate");
+    outln("    hmac-secret store is independent of the active profile.");
     outln("  * Secret input (passphrase, PUK, PINs) is masked (*) and entered");
     outln("    twice to confirm for set/change commands. The device echoes your");
     outln("    input, so keep the terminal's local echo OFF.");
     outln("");
     outln("Commands:");
-    outln("  HELP|?                     this help (HELP SSH for SSH usage)");
+    outln("  HELP|?                     this help (HELP SSH or HELP HMAC for more)");
     outln("  STATUS                     device & disk state, active profile, timeout");
     outln("");
     outln("  LOCK                       lock the device (and close the drive)");
@@ -284,7 +284,7 @@ static void cmd_help(void) {
     outln("  TIMEOUT <sec>              auto-lock delay in seconds (default 900; 0 = off)");
     outln("  PRESENCE <auto|button>     require BOOT for FIDO operations");
     outln("  HMAC <init|pin-button|pin|auto|armed>  configure development hmac storage");
-    outln("                             experimental; PIN mode currently requires BOOT");
+    outln("                             PIN/auto/armed permit UP=0 without BOOT");
     outln("  HMAC LIST                  list separate hmac credential IDs and RP hashes");
     outln("  HMAC DELETE <hex-id>       delete one hmac credential after BOOT confirmation");
     outln("");
@@ -342,6 +342,43 @@ static void cmd_help_ssh(void) {
     outln("                       -s <file>.sig < <file>");
     outln("  ECDSA P-256 / ES256 and Ed25519 / EdDSA security keys are supported.");
     outln("  A wrong profile returns no signature; select the owning profile first.");
+}
+
+static void cmd_help_hmac(void) {
+    outln("HMAC-secret (experimental development mode):");
+    outln("  Separate credentials can unlock LUKS while Fjaeger stays locked.");
+    outln("  They do not unlock SSH/WebAuthn credentials or the Fjaeger drive.");
+    outln("  The development root is stored without hardware protection.");
+    outln("");
+    outln("Setup and policies (unlock device, set FIDO PIN, confirm with BOOT):");
+    outln("  HMAC init        initialize storage; starts with pin-button policy");
+    outln("  HMAC pin-button  require FIDO PIN and a fresh BOOT press for each use");
+    outln("  HMAC pin         require FIDO PIN; no BOOT press for each use");
+    outln("  HMAC auto        allow use without FIDO PIN or BOOT");
+    outln("  HMAC armed       allow use without PIN after a fresh BOOT press");
+    outln("                   armed state clears on device reboot or power loss;");
+    outln("                   USB reconnect preserves it only if power remains");
+    outln("  Registration requires an unlocked device and a fresh BOOT press.");
+    outln("  PIN is checked during registration only when the client supplies it.");
+    outln("");
+    outln("  pin/auto/armed can return UP=0; only verified PIN returns UV=1.");
+    outln("  A no-UP preflight may identify and sign with the separate credential");
+    outln("  without PIN; it does not return hmac-secret. See README for limits.");
+    outln("");
+    outln("Manage credentials (device must be unlocked):");
+    outln("  HMAC LIST            list credential IDs and relying-party hashes");
+    outln("  HMAC DELETE <hex-id> delete one ID after a fresh BOOT press");
+    outln("  LUKS stores the ID as base64 in its header. On the PC, inspect:");
+    outln("    cryptsetup luksDump --dump-json-metadata <luks-device>");
+    outln("  Convert the fido2-credential value to the hex ID shown by HMAC LIST:");
+    outln("    printf '%s' '<fido2-credential>' | base64 -d | xxd -p");
+    outln("  Verify a separate recovery key before deleting a LUKS credential.");
+    outln("  Deletion does not remove copies from existing backups.");
+    outln("");
+    outln("  BACKUP includes hmac credentials when initialized. RESTORE requires");
+    outln("  a target initialized in the same mode and leaves the device locked.");
+    outln("  Backup files are deleted from the drive when it locks; copy them out.");
+    outln("  Keep a separate LUKS recovery key. Boot/initramfs is not yet tested.");
 }
 
 static void cmd_status(void) {
@@ -1003,7 +1040,8 @@ static void dispatch(char *cmdline) {
         const char *topic = next_token(&p);
         if (!topic) cmd_help();
         else if (strcasecmp(topic, "ssh") == 0) cmd_help_ssh();
-        else outln("ERR unknown help topic; try HELP SSH");
+        else if (strcasecmp(topic, "hmac") == 0) cmd_help_hmac();
+        else outln("ERR unknown help topic; try HELP SSH or HELP HMAC");
     } else if (strcasecmp(tok, "status") == 0) {
         cmd_status();
     } else if (strcasecmp(tok, "lock") == 0) {

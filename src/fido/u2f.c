@@ -373,7 +373,7 @@ static void process_rx(void) {
             if (!policy || (rx.buf[0]==1 && fj_state_get()!=FJ_STATE_UNLOCKED)) {
                 uint8_t error=0x27; send_hid(cid,U2FHID_CBOR,&error,1); return;
             }
-            if (rx.buf[0]==1 || policy->mode==FJ_HMAC_PIN_BUTTON || policy->mode==FJ_HMAC_PIN) presence_begin(true);
+            if (rx.buf[0]==1 || policy->mode==FJ_HMAC_PIN_BUTTON) presence_begin(true);
             else handle_hmac(cid,rx.buf,len,false);
             return;
         }
