@@ -23,6 +23,7 @@
 
 #include "hardware/flash.h"
 #include "hardware/sync.h"
+#include "flash_layout.h"
 #include "pico/time.h"
 
 #if CFG_TUD_MSC
@@ -39,6 +40,10 @@
 extern const char __flash_disk_start;
 #define DISK_FLASH_START ((uint32_t)(uintptr_t)&__flash_disk_start - XIP_BASE)
 #define DISK_FLASH_SIZE        0x00C00000u         /* 12 MiB */
+
+/* The linker enforces the same boundary with __flash_disk_start. */
+_Static_assert(0x00100000u + DISK_FLASH_SIZE <= FJ_HMAC_CONFIG_OFFSET,
+               "MSC partition overlaps reserved stores");
 
 #define DISK_TOTAL_BLOCKS      (DISK_FLASH_SIZE / DISK_BLOCK_SIZE)   /* 3072 */
 

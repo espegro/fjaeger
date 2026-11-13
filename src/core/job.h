@@ -24,7 +24,7 @@ extern "C" {
 #endif
 
 #define FJ_SECRET_MAX 65          /* 64-char secret plus NUL */
-#define FJ_BLOB_MAX   4096        /* backup/restore blob buffer */
+#define FJ_BLOB_MAX   32768       /* backup/restore blob buffer */
 #define FJ_JOB_KDF_CHUNK 512u     /* PBKDF2 inner iterations per tick */
 
 /* Result of a completed job. */
@@ -63,6 +63,8 @@ typedef struct {
     uint8_t phase;
     fj_job_result_t result;
     bool busy;
+    bool combined_backup;
+    bool combined_restore;
     uint32_t lock_epoch;       /* cancel if the device locks during a job */
 
     char a1[FJ_SECRET_MAX], a2[FJ_SECRET_MAX], a3[FJ_SECRET_MAX];
@@ -102,6 +104,8 @@ typedef struct {
 void fj_state_job_start(fj_state_job_t *j, fj_job_kind_t kind,
                         const char *a1, const char *a2, const char *a3);
 bool fj_state_job_step(fj_state_job_t *j);
+/* Cancel and scrub all secrets, including a prepared combined restore. */
+void fj_state_job_cancel(fj_state_job_t *j);
 
 /* msc_disk.c: start/step a disk-layer job. */
 void fj_disk_job_start(fj_disk_job_t *j, fj_job_kind_t kind, const char *a1);

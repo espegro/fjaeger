@@ -11,6 +11,13 @@
 #include "ctap2.h"
 #include "pin.h"
 #include "rgb_led.h"
+#include "factory_wipe.h"
+#include "hmac_store.h"
+#include "hmac_config.h"
+#include "hmac_runtime.h"
+#include "combined_device_backup.h"
+#include "combined_password_job.h"
+#include "combined_device_restore.h"
 #include "pico/time.h"
 
 #define PIN_MIN_LEN 4
@@ -81,6 +88,7 @@ void fj_state_init(void) {
 fj_state_t fj_state_get(void) {
     return state;
 }
+uint32_t fj_state_session_epoch(void) { return lock_epoch; }
 
 bool fj_state_pin_configured(void) {
     return pass_configured;
@@ -191,7 +199,11 @@ void fj_state_factory_reset(void) {
     fj_msc_lock();
     fj_msc_force_lock();
     fj_ctap2_forget_all();
-    fj_keys_wipe();
+    fj_pin_reset_token();
+    fj_hmac_runtime_forget();
+    fj_hmac_store_forget_ram();
+    fj_hmac_config_forget_ram();
+    fj_keys_forget_ram();
     fj_secure_zero(pass_hash, sizeof(pass_hash));
     fj_secure_zero(pass_salt, sizeof(pass_salt));
     fj_secure_zero(ctap2_pin_verifier, sizeof(ctap2_pin_verifier));
@@ -202,6 +214,12 @@ void fj_state_factory_reset(void) {
     state = FJ_STATE_LOCKED;
     have_unlock_time = false;
     timeout_sec = FJ_DEFAULT_TIMEOUT_SEC;
+    /* Never report success or resume service if intent, erase, verification,
+     * or post-wipe initialization fails. Boot recovery handles WIPING. */
+    if (!fj_factory_wipe_start()) fj_factory_wipe_halt();
+    fj_keys_init();
+    if (!fj_keys_ready()) fj_factory_wipe_halt();
+    if (!fj_hmac_store_init()) fj_factory_wipe_halt();
 }
 
 bool fj_state_cwk(uint8_t out[32]) {
@@ -296,7 +314,7 @@ void fj_state_brute_success(fj_brute_ctx_t ctx) {
 /* Backup / restore                                                    */
 /* ------------------------------------------------------------------ */
 #define BACKUP_MAGIC    0x464A4255u   /* "FJBU" */
-#define BACKUP_VERSION  2u
+#define BACKUP_VERSION  3u
 #define BACKUP_SALT_LEN 16
 #define BACKUP_NONCE_LEN 12
 #define BACKUP_TAG_LEN  16
@@ -309,6 +327,8 @@ _Static_assert(BACKUP_TOTAL(sizeof(fj_backup_payload_t)) <= FJ_BLOB_MAX,
                "backup payload must fit the cooperative-job blob");
 _Static_assert(BACKUP_TOTAL(sizeof(fj_backup_payload_t)) <= FJ_MSC_BACKUP_MAX,
                "backup payload must fit the MSC backup file");
+_Static_assert(FJ_COMBINED_PASSWORD_SIZE <= FJ_BLOB_MAX && FJ_COMBINED_PASSWORD_SIZE <= FJ_MSC_BACKUP_MAX,
+               "combined backup must fit the job and MSC buffers");
 
 /* Backup file on the disk: magic(4) || version(1) || salt(16) || nonce(12)
  * || tag(16) || AES-GCM(payload). The key is PBKDF2(password, salt). */
@@ -475,6 +495,9 @@ static bool puk_apply_verify(fj_state_job_t *j) {
         sec.puk_fail++;
         fj_state_brute_failure(FJ_BRUTE_PUK);
         if (sec.puk_fail >= FJ_MAX_PUK_FAILS) {
+            /* On a flash error the wipe halts; scrub the caller's PUK/KDF
+             * workspace before entering that path as well as on success. */
+            state_job_scrub(j);
             fj_state_factory_reset();
             j->result = FJ_RES_WIPED;
         } else {
@@ -540,6 +563,8 @@ static void job_run_puk(fj_state_job_t *j) {
 /* BACKUP ------------------------------------------------------------------ */
 static void job_start_backup(fj_state_job_t *j, const char *a1) {
     size_t len = strlen(a1);
+    j->combined_backup = !fj_hmac_store_legacy_backup_safe();
+    if (j->combined_backup && !fj_hmac_runtime_enabled()) { j->result = FJ_RES_ERR; j->busy = false; return; }
     if (state != FJ_STATE_UNLOCKED || !master_available) { j->result = FJ_RES_BAD_SECRET; j->busy = false; return; }
     if (len < 8 || len > 64) { j->result = FJ_RES_BAD_SECRET; j->busy = false; return; }
     if (!fj_msc_is_ready()) { j->result = FJ_RES_DRIVE; j->busy = false; return; }
@@ -554,6 +579,14 @@ static void job_run_backup(fj_state_job_t *j) {
     memset(&j->payload, 0, sizeof(j->payload));
     if (!fj_keys_backup_fill(&j->payload)) { j->result = FJ_RES_ERR; j->busy = false; return; }
     memcpy(j->payload.master, master, sizeof(master));
+
+    if (j->combined_backup) {
+        bool ok=fj_combined_device_backup(&j->payload,j->kdf[0].out,j->salt[0],j->nonce[0],
+                                          j->blob,sizeof(j->blob));
+        j->result=ok && fj_msc_backup_write(j->blob,FJ_COMBINED_PASSWORD_SIZE) ? FJ_RES_OK : FJ_RES_ERR;
+        j->busy=false;
+        return;
+    }
 
     size_t p = 0;
     uint32_t magic = BACKUP_MAGIC;
@@ -581,10 +614,22 @@ static void job_start_restore(fj_state_job_t *j, const char *a1, const char *a2,
         npr < 8 || npr > 64) { j->result = FJ_RES_BAD_SECRET; j->busy = false; return; }
     if (!fj_msc_is_ready()) { j->result = FJ_RES_DRIVE; j->busy = false; return; }
     if (!fj_msc_backup_read(j->blob, sizeof(j->blob), &j->blob_len)) { j->result = FJ_RES_ERR; j->busy = false; return; }
-    if (j->blob_len != BACKUP_TOTAL(sizeof(fj_backup_payload_t))) { j->result = FJ_RES_ERR; j->busy = false; return; }
+    if (j->blob_len == FJ_COMBINED_PASSWORD_SIZE && !memcmp(j->blob,"FJCP",4)) {
+        if (!fj_hmac_runtime_enabled() || j->blob[4]!=1 || j->blob[5] || j->blob[6] || j->blob[7]) {
+            j->result=FJ_RES_ERR; j->busy=false; return;
+        }
+        j->combined_restore=true;
+        memcpy(j->salt[0],j->blob+8,16);
+        if (!job_begin_kdf(j,0,a1,j->salt[0])) { j->result=FJ_RES_ERR; j->busy=false; return; }
+        j->phase=0; return;
+    }
+    if (!fj_hmac_store_legacy_backup_safe()) { j->result=FJ_RES_ERR; j->busy=false; return; }
+    if (j->blob_len < BACKUP_TOTAL(0)) { j->result = FJ_RES_ERR; j->busy = false; return; }
     uint32_t magic;
     memcpy(&magic, j->blob, 4);
-    if (magic != BACKUP_MAGIC || j->blob[4] != (uint8_t)BACKUP_VERSION) { j->result = FJ_RES_ERR; j->busy = false; return; }
+    bool valid_v2 = j->blob[4] == 2u && j->blob_len == BACKUP_TOTAL(sizeof(fj_backup_payload_v2_t));
+    bool valid_v3 = j->blob[4] == BACKUP_VERSION && j->blob_len == BACKUP_TOTAL(sizeof(fj_backup_payload_t));
+    if (magic != BACKUP_MAGIC || (!valid_v2 && !valid_v3)) { j->result = FJ_RES_ERR; j->busy = false; return; }
     memcpy(j->salt[0], j->blob + 5, BACKUP_SALT_LEN);
     memcpy(j->nonce[0], j->blob + 5 + BACKUP_SALT_LEN, BACKUP_NONCE_LEN);
     if (!job_begin_kdf(j, 0, a1, j->salt[0])) { j->result = FJ_RES_ERR; j->busy = false; return; }
@@ -595,12 +640,31 @@ static void job_run_restore(fj_state_job_t *j) {
     switch (j->phase) {
     case 0:
         if (!kdf_chunk_done(&j->kdf[0])) return;
+        if (j->combined_restore) {
+            if (!fj_combined_device_restore_prepare(j->blob,j->blob_len,j->kdf[0].out,&j->payload)) {
+                j->result=FJ_RES_ERR; j->busy=false; return;
+            }
+            goto restore_derive;
+        }
+        size_t payload_len = j->blob[4] == 2u ? sizeof(fj_backup_payload_v2_t) : sizeof(j->payload);
         if (!fj_aes_gcm_decrypt(j->kdf[0].out, j->nonce[0],
-                                j->blob + BACKUP_HEADER + sizeof(j->payload),
-                                j->blob + BACKUP_HEADER, sizeof(j->payload),
-                                (uint8_t *)&j->payload)) {
+                                j->blob + BACKUP_HEADER + payload_len,
+                                j->blob + BACKUP_HEADER, payload_len,
+                                j->blob + BACKUP_HEADER)) {
             j->result = FJ_RES_ERR; j->busy = false; return;
         }
+        if (j->blob[4] == 2u) {
+            const fj_backup_payload_v2_t *legacy = (const void *)(j->blob + BACKUP_HEADER);
+            memset(&j->payload, 0, sizeof(j->payload));
+            memcpy(j->payload.master, legacy->master, sizeof(legacy->master));
+            memcpy(j->payload.ctap2, legacy->ctap2, sizeof(legacy->ctap2));
+            memcpy(j->payload.profiles, legacy->profiles, sizeof(legacy->profiles));
+            j->payload.active_profile = legacy->active_profile;
+            j->payload.active_profile_valid = legacy->active_profile_valid;
+        } else {
+            memcpy(&j->payload, j->blob + BACKUP_HEADER, sizeof(j->payload));
+        }
+restore_derive:
         fj_random(j->salt[1], 16);
         fj_random(j->salt[2], 16);
         fj_random(j->salt[3], 16);
@@ -621,6 +685,25 @@ static void job_run_restore(fj_state_job_t *j) {
         j->phase = 4; return;
     case 4:
         if (!kdf_chunk_done(&j->kdf[4])) return;
+        if (j->combined_restore) {
+            fj_restore_wraps_t wraps={0};
+            uint8_t root_salt[16],root_nonce[12],txid[16];
+            memcpy(wraps.pass_hash,j->kdf[1].out,32); memcpy(wraps.pass_salt,j->salt[1],16);
+            memcpy(wraps.pass_wrap_key,j->kdf[2].out,32); memcpy(wraps.pass_wrap_salt,j->salt[2],16);
+            memcpy(wraps.puk_hash,j->kdf[3].out,32); memcpy(wraps.puk_salt,j->salt[3],16);
+            memcpy(wraps.puk_wrap_key,j->kdf[4].out,32); memcpy(wraps.puk_wrap_salt,j->salt[4],16);
+            fj_random(root_salt,sizeof(root_salt)); fj_random(root_nonce,sizeof(root_nonce)); fj_random(txid,sizeof(txid));
+            /* Main-core synchronous commit: do not pump USB or other tasks.
+             * Drop all old session state before changing either store. */
+            fj_state_lock(); fj_msc_force_lock(); fj_ctap2_forget_all();
+            bool ok=fj_combined_device_restore_commit(&j->payload,&wraps,root_salt,root_nonce,txid);
+            fj_secure_zero(&wraps,sizeof(wraps)); fj_secure_zero(root_salt,sizeof(root_salt));
+            fj_secure_zero(root_nonce,sizeof(root_nonce)); fj_secure_zero(txid,sizeof(txid));
+            if (!ok) fj_factory_wipe_halt(); /* boot must recover the journal */
+            fj_state_init(); fj_ctap2_init();
+            if (!fj_hmac_runtime_init(NULL,true,0)) fj_factory_wipe_halt();
+            j->result=FJ_RES_OK; j->busy=false; return;
+        }
         {
             uint8_t enc1[32], enc2[32];
             for (int i = 0; i < 32; i++) {
@@ -677,11 +760,19 @@ void fj_state_job_start(fj_state_job_t *j, fj_job_kind_t kind,
 
 /* Retain only the non-secret completion status needed by the console/caller. */
 static void state_job_scrub(fj_state_job_t *j) {
+    if (j->combined_restore) fj_combined_device_restore_cancel();
     fj_job_kind_t kind = j->kind;
     fj_job_result_t result = j->result;
     fj_secure_zero(j, sizeof(*j));
     j->kind = kind;
     j->result = result;
+}
+
+void fj_state_job_cancel(fj_state_job_t *j) {
+    if (!j) return;
+    j->result=FJ_RES_ERR;
+    j->busy=false;
+    state_job_scrub(j);
 }
 
 bool fj_state_job_step(fj_state_job_t *j) {
@@ -690,6 +781,10 @@ bool fj_state_job_step(fj_state_job_t *j) {
         return false;
     }
     if (j->lock_epoch != lock_epoch ||
+        (j->kind == FJ_JOB_RESTORE && (j->combined_restore ? !fj_hmac_runtime_enabled() :
+                                      !fj_hmac_store_legacy_backup_safe())) ||
+        (j->kind == FJ_JOB_BACKUP &&
+         (j->combined_backup ? !fj_hmac_runtime_enabled() : !fj_hmac_store_legacy_backup_safe())) ||
         ((j->kind == FJ_JOB_SETPASS || j->kind == FJ_JOB_SETPUK ||
           j->kind == FJ_JOB_BACKUP) && pass_configured &&
          (state != FJ_STATE_UNLOCKED || !master_available)) ||

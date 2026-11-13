@@ -17,11 +17,15 @@
 
 #include "state.h"
 #include "keys.h"
+#include "restore_boot.h"
 #include "crypto.h"
 #include "msc_disk.h"
 #include "cdc_console.h"
 #include "u2f.h"
 #include "ctap2.h"
+#include "hmac_runtime.h"
+#include "hmac_store.h"
+#include "boot_button.h"
 #include "rgb_led.h"
 
 /* ------------------------------------------------------------------ */
@@ -33,13 +37,21 @@ int main(void) {
 
     /* Fail closed before accessing keys or exposing USB services. */
     if (!fj_crypto_ok()) panic("SHA-256 self-test failed");
+    if (!fj_restore_boot_recover()) panic("Restore recovery required");
 
     /* Initialise the security-key subsystems. */
     fj_keys_init();
+    if (!fj_keys_ready()) panic("Key store unavailable");
     fj_state_init();
+    /* No physical OTP provider is enabled yet. An OTP-protected or damaged
+     * store must never silently fall back to the development root. */
+    if (!fj_hmac_runtime_init(NULL, fj_boot_button_pressed(),
+                              to_ms_since_boot(get_absolute_time())))
+        panic("HMAC store or configuration unavailable");
     fj_msc_init();
     fj_u2f_init();
     fj_ctap2_init();
+    fj_ctap2_set_external_id_lookup(fj_hmac_store_id_exists, NULL);
     fj_console_init();
     fj_led_init();
 
@@ -50,6 +62,7 @@ int main(void) {
     /* Seed the U2F counter from the hardware RNG. */
     (void)get_rand_64();
 
+    uint32_t last_hmac_button_sample = to_ms_since_boot(get_absolute_time());
     while (1) {
         tud_task();
         fj_led_task();
@@ -58,6 +71,13 @@ int main(void) {
         fj_u2f_task();
         fj_ctap2_task();
         fj_msc_task();
+        const fj_hmac_policy_t *policy = fj_hmac_runtime_policy();
+        uint32_t now = to_ms_since_boot(get_absolute_time());
+        if (policy && policy->mode == FJ_HMAC_ARMED && !policy->armed &&
+            now - last_hmac_button_sample >= 10u) {
+            last_hmac_button_sample = now;
+            fj_hmac_runtime_poll(fj_boot_button_pressed(), now);
+        }
     }
 }
 

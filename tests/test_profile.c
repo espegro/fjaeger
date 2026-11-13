@@ -15,6 +15,7 @@
 #include "cbor.h"
 #include "crypto.h"
 #include "ctap2.h"
+bool fj_hmac_runtime_enabled(void) { return false; }
 #include "keys.h"
 #include "state.h"
 

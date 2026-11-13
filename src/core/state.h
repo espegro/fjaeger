@@ -28,6 +28,8 @@ void fj_state_init(void);
 
 /* Current lock state. */
 fj_state_t fj_state_get(void);
+/* Changes when a lock or factory reset invalidates an in-flight session. */
+uint32_t fj_state_session_epoch(void);
 
 /* Whether the unlock passphrase has been provisioned. */
 bool fj_state_pin_configured(void);

@@ -26,6 +26,7 @@
 #include "ctap2.h"
 #include "keys.h"
 #include "state.h"
+#include "combined_device_restore.h"
 #include "pico/time.h"
 
 /* --- simulated persistent store ------------------------------------- */
@@ -205,6 +206,24 @@ void fj_keys_wipe(void) {
     memset(stored_puk, 0, sizeof(stored_puk));
     memset(stored_puk_salt, 0, sizeof(stored_puk_salt));
 }
+void fj_keys_forget_ram(void) { fj_keys_wipe(); }
+void fj_keys_init(void) {}
+bool fj_keys_ready(void) { return true; }
+void fj_hmac_store_forget_ram(void) {}
+void fj_hmac_runtime_forget(void) {}
+bool fj_hmac_store_legacy_backup_safe(void) { return true; }
+bool fj_hmac_runtime_enabled(void) { return false; }
+bool fj_hmac_runtime_init(const uint8_t *o,bool p,uint32_t n) { (void)o; (void)p; (void)n; return true; }
+bool fj_combined_device_restore_prepare(const uint8_t *b,size_t n,const uint8_t k[32],fj_backup_payload_t *p) { (void)b; (void)n; (void)k; (void)p; return false; }
+bool fj_combined_device_restore_commit(const fj_backup_payload_t *p,const fj_restore_wraps_t *w,const uint8_t s[16],const uint8_t n[12],const uint8_t t[16]) { (void)p; (void)w; (void)s; (void)n; (void)t; return false; }
+void fj_combined_device_restore_cancel(void) {}
+bool fj_combined_device_backup(const fj_backup_payload_t *k,const uint8_t a[32],const uint8_t b[16],const uint8_t c[12],uint8_t *o,size_t n) {
+    (void)k; (void)a; (void)b; (void)c; (void)o; (void)n; return false;
+}
+bool fj_hmac_store_init(void) { return true; }
+void fj_hmac_config_forget_ram(void) {}
+bool fj_factory_wipe_start(void) { return true; }
+_Noreturn void fj_factory_wipe_halt(void) { for (;;) {} }
 bool fj_keys_get_timeout(uint32_t *s) { *s = 900; return true; }
 bool fj_keys_set_timeout(uint32_t s) { (void)s; return true; }
 
@@ -272,7 +291,7 @@ bool fj_aes_gcm_decrypt(const uint8_t key[32], const uint8_t nonce[12],
 }
 
 /* Backup/restore stubs (state.c references them; unused here). */
-static uint8_t msc_backup_buf[4096];
+static uint8_t msc_backup_buf[32768];
 static size_t msc_backup_len;
 bool fj_msc_backup_write(const uint8_t *data, size_t len) {
     if (!data || len > sizeof(msc_backup_buf)) return false;

@@ -707,7 +707,7 @@ func (m model) updateList(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 					}
 				case 'n', 'N':
 					m.startListInput("Create profile",
-						[]fieldDef{{"Profile id (0-7)", false}, {"Name", false}},
+						[]fieldDef{{"Profile id (0-15)", false}, {"Name", false}},
 						func(v []string) string { return "PROFILE CREATE " + v[0] + " " + v[1] })
 				case 'x', 'X', 'd', 'D':
 					if id, ok := m.selectedProfileID(); ok {

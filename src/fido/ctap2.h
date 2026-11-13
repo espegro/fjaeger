@@ -52,6 +52,13 @@ void fj_ctap2_invalidate_discovery(void);
  * the status LED to distinguish a blank device from a provisioned one. */
 bool fj_ctap2_has_credentials(void);
 
+/* Search ordinary credentials across all profiles for ID collision checks. */
+bool fj_ctap2_normal_id_exists(void *ctx,const uint8_t id[16]);
+/* An additional credential store can register an all-profile ID lookup.
+ * Its owner must keep the callback valid and fail closed if its store cannot
+ * be read. Passing NULL removes it. */
+void fj_ctap2_set_external_id_lookup(bool (*lookup)(void *,const uint8_t id[16]),void *ctx);
+
 /* Process one complete CTAP2 message. 'msg' is the CBOR-message payload
  * as received on the U2FHID CBOR channel (first byte is the CTAP2 command
  * byte). Writes the CBOR response into 'out' (up to out_cap bytes) and

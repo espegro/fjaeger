@@ -251,4 +251,7 @@ SECTIONS
     __flash_disk_start = 0x10100000;
     ASSERT(__flash_binary_end <= __flash_disk_start,
            "fjaeger firmware overlaps encrypted MSC partition")
+    /* Match the reserved region sizes in src/core/flash_layout.h. */
+    ASSERT(__flash_disk_start + 0x00c00000 <= ORIGIN(FLASH) + LENGTH(FLASH) - 0x21000,
+           "encrypted MSC partition overlaps reserved stores")
 }

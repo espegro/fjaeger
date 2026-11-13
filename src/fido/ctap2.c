@@ -9,6 +9,7 @@
 #include "ed25519.h"
 #include "keys.h"
 #include "pin.h"
+#include "hmac_runtime.h"
 #include "state.h"
 #include "rgb_led.h"
 
@@ -25,19 +26,19 @@
 /* CTAP2 error codes (CTAP2_ERR_*) */
 #define ERR_INVALID_COMMAND   0x01
 #define ERR_INVALID_PARAMETER 0x02
-#define ERR_MISSING_PARAMETER 0x04
-#define ERR_INVALID_LENGTH    0x05
-#define ERR_UNSUPPORTED_ALG   0x0b
-#define ERR_CREDENTIAL_EXCLUDED 0x0d
-#define ERR_OPERATION_DENIED  0x11
-#define ERR_NOT_ALLOWED       0x20
-#define ERR_PIN_REQUIRED      0x23
+#define ERR_MISSING_PARAMETER 0x14
+#define ERR_INVALID_LENGTH    0x03
+#define ERR_UNSUPPORTED_ALG   0x26
+#define ERR_CREDENTIAL_EXCLUDED 0x19
+#define ERR_OPERATION_DENIED  0x27
+#define ERR_NOT_ALLOWED       0x30
+#define ERR_PIN_REQUIRED      0x36
 #define ERR_UNSUPPORTED_OPTION 0x2b
 #define ERR_NO_CREDENTIALS    0x2e
-#define ERR_PUAT_REQUIRED     0x2f
-#define ERR_PIN_AUTH_INVALID  0x31
-#define ERR_PIN_INVALID       0x32
-#define ERR_PIN_BLOCKED       0x34
+#define ERR_PUAT_REQUIRED     0x36
+#define ERR_PIN_AUTH_INVALID  0x33
+#define ERR_PIN_INVALID       0x31
+#define ERR_PIN_BLOCKED       0x32
 
 /* CTAP2 request / response map keys */
 #define K_CLIENT_DATA_HASH 0x01
@@ -75,6 +76,12 @@ typedef enum {
 #define FJ_AUTH_DATA_MAX 200
 
 static fj_ctap2_cred_t creds[FJ_CTAP2_CREDS];
+static bool (*external_id_lookup)(void *,const uint8_t id[16]);
+static void *external_id_context;
+
+void fj_ctap2_set_external_id_lookup(bool (*lookup)(void *,const uint8_t id[16]),void *ctx) {
+    external_id_lookup=lookup; external_id_context=lookup ? ctx : NULL;
+}
 
 static uint32_t sign_counter = 0;
 static bool ctap2_dirty = false;
@@ -325,6 +332,10 @@ static fj_ctap2_cred_t *find_cred_by_id_any(const uint8_t *id) {
     }
     return NULL;
 }
+bool fj_ctap2_normal_id_exists(void *ctx,const uint8_t id[16]) {
+    (void)ctx;
+    return id && find_cred_by_id_any(id)!=NULL;
+}
 
 /* Return the nth resident credential in the active profile that matches
  * rp_id_hash. Used to discover resident (discoverable) credentials without
@@ -456,8 +467,9 @@ static size_t build_get_info(uint8_t *out, size_t cap) {
      * to create resident keys without it (the policy is accepted and stored
      * but not fully enforced on-device; there is no UV authenticator). */
     fj_cbor_uint(&w, 0x02);
-    fj_cbor_array(&w, 1);
+    fj_cbor_array(&w, fj_hmac_runtime_enabled() ? 2 : 1);
     fj_cbor_tstr(&w, "credProtect");
+    if (fj_hmac_runtime_enabled()) fj_cbor_tstr(&w, "hmac-secret");
 
     /* aaguid */
     fj_cbor_uint(&w, 0x03);
@@ -630,7 +642,8 @@ static size_t make_credential(const uint8_t *req, size_t len,
                             size_t n2 = 0;
                             if (fj_cbor_read_bytes(&r, &ev, xid, FJ_CRED_ID_LEN, &n2) &&
                                 n2 == FJ_CRED_ID_LEN &&
-                                find_cred_by_id_any(xid) != NULL)
+                                (find_cred_by_id_any(xid) != NULL ||
+                                 (external_id_lookup && external_id_lookup(external_id_context,xid))))
                                 excluded = true;
                         } else {
                             if (!fj_cbor_skip(&r, &ev)) goto bad_param;
@@ -691,7 +704,14 @@ static size_t make_credential(const uint8_t *req, size_t len,
 
     memset(cr, 0, sizeof(*cr));
     cr->profile_id = (uint8_t)fj_keys_active_profile();
-    fj_random(cr->credential_id, FJ_CRED_ID_LEN);
+    bool unique=false;
+    for (unsigned attempt=0;attempt<8;attempt++) {
+        fj_random(cr->credential_id, FJ_CRED_ID_LEN);
+        if (!external_id_lookup ||
+            (!find_cred_by_id_any(cr->credential_id) &&
+             !external_id_lookup(external_id_context,cr->credential_id))) { unique=true; break; }
+    }
+    if (!unique) return ctap_error(out,cap,ERR_NOT_ALLOWED);
 
     /* Generate the private scalar in the RAM workspace, derive and persist
      * the public key, then encrypt the scalar at rest with the CWK so only

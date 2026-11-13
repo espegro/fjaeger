@@ -13,7 +13,7 @@ controlled over a serial command interface.
 - **Resident (discoverable) keys** — full end-to-end support verified with
   OpenSSH: `ssh-keygen -t ecdsa-sk -O resident`, `ssh-keygen -K` (download),
   signing and verification.
-- **Profiles** — up to 8 named profiles. A profile is an access filter over
+- **Profiles** — up to 16 named profiles. A profile is an access filter over
   CTAP2 credentials: only credentials in the selected profile can be discovered
   or used, and new credentials are bound to the selected profile automatically.
   Choose a profile over serial with `PROFILE SELECT <id>`.
@@ -225,20 +225,19 @@ You lose your keys only when one of these happens:
 
 - **`scripts/reflash_wipe.sh`** — erases the whole 16 MB flash (firmware +
   drive + store) before flashing.
-- **A `STORE_VERSION` bump in the firmware source** — during development the
-  on-flash format version is bumped without migration, so existing data is
-  treated as incompatible and discarded on the next boot.
+- **An incompatible future store format** without a migration path.
 - **A console factory wipe** — five wrong PUK attempts erase all profiles,
   credentials and the disk key.
 
-> For a production device you would bump `STORE_VERSION` only with a real
-> migration path. During development, assume a firmware flash preserves keys but
-> a version bump may discard them.
+The v17 store migrates a valid v16 store on startup. It validates the new copy
+before erasing the old sectors. Do not downgrade to v16 after migration: older
+firmware does not understand the new store. Backup v3 supports the expanded
+capacity; existing v2 backups remain readable.
 
-**Flash layout:** firmware ~128 KB from `0x10000000`, a 12 MiB drive partition
-from `0x10100000`, and the store (PIN/profiles/CTAP2/disk key) in the last
-8 KiB. A normal firmware flash touches neither the drive nor the store; only a
-full erase removes them.
+**Flash layout:** firmware starts at `0x10000000`, the 12 MiB drive partition
+at `0x10100000`, and the store uses two 32 KiB slots at
+`0x10FEE000–0x10FFE000`. The last 8 KiB holds the legacy v16 store until
+migration. A normal firmware flash touches neither the drive nor the store.
 
 ## Serial commands
 
@@ -267,6 +266,9 @@ Connect to the console (e.g. `screen /dev/ttyACM0 115200`):
 | `CREDS DEL <hex-id> yes` | Delete one credential from the active profile |
 | `TIMEOUT <seconds>` | Set auto-relock delay (default 900 seconds; 0 = off) |
 | `PRESENCE <auto\|button>` | Select automatic presence or BOOT-button confirmation (device must be unlocked) |
+| `HMAC <init\|pin-button\|pin\|auto\|armed>` | Configure experimental development hmac storage and policy |
+| `HMAC LIST` | List separate hmac credential IDs and relying-party hashes |
+| `HMAC DELETE <hex-id>` | Delete one hmac credential after a fresh BOOT confirmation |
 | `BACKUP <password>` | Write an encrypted backup (M + keys + profiles) to `FJAEGER.BAK` |
 | `RESTORE <pw> <pin> <puk>` | Restore a backup, setting a new PIN and PUK in one step |
 | `RESET` | Reboot the device |
@@ -282,6 +284,21 @@ Connect to the console (e.g. `screen /dev/ttyACM0 115200`):
 > is **deleted automatically when the drive locks**. On a fresh device, put
 > `FJAEGER.BAK` back on the drive, unlock it, then `RESTORE <password> <new-pin>
 > <new-puk>` to recover all keys and set new secrets in one step.
+
+> **Experimental hmac storage:** `HMAC init` requires an unlocked device, a
+> configured FIDO PIN and a fresh BOOT press and release. Its development root
+> is stored without hardware protection. Policy changes require the same
+> confirmation. FIDO `hmac-secret` is experimental. PIN policy currently also requires BOOT; auto and
+> armed deliberately permit unattended assertions with UP=0. Once initialized,
+> backups include the separate store; restoring such a backup currently
+> requires a target already initialized in the same development mode and
+> leaves the device locked. Backup/restore and disposable LUKS key checks were
+> tested on one development device; boot and initramfs remain untested.
+
+Each LUKS2 FIDO token records its credential ID and salt in the LUKS header.
+Before deleting a credential, compare its hexadecimal ID from `HMAC LIST` with
+the decoded `fido2-credential` value in `cryptsetup luksDump --dump-json-metadata`.
+Deletion does not remove LUKS keyslots or copies of the credential in backups.
 
 Auto-lock defaults to 15 minutes. The `TIMEOUT` value is stored in the flash
 store and survives both reboot and a normal firmware flash. `TIMEOUT 0` is
@@ -319,7 +336,7 @@ operations are allowed.
   but it only works when the correct profile is selected.
 - A profile is **not** a shared key — each credential has its own random
   P-256 key.
-- CTAP2 credentials are stored in flash (up to 12) in a CRC-checked A/B format,
+- CTAP2 credentials are stored in flash (up to 64) in a CRC-checked A/B format,
   written defer-ably from the main loop. Attestation is `none`. Deleting a
   profile makes its credentials unusable; a factory wipe (5 wrong PUKs) deletes
   all profiles and credentials.
@@ -494,7 +511,7 @@ limitations.
   - **ECDSA P-256 / ES256** and **Ed25519 / EdDSA** credentials are supported.
   - The device must be unlocked (passphrase) for `makeCredential`/`getAssertion` to be
     accepted.
-  - Credentials are flash-persistent (up to 12) in a CRC-checked A/B format,
+  - Credentials are flash-persistent (up to 64) in a CRC-checked A/B format,
     written defer-ably from the main loop.
   - The CTAP2 client PIN is **independent** of the unlock passphrase. During
     `ssh-keygen -K`, OpenSSH still requires non-empty input when no CTAP2 PIN

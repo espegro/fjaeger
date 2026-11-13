@@ -11,7 +11,7 @@
 extern "C" {
 #endif
 
-#define FJ_MSC_BACKUP_MAX 4096u
+#define FJ_MSC_BACKUP_MAX 32768u
 
 /* Prepare the encrypted backing store. Call once at startup. */
 void fj_msc_init(void);

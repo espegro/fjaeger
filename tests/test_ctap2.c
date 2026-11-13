@@ -7,6 +7,8 @@
 #include "cbor.h"
 #include "crypto.h"
 #include "ctap2.h"
+static bool hmac_enabled;
+bool fj_hmac_runtime_enabled(void) { return hmac_enabled; }
 #include "keys.h"
 #include "state.h"
 
@@ -14,6 +16,10 @@ static fj_ctap2_cred_t persisted[FJ_CTAP2_CREDS];
 static uint8_t random_byte = 1;
 static bool ctap2_pin_configured = true;
 static unsigned ed25519_sign_count = 0;
+static bool reject_all_external;
+static bool external_lookup(void *ctx,const uint8_t id[16]) {
+    (void)ctx; return reject_all_external || id[0]==0x99;
+}
 
 fj_state_t fj_state_get(void) { return FJ_STATE_UNLOCKED; }
 bool fj_state_ctap2_pin_configured(void) { return ctap2_pin_configured; }
@@ -470,15 +476,44 @@ int main(void) {
     len = fj_ctap2_dispatch(request, 1, response, sizeof(response));
     assert_response_map(response, len, 6);
     assert_get_info_client_pin(response, len, false);
+    bool advertised=false;
+    for (size_t i=0;i+11<=len;i++) if (!memcmp(response+i,"hmac-secret",11)) advertised=true;
+    assert(!advertised);
+    hmac_enabled=true;
+    len=fj_ctap2_dispatch(request,1,response,sizeof(response));
+    advertised=false;
+    for (size_t i=0;i+11<=len;i++) if (!memcmp(response+i,"hmac-secret",11)) advertised=true;
+    assert(advertised);
+    hmac_enabled=false;
     ctap2_pin_configured = true;
     len = fj_ctap2_dispatch(request, 1, response, sizeof(response));
     assert_get_info_client_pin(response, len, true);
 
     size_t request_len = make_request(request, sizeof(request));
+    fj_ctap2_set_external_id_lookup(external_lookup,NULL);
+    reject_all_external=true;
+    len=fj_ctap2_dispatch(request,request_len,response,sizeof(response));
+    assert(len==1 && response[0]==0x30);
+    reject_all_external=false;
+    request_len=make_request(request,sizeof(request)); request[1]=0xa5;
+    fj_cbor_writer exclude;
+    fj_cbor_writer_init(&exclude,request+request_len,sizeof(request)-request_len);
+    uint8_t external_id[16]={0x99};
+    fj_cbor_uint(&exclude,5); fj_cbor_array(&exclude,1); fj_cbor_map(&exclude,2);
+    fj_cbor_tstr(&exclude,"id"); fj_cbor_bstr(&exclude,external_id,16);
+    fj_cbor_tstr(&exclude,"type"); fj_cbor_tstr(&exclude,"public-key");
+    assert(fj_cbor_ok(&exclude)); request_len+=exclude.len;
+    len=fj_ctap2_dispatch(request,request_len,response,sizeof(response));
+    assert(len==1 && response[0]==0x19);
+    fj_ctap2_set_external_id_lookup(NULL,NULL);
+    random_byte=1;
+    request_len = make_request(request, sizeof(request));
     len = fj_ctap2_dispatch(request, request_len, response, sizeof(response));
     assert_response_map(response, len, 3);
     fj_ctap2_task();
     assert(persisted[0].in_use);
+    assert(fj_ctap2_normal_id_exists(NULL,persisted[0].credential_id));
+    assert(!fj_ctap2_normal_id_exists(NULL,external_id));
 
     request_len = assertion_request(request, sizeof(request));
     len = fj_ctap2_dispatch(request, request_len, response, sizeof(response));

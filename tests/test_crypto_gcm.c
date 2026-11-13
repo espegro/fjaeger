@@ -35,6 +35,11 @@ int main(void) {
                                        recovered));
     assert(memcmp(recovered, plaintext, sizeof(plaintext)) == 0);
 
+    memcpy(recovered, ciphertext, sizeof(ciphertext));
+    assert(fj_aes_gcm_decrypt_with_aad(key, nonce, tag, aad, sizeof(aad),
+                                       recovered, sizeof(recovered), recovered));
+    assert(memcmp(recovered, plaintext, sizeof(plaintext)) == 0);
+
     tag[0] ^= 1;
     memset(recovered, 0xa5, sizeof(recovered));
     assert(!fj_aes_gcm_decrypt_with_aad(key, nonce, tag, aad, sizeof(aad),

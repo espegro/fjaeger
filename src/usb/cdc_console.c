@@ -42,6 +42,9 @@
 #include "rgb_led.h"
 #include "boot_button.h"
 #include "u2f.h"
+#include "hmac_store.h"
+#include "hmac_runtime.h"
+#include "hmac_presence.h"
 
 #define LINE_MAX 96
 
@@ -54,6 +57,11 @@ static bool last_was_cr = false;
 static bool presence_auto_pending;
 static uint32_t presence_auto_started, presence_release_since;
 static bool presence_release_seen;
+static fj_hmac_presence_t hmac_confirmation;
+static bool hmac_change_pending, hmac_change_init;
+static bool hmac_change_delete;
+static uint8_t hmac_delete_id[16];
+static fj_hmac_mode_t hmac_change_mode;
 
 /* Secret-entry mode: the device echoes input itself (so the terminal's local
  * echo can stay OFF), masking secret characters with '*', and requiring two
@@ -152,7 +160,9 @@ static void job_print_result(void) {
         case FJ_JOB_SETPUK:      m = "OK recovery PUK set"; break;
         case FJ_JOB_UNLOCKPUK:   m = "OK unlocked via PUK"; break;
         case FJ_JOB_BACKUP:      m = "OK backup written to FJAEGER.BAK"; break;
-        case FJ_JOB_RESTORE:     m = "OK restored with new passphrase and PUK"; break;
+        case FJ_JOB_RESTORE:     m = fj_state_get()==FJ_STATE_LOCKED
+                                      ? "OK restored; device locked, unlock with new passphrase"
+                                      : "OK restored with new passphrase and PUK"; break;
         case FJ_JOB_DISK_SETPIN: m = "OK disk pin set"; break;
         case FJ_JOB_DISK_UNLOCK: m = "OK disk unlocked"; break;
         case FJ_JOB_DISK_UNBLOCK: m = "OK disk PIN unblocked; use DISK UNLOCK <pin>"; break;
@@ -273,6 +283,10 @@ static void cmd_help(void) {
     outln("  PUK <code>                 set or change the recovery PUK");
     outln("  TIMEOUT <sec>              auto-lock delay in seconds (default 900; 0 = off)");
     outln("  PRESENCE <auto|button>     require BOOT for FIDO operations");
+    outln("  HMAC <init|pin-button|pin|auto|armed>  configure development hmac storage");
+    outln("                             experimental; PIN mode currently requires BOOT");
+    outln("  HMAC LIST                  list separate hmac credential IDs and RP hashes");
+    outln("  HMAC DELETE <hex-id>       delete one hmac credential after BOOT confirmation");
     outln("");
     outln("  DISK STATUS                show drive lock state");
     outln("  DISK SETPIN <pin>          set or change the drive's disk PIN");
@@ -283,7 +297,7 @@ static void cmd_help(void) {
     outln("  DISK FORMAT YES             erase ALL drive data and rebuild the filesystem");
     outln("");
     outln("  PROFILE LIST               list profiles, the active one and credential counts");
-    outln("  PROFILE CREATE <id> <name> create a new empty profile (id 0-7)");
+    outln("  PROFILE CREATE <id> <name> create a new empty profile (id 0-15)");
     outln("  PROFILE SELECT <id>        select and persist the active profile");
     outln("  PROFILE RENAME <id> <name> rename a profile without touching its credentials");
     outln("  PROFILE ERASE <id>         delete a profile and every credential in it");
@@ -606,7 +620,7 @@ static void run_secret(sec_action_t a, const char *s) {
 
 static void cmd_profile_list(void) {
     char buf[96];
-    fj_ctap2_cred_t creds[FJ_CTAP2_CREDS];
+    static fj_ctap2_cred_t creds[FJ_CTAP2_CREDS];
     fj_keys_ctap2_load(creds);
     for (unsigned i = 0; i < FJ_NUM_PROFILES; i++) {
         const fj_profile_t *p = fj_keys_profile_get(i);
@@ -759,6 +773,58 @@ static void cmd_presence(const char *arg) {
     outln(fj_keys_presence_button() ? "OK presence = button" : "OK presence = auto");
 }
 
+static int hex_val(char c);
+static void cmd_hmac(const char *arg,char *rest) {
+    if (!require_unlocked()) return;
+    if (!fj_state_ctap2_pin_configured()) { outln("ERR set a FIDO PIN first"); return; }
+    if (!arg) { outln("ERR usage: HMAC <init|pin-button|pin|auto|armed|list|delete>"); return; }
+    if (fj_u2f_presence_pending()) { outln("ERR FIDO request awaiting confirmation"); return; }
+    if (strcasecmp(arg,"list")==0) {
+        fj_hmac_credential_info_t list[FJ_HMAC_STORE_CAPACITY]; size_t count=0;
+        if (!fj_hmac_store_list(list,FJ_HMAC_STORE_CAPACITY,&count)) { outln("ERR hmac store unavailable"); return; }
+        if (!count) { outln("OK no hmac credentials"); return; }
+        static const char hex[]="0123456789abcdef";
+        for (size_t i=0;i<count;i++) {
+            char text[104]; memcpy(text,"id=",3);
+            for (size_t j=0;j<16;j++) { text[3+j*2]=hex[list[i].credential_id[j]>>4]; text[4+j*2]=hex[list[i].credential_id[j]&15]; }
+            memcpy(text+35," rp=",4);
+            for (size_t j=0;j<32;j++) { text[39+j*2]=hex[list[i].rp_id_hash[j]>>4]; text[40+j*2]=hex[list[i].rp_id_hash[j]&15]; }
+            text[103]='\0'; outln(text);
+        }
+        return;
+    }
+    bool deleting=strcasecmp(arg,"delete")==0;
+    if (deleting) {
+        char *id=next_token(&rest);
+        if (!id || strlen(id)!=32 || next_token(&rest)) { outln("ERR usage: HMAC DELETE <32-hex-id>"); return; }
+        for (size_t i=0;i<16;i++) {
+            int hi=hex_val(id[2*i]),lo=hex_val(id[2*i+1]);
+            if (hi<0 || lo<0) { outln("ERR invalid hmac credential ID"); return; }
+            hmac_delete_id[i]=(uint8_t)((hi<<4)|lo);
+        }
+        fj_hmac_credential_t found;
+        if (!fj_hmac_store_get(hmac_delete_id,&found)) { outln("ERR hmac credential not found"); return; }
+        fj_secure_zero(&found,sizeof(found));
+    }
+    bool init=strcasecmp(arg,"init")==0;
+    fj_hmac_mode_t mode;
+    if (deleting || init || strcasecmp(arg,"pin-button")==0) mode=FJ_HMAC_PIN_BUTTON;
+    else if (strcasecmp(arg,"pin")==0) mode=FJ_HMAC_PIN;
+    else if (strcasecmp(arg,"auto")==0) mode=FJ_HMAC_AUTO;
+    else if (strcasecmp(arg,"armed")==0) mode=FJ_HMAC_ARMED;
+    else { outln("ERR usage: HMAC <init|pin-button|pin|auto|armed|list|delete>"); return; }
+    if (init == fj_hmac_runtime_enabled()) {
+        outln(init ? "ERR hmac-secret already configured" : "ERR run HMAC init first"); return;
+    }
+    uint32_t now=to_ms_since_boot(get_absolute_time());
+    if (!fj_hmac_presence_begin(&hmac_confirmation,fj_boot_button_pressed(),now,30000u)) {
+        outln("ERR cannot start confirmation"); return;
+    }
+    hmac_change_pending=true; hmac_change_init=init; hmac_change_delete=deleting; hmac_change_mode=mode;
+    outln(deleting ? "Press and release BOOT to delete this hmac credential" :
+                     "Press and release BOOT to confirm; development root is unprotected");
+}
+
 static void cmd_reset(const char *arg) {
     /* RESET BOOTSEL reboots into the ROM USB bootloader for re-flashing. */
     if (arg && strcasecmp(arg, "bootsel") == 0) {
@@ -855,7 +921,7 @@ static void cmd_creds(const char *sub, char *rest) {
     if (!sub) { outln("ERR CREDS requires subcommand (LIST|DEL)"); return; }
 
     if (strcasecmp(sub, "list") == 0) {
-        fj_ctap2_cred_t creds[FJ_CTAP2_CREDS];
+        static fj_ctap2_cred_t creds[FJ_CTAP2_CREDS];
         fj_keys_ctap2_load(creds);
         unsigned active = fj_keys_active_profile();
         unsigned n = 0;
@@ -975,10 +1041,16 @@ static void dispatch(char *cmdline) {
         cmd_timeout(next_token(&p));
     } else if (strcasecmp(tok, "presence") == 0) {
         cmd_presence(next_token(&p));
+    } else if (strcasecmp(tok, "hmac") == 0) {
+        char *sub=next_token(&p);
+        cmd_hmac(sub,p);
     } else if (strcasecmp(tok, "backup") == 0) {
         cmd_backup(next_token(&p));
     } else if (strcasecmp(tok, "restore") == 0) {
-        cmd_restore(next_token(&p), next_token(&p), next_token(&p));
+        char *password=next_token(&p);
+        char *passphrase=next_token(&p);
+        char *puk=next_token(&p);
+        cmd_restore(password,passphrase,puk);
     } else if (strcasecmp(tok, "reset") == 0) {
         cmd_reset(next_token(&p));
     } else {
@@ -999,6 +1071,30 @@ void fj_console_init(void) {
 }
 
 void fj_console_task(void) {
+    if (hmac_change_pending) {
+        uint32_t now=to_ms_since_boot(get_absolute_time());
+        if (!tud_cdc_connected() || fj_state_get()!=FJ_STATE_UNLOCKED ||
+            !fj_state_ctap2_pin_configured() || fj_u2f_presence_pending() ||
+            now-hmac_confirmation.started_ms>=hmac_confirmation.timeout_ms) {
+            fj_hmac_presence_cancel(&hmac_confirmation); hmac_change_pending=false;
+            fj_secure_zero(hmac_delete_id,sizeof(hmac_delete_id));
+            outln("ERR hmac configuration cancelled");
+            if (tud_cdc_connected()) out(PROMPT);
+            return;
+        }
+        fj_hmac_presence_poll(&hmac_confirmation,fj_boot_button_pressed(),now);
+        if (fj_hmac_presence_ready(&hmac_confirmation,now) && fj_hmac_presence_take(&hmac_confirmation,now)) {
+            hmac_change_pending=false;
+            bool ok=hmac_change_delete ? fj_hmac_store_remove(hmac_delete_id) :
+                    hmac_change_init ? fj_hmac_runtime_provision_development(true,false,now) :
+                    fj_hmac_runtime_set_policy(hmac_change_mode,true,false,now);
+            fj_secure_zero(hmac_delete_id,sizeof(hmac_delete_id));
+            outln(ok ? (hmac_change_delete ? "OK hmac credential deleted" : "OK hmac policy saved (experimental development mode)") :
+                       "ERR hmac operation failed");
+            out(PROMPT);
+        }
+        return;
+    }
     if (presence_auto_pending) {
         uint32_t now = to_ms_since_boot(get_absolute_time());
         if (!tud_cdc_connected() || fj_state_get() != FJ_STATE_UNLOCKED ||
@@ -1028,6 +1124,10 @@ void fj_console_task(void) {
             was_connected = true;
         }
     } else {
+        if (job_active && !job_is_disk) {
+            fj_state_job_cancel(&state_job);
+            job_active=false;
+        }
         was_connected = false;
         return;
     }

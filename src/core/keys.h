@@ -22,7 +22,7 @@
 extern "C" {
 #endif
 
-#define FJ_NUM_PROFILES   8
+#define FJ_NUM_PROFILES   16
 #define FJ_PROFILE_NAME_MAX 32
 #define FJ_ECDSA_KEY_BYTES 32   /* private scalar for P-256 */
 #define FJ_AES_KEY_BYTES   32   /* two AES-128 keys for XTS */
@@ -43,7 +43,7 @@ extern "C" {
 #define FJ_MAX_PUK_FAILS  5
 
 /* CTAP2 credential store size. */
-#define FJ_CTAP2_CREDS     12
+#define FJ_CTAP2_CREDS     64
 #define FJ_CRED_ID_LEN     16
 #define FJ_USER_ID_LEN     32
 #define FJ_RP_MAX          64
@@ -91,6 +91,8 @@ typedef struct {
  * selects it, then persists. The selected profile is loaded from flash; if
  * it no longer exists it falls back to profile 0. */
 void fj_keys_init(void);
+/* False if the persistent store is corrupt, unsupported, or could not migrate. */
+bool fj_keys_ready(void);
 
 /* Number of profiles that exist. */
 unsigned fj_keys_profile_count(void);
@@ -201,6 +203,8 @@ bool fj_keys_set_presence_button(bool enabled);
  * a fresh "Default" profile. The (encrypted) disk data becomes
  * unrecoverable because its wrapping key is destroyed. */
 void fj_keys_wipe(void);
+/* Forget cached records and pending transactions without changing flash. */
+void fj_keys_forget_ram(void);
 
 /* Load all persisted CTAP2 credentials into 'out' (FJ_CTAP2_CREDS
  * entries). Returns true on success. */
@@ -219,6 +223,15 @@ typedef struct {
     uint8_t active_profile;
     uint8_t active_profile_valid;
 } fj_backup_payload_t;
+
+/* Legacy backup v2 layout; used only for authenticated restore. */
+typedef struct {
+    uint8_t master[FJ_AES_KEY_BYTES];
+    fj_ctap2_cred_t ctap2[12];
+    fj_profile_t profiles[8];
+    uint8_t active_profile;
+    uint8_t active_profile_valid;
+} fj_backup_payload_v2_t;
 
 /* Fill the credential/profile/active-profile fields of 'out' from the
  * persistent store. 'master' is filled by the caller (state.c) from the

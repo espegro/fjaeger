@@ -31,17 +31,21 @@
 
 /* CTAP2 error codes reused here. */
 #define ERR_INVALID_PARAMETER 0x02
-#define ERR_MISSING_PARAMETER 0x04
+#define ERR_MISSING_PARAMETER 0x14
 #define ERR_INVALID_COMMAND   0x01
-#define ERR_PIN_INVALID       0x32
-#define ERR_PIN_BLOCKED       0x34
+#define ERR_PIN_INVALID       0x31
+#define ERR_PIN_BLOCKED       0x32
 
 /* Shared PIN/UV auth protocol 1 state. */
 static uint8_t auth_priv[32];                 /* ephemeral key-agreement key */
 static uint8_t pin_token[FJ_PIN_TOKEN_LEN];   /* the pinUvAuthToken */
 static bool    token_valid = false;
+/* A boot token or a token issued in legacy dummy-PIN mode is never proof
+ * that a configured PIN was entered. */
+static bool    token_pin_verified = false;
 
 void fj_pin_init(void) {
+    token_pin_verified = false;
     if (!fj_ecdsa_generate_private(auth_priv))
         fj_secure_zero(auth_priv, sizeof(auth_priv));
     fj_random(pin_token, sizeof(pin_token));
@@ -51,6 +55,7 @@ void fj_pin_init(void) {
 void fj_pin_reset_token(void) {
     fj_secure_zero(pin_token, sizeof(pin_token));
     token_valid = false;
+    token_pin_verified = false;
 }
 
 static size_t ctap_err(uint8_t *out, size_t cap, uint8_t code) {
@@ -85,6 +90,13 @@ static bool compute_shared_secret(const uint8_t platform_pub[65],
     }
     fj_sha256(z, sizeof(z), secret);
     fj_secure_zero(z, sizeof(z));
+    return true;
+}
+bool fj_pin_shared_secret(const uint8_t platform_public[65],uint8_t shared[32]) {
+    if (!shared) return false;
+    if (!platform_public || !compute_shared_secret(platform_public,shared)) {
+        fj_secure_zero(shared,32); return false;
+    }
     return true;
 }
 
@@ -149,6 +161,8 @@ static unsigned pin_retries(void) {
 /* Handle the getPinToken (0x05) subcommand. */
 static size_t get_pin_token(const uint8_t *req, size_t len,
                             uint8_t *out, size_t cap) {
+    /* A failed or malformed new attempt cannot preserve old PIN proof. */
+    token_pin_verified = false;
     fj_cbor_reader r;
     fj_cbor_reader_init(&r, req, len);
 
@@ -255,6 +269,7 @@ static size_t get_pin_token(const uint8_t *req, size_t len,
     if (!fj_cbor_ok(&w)) { result = 0; goto cleanup; }
     result = w.len + 1;
     token_valid = true;
+    token_pin_verified = fj_state_ctap2_pin_configured();
 cleanup:
     fj_secure_zero(secret, sizeof(secret));
     fj_secure_zero(left16, sizeof(left16));
@@ -351,4 +366,10 @@ bool fj_pin_verify_auth(const uint8_t *message, size_t message_len,
               fj_ct_equal(mac, param, 16);
     fj_secure_zero(mac, sizeof(mac));
     return ok;
+}
+
+bool fj_pin_verify_user_auth(const uint8_t *message, size_t message_len,
+                             const uint8_t param[16]) {
+    return token_pin_verified && fj_state_ctap2_pin_configured() &&
+           fj_pin_verify_auth(message, message_len, param);
 }

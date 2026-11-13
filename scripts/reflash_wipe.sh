@@ -3,8 +3,8 @@
 # level).
 #
 # This erases the whole 16 MB flash: firmware, the 12 MiB MSC disk partition
-# (0x10100000-0x10D00000) and the 8 KiB store at the end (0x10FFE000-
-# 0x11000000). Disk data, profiles, PIN, PUK and CTAP2 credentials are all
+# (0x10100000-0x10D00000), the 64 KiB A/B store (0x10FEE000-
+# 0x10FFE000) and the legacy 8 KiB store. Disk data, profiles, PIN, PUK and CTAP2 credentials are all
 # destroyed. The firmware is then written fresh; on first boot the device
 # recreates an empty "Default" profile.
 #

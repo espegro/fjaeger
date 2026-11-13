@@ -45,6 +45,15 @@ size_t fj_ctap2_client_pin(const uint8_t *req, size_t len,
 bool fj_pin_verify_auth(const uint8_t *message, size_t message_len,
                         const uint8_t param[16]);
 
+/* Like fj_pin_verify_auth, but requires a token issued after verification of
+ * an actually configured PIN. Initial and dummy-mode tokens are rejected. */
+bool fj_pin_verify_user_auth(const uint8_t *message, size_t message_len,
+                             const uint8_t param[16]);
+
+/* PIN/UV protocol 1 shared secret for the authenticator's current ephemeral
+ * key agreement key. Curve validation is performed by ECDH. */
+bool fj_pin_shared_secret(const uint8_t platform_public[65], uint8_t shared[32]);
+
 #ifdef __cplusplus
 }
 #endif

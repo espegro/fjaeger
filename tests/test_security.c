@@ -3,11 +3,13 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+#include <setjmp.h>
 
 #include "crypto.h"
 #include "job.h"
 #include "keys.h"
 #include "state.h"
+#include "combined_device_restore.h"
 #include "pico/time.h"
 
 static uint8_t stored_pin[32];
@@ -23,6 +25,9 @@ static int64_t now_us;
 static unsigned disk_lock_count;
 static unsigned ctap_forget_count;
 static unsigned wipe_count;
+static bool wipe_should_fail;
+static jmp_buf wipe_halt_jump;
+static unsigned hmac_forget_count;
 static unsigned token_reset_count;
 static uint32_t stored_timeout;
 static bool have_timeout;
@@ -31,7 +36,7 @@ static uint8_t stored_m_salt_pin[16];
 static uint8_t stored_m_enc_puk[32];
 static uint8_t stored_m_salt_puk[16];
 static bool have_master;
-static uint8_t backup_store[4096];
+static uint8_t backup_store[FJ_BLOB_MAX];
 static size_t backup_len;
 static uint32_t backup_writes;
 static uint32_t backup_deletes;
@@ -186,6 +191,34 @@ void fj_keys_wipe(void) {
     have_master = false;
     wipe_count++;
 }
+void fj_keys_forget_ram(void) { fj_keys_wipe(); }
+void fj_keys_init(void) {}
+bool fj_keys_ready(void) { return true; }
+void fj_hmac_store_forget_ram(void) { hmac_forget_count++; }
+void fj_hmac_runtime_forget(void) {}
+static bool legacy_backup_safe = true;
+bool fj_hmac_store_legacy_backup_safe(void) { return legacy_backup_safe; }
+static bool mock_hmac_enabled;
+bool fj_hmac_runtime_enabled(void) { return mock_hmac_enabled; }
+bool fj_hmac_runtime_init(const uint8_t *otp,bool pressed,uint32_t now) { (void)otp; (void)pressed; (void)now; return true; }
+static unsigned combined_restore_commits;
+static unsigned combined_restore_cancels;
+bool fj_combined_device_restore_prepare(const uint8_t *b,size_t n,const uint8_t k[32],fj_backup_payload_t *p) {
+    (void)b; (void)n; (void)k; memset(p,0,sizeof(*p)); return true;
+}
+bool fj_combined_device_restore_commit(const fj_backup_payload_t *p,const fj_restore_wraps_t *w,const uint8_t s[16],const uint8_t n[12],const uint8_t t[16]) {
+    (void)p; (void)w; (void)s; (void)n; (void)t; combined_restore_commits++; return true;
+}
+void fj_combined_device_restore_cancel(void) { combined_restore_cancels++; }
+bool fj_combined_device_backup(const fj_backup_payload_t *k,const uint8_t a[32],const uint8_t b[16],const uint8_t c[12],uint8_t *o,size_t n) {
+    (void)k; (void)a; (void)b; (void)c;
+    if (!mock_hmac_enabled || n<4) return false;
+    memset(o,0,n); memcpy(o,"FJCP",4); o[4]=1; return true;
+}
+bool fj_hmac_store_init(void) { return true; }
+void fj_hmac_config_forget_ram(void) {}
+bool fj_factory_wipe_start(void) { return !wipe_should_fail; }
+_Noreturn void fj_factory_wipe_halt(void) { longjmp(wipe_halt_jump,1); }
 
 bool fj_keys_get_timeout(uint32_t *seconds) {
     if (!have_timeout) return false;
@@ -312,6 +345,8 @@ static void reset_fixture(void) {
     disk_lock_count = 0;
     ctap_forget_count = 0;
     wipe_count = 0;
+    wipe_should_fail = false;
+    hmac_forget_count = 0;
     backup_len = 0;
     backup_writes = 0;
     backup_deletes = 0;
@@ -386,11 +421,50 @@ static void test_wrong_puk_factory_wipes_live_state(void) {
     now_us += 40000000;
     assert(fj_state_verify_puk("wrong-puk") == FJ_PUK_WIPED);
     assert(wipe_count == 1);
+    assert(hmac_forget_count == 1);
     assert(ctap_forget_count == 1);
     assert(!fj_state_pin_configured());
     assert(fj_state_get() == FJ_STATE_LOCKED);
     assert(fj_state_timeout() == FJ_DEFAULT_TIMEOUT_SEC);
     assert(!have_pin && !have_puk);
+}
+
+static void test_wipe_failure_halts_after_forgetting_live_keys(void) {
+    reset_fixture();
+    assert(fj_state_set_passphrase("testpass1"));
+    assert(fj_state_unlock("testpass1"));
+    uint8_t master[32]; assert(fj_state_cwk(master));
+    wipe_should_fail=true;
+    if (setjmp(wipe_halt_jump)==0) {
+        fj_state_factory_reset();
+        assert(!"failed wipe must halt");
+    }
+    assert(fj_state_get()==FJ_STATE_LOCKED);
+    assert(!fj_state_cwk(master));
+    assert(!fj_state_pin_configured());
+    assert(wipe_count==1 && hmac_forget_count==1);
+    wipe_should_fail=false;
+}
+
+static void test_wrong_puk_wipe_failure_halts(void) {
+    reset_fixture();
+    assert(fj_state_set_passphrase("testpass1"));
+    assert(fj_state_unlock("testpass1"));
+    assert(fj_state_set_puk("recovery-code"));
+    fj_state_lock();
+    for (unsigned i=1;i<FJ_MAX_PUK_FAILS;i++) {
+        now_us+=40000000;
+        assert(fj_state_verify_puk("wrong-puk")==FJ_PUK_WRONG);
+    }
+    wipe_should_fail=true;
+    if (setjmp(wipe_halt_jump)==0) {
+        now_us+=40000000;
+        (void)fj_state_verify_puk("wrong-puk");
+        assert(!"PUK-triggered wipe failure must halt");
+    }
+    assert(fj_state_get()==FJ_STATE_LOCKED);
+    assert(!fj_state_pin_configured() && hmac_forget_count==1);
+    wipe_should_fail=false;
 }
 
 static void test_profile_erase_consistent(void) {
@@ -542,6 +616,33 @@ static void test_backup_restore(void) {
     assert(fj_state_backup_write("backup-pass"));
     assert(backup_len > 0);
     assert(backup_writes == 1);
+    static fj_state_job_t pending_backup;
+    fj_state_job_start(&pending_backup, FJ_JOB_BACKUP, "backup-pass", NULL, NULL);
+    assert(pending_backup.busy);
+    legacy_backup_safe = false;
+    assert(!fj_state_job_step(&pending_backup));
+    assert(pending_backup.result != FJ_RES_OK);
+    assert(!fj_state_backup_write("backup-pass"));
+    assert(!fj_state_backup_restore("backup-pass", "restored-pin", "restored-puk"));
+    assert(backup_writes == 1);
+    legacy_backup_safe = true;
+
+    mock_hmac_enabled=true; legacy_backup_safe=false;
+    assert(fj_state_backup_write("backup-pass"));
+    assert(backup_writes==2 && memcmp(backup_store,"FJCP",4)==0);
+    static fj_state_job_t pending_restore;
+    fj_state_job_start(&pending_restore,FJ_JOB_RESTORE,"backup-pass","restored-pin","restored-puk");
+    while (pending_restore.busy && pending_restore.phase==0) fj_state_job_step(&pending_restore);
+    assert(pending_restore.busy && pending_restore.phase==1);
+    unsigned cancelled_before=combined_restore_cancels;
+    fj_state_job_cancel(&pending_restore);
+    assert(!pending_restore.busy && combined_restore_cancels==cancelled_before+1);
+    assert(combined_restore_commits==0);
+    assert(fj_state_backup_restore("backup-pass", "restored-pin", "restored-puk"));
+    assert(combined_restore_commits==1 && fj_state_get()==FJ_STATE_LOCKED);
+    mock_hmac_enabled=false; legacy_backup_safe=true;
+    assert(fj_state_unlock("testpass1"));
+    assert(fj_state_backup_write("backup-pass"));
 
     /* Locking wipes M from RAM. */
     fj_state_lock();
@@ -571,6 +672,37 @@ static void test_backup_restore(void) {
     assert(fj_state_unlock_puk("restored-puk") == FJ_PUK_OK);
     assert(fj_state_cwk(m2));
     assert(memcmp(m_before, m2, 32) == 0);
+}
+
+static void test_restore_v2_backup(void) {
+    reset_fixture();
+    assert(fj_state_set_passphrase("testpass1"));
+    assert(fj_state_unlock("testpass1"));
+    uint8_t original[32], recovered[32], tag[16];
+    assert(fj_state_cwk(original));
+    backup_payload.profiles[1].in_use = true;
+    memcpy(backup_payload.profiles[1].name, "old", 4);
+    backup_payload.active_profile = 1;
+    backup_payload.active_profile_valid = 1;
+    backup_payload.ctap2[11].in_use = true;
+    backup_payload.ctap2[11].credential_id[0] = 0x55;
+    assert(fj_state_backup_write("backup-pass"));
+    memcpy(tag, backup_store + backup_len - sizeof(tag), sizeof(tag));
+    fj_backup_payload_v2_t legacy = {0};
+    memcpy(legacy.master, original, sizeof(original));
+    memcpy(legacy.profiles, backup_payload.profiles, sizeof(legacy.profiles));
+    memcpy(legacy.ctap2, backup_payload.ctap2, sizeof(legacy.ctap2));
+    legacy.active_profile = 1; legacy.active_profile_valid = 1;
+    const size_t header = 4 + 1 + 16 + 12;
+    backup_store[4] = 2;
+    memcpy(backup_store + header, &legacy, sizeof(legacy));
+    memcpy(backup_store + header + sizeof(legacy), tag, sizeof(tag));
+    backup_len = header + sizeof(legacy) + sizeof(tag);
+    fj_state_lock();
+    assert(fj_state_backup_restore("backup-pass", "new-passphrase", "new-recovery"));
+    assert(fj_state_cwk(recovered) && memcmp(original, recovered, sizeof(original)) == 0);
+    assert(backup_payload.active_profile == 1 && backup_payload.ctap2[11].credential_id[0] == 0x55);
+    assert(!backup_payload.ctap2[12].in_use && !backup_payload.profiles[8].in_use);
 }
 
 
@@ -746,11 +878,14 @@ int main(void) {
     test_pin_block_and_puk_recovery();
     test_auto_lock_closes_disk();
     test_wrong_puk_factory_wipes_live_state();
+    test_wipe_failure_halts_after_forgetting_live_keys();
+    test_wrong_puk_wipe_failure_halts();
     test_profile_erase_consistent();
     test_brute_force_delay_backoff();
     test_master_key_at_rest();
     test_puk_sets_new_pin_preserves_keys();
     test_backup_restore();
+    test_restore_v2_backup();
     puts("security host tests: ok");
     return 0;
 }

@@ -51,13 +51,38 @@ add_executable(fjaeger
   src/usb/msc_disk.c
   src/usb/cdc_console.c
   src/core/state.c
+  src/core/restore_journal.c
+  src/core/restore_coordinator.c
+  src/core/restore_boot.c
+  src/core/restore_prepared.c
+  src/core/restore_bundle.c
+  src/core/factory_wipe.c
+  src/core/combined_backup.c
+  src/core/combined_device_backup.c
+  src/core/combined_device_restore.c
+  src/core/combined_password_job.c
   src/core/keys.c
+  src/core/keys_stage.c
   src/core/crypto.c
   src/core/ed25519.c
   src/core/ms_time.c
   src/led/rgb_led.c
   src/fido/u2f.c
   src/fido/boot_button.c
+  src/fido/hmac_secret.c
+  src/fido/hmac_assertion.c
+  src/fido/hmac_enroll.c
+  src/fido/hmac_ctap.c
+  src/fido/hmac_config.c
+  src/fido/hmac_runtime.c
+  src/fido/hmac_credential.c
+  src/fido/hmac_backup.c
+  src/fido/hmac_backup_password.c
+  src/fido/hmac_root.c
+  src/fido/hmac_store.c
+  src/fido/hmac_request.c
+  src/fido/hmac_policy.c
+  src/fido/hmac_presence.c
   src/fido/ctap2.c
   src/fido/cbor.c
   src/fido/pin.c
