@@ -58,11 +58,12 @@ func (m model) viewConnect() string {
 
 func (m model) viewMain() string {
 	var body strings.Builder
-	body.WriteString("Commands\n")
+	body.WriteString(m.viewOverview())
+	body.WriteString("\nCommands\n")
 	body.WriteString(strings.Repeat("─", m.widthAtLeast(40)) + "\n")
 
 	// Keep the selected command visible on terminals shorter than the menu.
-	visible := m.height - 8
+	visible := m.height - 14
 	if visible < 1 {
 		visible = len(menu)
 	}
@@ -100,6 +101,53 @@ func (m model) viewMain() string {
 	}
 	body.WriteString("\n" + tip("↑/↓ move · Enter select · q quit"))
 	return headerBar(m) + "\n\n" + body.String()
+}
+
+func (m model) viewOverview() string {
+	var b strings.Builder
+	b.WriteString(titleStyle.Render("Device status") + "\n")
+	if m.device == nil {
+		b.WriteString("  " + errStyle.Render("disconnected") + "\n")
+		return b.String()
+	}
+	if !m.statusOK {
+		b.WriteString("  " + dimStyle.Render("reading status…") + "\n")
+		return b.String()
+	}
+	s := m.status
+	fmt.Fprintf(&b, "  Device %s · Drive %s\n", colorState(s.State), colorState(s.Disk))
+	fmt.Fprintf(&b, "  Profile %s/%s · timeout %s · presence %s\n",
+		itoaN(s.Profile), itoaN(s.Profiles), timeoutText(s.Timeout), statusOrUnknown(s.Presence))
+	if s.HMAC == "" {
+		b.WriteString("  HMAC    ? (firmware does not report HMAC status)\n")
+	} else {
+		fmt.Fprintf(&b, "  HMAC    %s · %s · root %s · armed %s · %s credential(s)\n",
+			statusOrUnknown(s.HMAC), statusOrUnknown(s.HMACPolicy),
+			statusOrUnknown(s.HMACRoot), statusOrUnknown(s.HMACArmed),
+			statusOrUnknown(s.HMACCreds))
+	}
+	return b.String()
+}
+
+func colorState(s string) string {
+	label := strings.ToUpper(statusOrUnknown(s))
+	if strings.HasPrefix(strings.ToLower(s), "unlocked") {
+		return okStyle.Render(label)
+	}
+	if strings.HasPrefix(strings.ToLower(s), "locked") {
+		return errStyle.Render(label)
+	}
+	return dimStyle.Render(label)
+}
+
+func timeoutText(seconds int) string {
+	if seconds < 0 {
+		return "?"
+	}
+	if seconds == 0 {
+		return "off"
+	}
+	return fmt.Sprintf("%ds", seconds)
 }
 
 func (m model) viewPrompt() string {
@@ -369,6 +417,7 @@ func (m model) viewDisk() string {
 	} else if ds.Disk != "" {
 		b.WriteString("  State:        " + ds.Disk + "\n")
 		b.WriteString("  Disk PIN fails: " + itoaN(ds.DiskFail) + "\n")
+		b.WriteString("  PIN blocked:  " + yesNoUnknown(ds.DiskBlocked, ds.DiskFail) + "\n")
 		if ds.FlushPending {
 			b.WriteString("  (write flush pending — keep powered)\n")
 		}

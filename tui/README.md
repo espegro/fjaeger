@@ -32,6 +32,11 @@ commands can also be used in the raw console. Factory reset requires an unlocked
 device, an explicit TUI confirmation and a fresh BOOT press and release. See
 the [hmac guide](../docs/hmac-luks.md) and [reset guide](../docs/backup-reset.md).
 
+The main screen shows a live overview of device and drive lock state, profile,
+auto-lock and presence settings, and HMAC policy/root/armed state and credential
+count. The detailed live status view groups these with recovery and retry-lock
+information.
+
 Profiles, Credentials and Disk each open a single, dedicated screen (arrow
 up/down navigation where a list is shown):
 

@@ -13,7 +13,9 @@ type Status struct {
 	Disk         string // "unlocked" | "locked"
 	PassBlocked  bool
 	PassFail     int
+	PinBlocked   bool
 	PinFail      int
+	DiskBlocked  bool
 	PUKFail      int
 	DiskFail     int
 	FlushPending bool
@@ -46,7 +48,9 @@ func ParseStatus(reply string) Status {
 	s.Disk = vals["disk"]
 	s.PassBlocked = vals["pass_blocked"] == "yes"
 	s.PassFail = atoi(vals["pass_fail"])
+	s.PinBlocked = vals["ctap_pin_blocked"] == "yes"
 	s.PinFail = atoi(vals["ctap_pin_fail"])
+	s.DiskBlocked = vals["disk_blocked"] == "yes" || strings.Contains(vals["disk"], "PIN blocked")
 	s.PUKFail = atoi(vals["puk_fail"])
 	s.DiskFail = atoi(vals["disk_fail"])
 	s.FlushPending = strings.HasPrefix(vals["disk_flush_pending"], "yes")

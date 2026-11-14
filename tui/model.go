@@ -74,6 +74,14 @@ type act struct {
 var menu = []act{
 	{kStatus, "Status (live)", nil, false, nil},
 	{kind: kSep},
+	{kCmd, "HMAC: list credentials", nil, false, func([]string) string { return "HMAC LIST" }},
+	{kCmd, "HMAC: initialize (BOOT required)", nil, true, func([]string) string { return "HMAC init" }},
+	{kCmd, "HMAC: PIN + BOOT", nil, true, func([]string) string { return "HMAC pin-button" }},
+	{kCmd, "HMAC: PIN only", nil, true, func([]string) string { return "HMAC pin" }},
+	{kCmd, "HMAC: automatic (no PIN)", nil, true, func([]string) string { return "HMAC auto" }},
+	{kCmd, "HMAC: armed (no PIN)", nil, true, func([]string) string { return "HMAC armed" }},
+	{kCmd, "HMAC: delete credential", []fieldDef{{"32-character hex credential ID", false}}, true, func(v []string) string { return "HMAC DELETE " + v[0] }},
+	{kind: kSep},
 	{kCmd, "Lock device", nil, false, func(v []string) string { return "LOCK" }},
 	{kCmd, "Unlock device", []fieldDef{{"Passphrase", true}}, false, func(v []string) string { return "UNLOCK " + v[0] }},
 	{kCmd, "Unlock via PUK", []fieldDef{{"Recovery PUK", true}}, false, func(v []string) string { return "UNLOCKPUK " + v[0] }},
@@ -89,14 +97,6 @@ var menu = []act{
 	{kind: kSep},
 	{kCmd, "Backup to drive", []fieldDef{{"Backup password", true}}, false, func(v []string) string { return "BACKUP " + v[0] }},
 	{kCmd, "Restore from drive", []fieldDef{{"Backup password", true}, {"New passphrase", true}, {"New PUK", true}}, false, func(v []string) string { return "RESTORE " + v[0] + " " + v[1] + " " + v[2] }},
-	{kind: kSep},
-	{kCmd, "HMAC: list credentials", nil, false, func([]string) string { return "HMAC LIST" }},
-	{kCmd, "HMAC: initialize (BOOT required)", nil, true, func([]string) string { return "HMAC init" }},
-	{kCmd, "HMAC: PIN + BOOT", nil, true, func([]string) string { return "HMAC pin-button" }},
-	{kCmd, "HMAC: PIN only", nil, true, func([]string) string { return "HMAC pin" }},
-	{kCmd, "HMAC: automatic (no PIN)", nil, true, func([]string) string { return "HMAC auto" }},
-	{kCmd, "HMAC: armed (no PIN)", nil, true, func([]string) string { return "HMAC armed" }},
-	{kCmd, "HMAC: delete credential", []fieldDef{{"32-character hex credential ID", false}}, true, func(v []string) string { return "HMAC DELETE " + v[0] }},
 	{kind: kSep},
 	{kCmd, "Presence: BOOT button", nil, false, func([]string) string { return "PRESENCE button" }},
 	{kCmd, "Presence: automatic (hold BOOT)", nil, false, func([]string) string { return "PRESENCE auto" }},
@@ -880,25 +880,47 @@ func (m *model) renderStatus() {
 	s := m.status
 	var b strings.Builder
 	if s.Version != "" {
-		fmt.Fprintf(&b, "Firmware:     %s\n", s.Version)
+		fmt.Fprintf(&b, "%s\n", dimStyle.Render("Firmware: "+s.Version))
 	}
-	fmt.Fprintf(&b, "Device state: %s\n", s.State)
-	fmt.Fprintf(&b, "Drive:        %s\n", s.Disk)
-	fmt.Fprintf(&b, "HMAC:         %s\n", statusOrUnknown(s.HMAC))
-	fmt.Fprintf(&b, "HMAC policy:  %s\n", statusOrUnknown(s.HMACPolicy))
-	fmt.Fprintf(&b, "HMAC root:    %s\n", statusOrUnknown(s.HMACRoot))
-	fmt.Fprintf(&b, "HMAC armed:   %s\n", statusOrUnknown(s.HMACArmed))
-	fmt.Fprintf(&b, "HMAC creds:   %s\n", statusOrUnknown(s.HMACCreds))
+	b.WriteString(titleStyle.Render("Device") + "\n")
+	fmt.Fprintf(&b, "  State:           %s\n", colorState(s.State))
+	fmt.Fprintf(&b, "  Active profile:  %s of %s\n", itoaN(s.Profile), itoaN(s.Profiles))
+	fmt.Fprintf(&b, "  Auto-lock:       %s\n", timeoutText(s.Timeout))
+	fmt.Fprintf(&b, "  Presence:        %s\n", statusOrUnknown(s.Presence))
+	fmt.Fprintf(&b, "  Recovery PUK:    %s\n", statusOrUnknown(s.PUK))
+	b.WriteString("\n" + titleStyle.Render("Encrypted drive") + "\n")
+	fmt.Fprintf(&b, "  State:           %s\n", colorState(s.Disk))
+	fmt.Fprintf(&b, "  PIN failures:    %s (blocked: %s)\n", countText(s.DiskFail), yesNoUnknown(s.DiskBlocked, s.DiskFail))
 	if s.FlushPending {
-		b.WriteString("  (write flush pending — keep powered)\n")
+		b.WriteString("  " + errStyle.Render("Write flush pending — keep device powered") + "\n")
 	}
-	fmt.Fprintf(&b, "Active profile: %s\n", itoaN(s.Profile))
-	fmt.Fprintf(&b, "Timeout:        %ds\n", s.Timeout)
-	fmt.Fprintf(&b, "Unlock pass fails: %d (blocked: %v)\n", s.PassFail, s.PassBlocked)
-	fmt.Fprintf(&b, "CTAP2 PIN fails:   %d\n", s.PinFail)
-	fmt.Fprintf(&b, "PUK fails:          %d\n", s.PUKFail)
-	fmt.Fprintf(&b, "Disk PIN fails:     %d\n", s.DiskFail)
+	b.WriteString("\n" + titleStyle.Render("HMAC secret") + "\n")
+	fmt.Fprintf(&b, "  Status:          %s\n", statusOrUnknown(s.HMAC))
+	fmt.Fprintf(&b, "  Policy:          %s\n", statusOrUnknown(s.HMACPolicy))
+	fmt.Fprintf(&b, "  Root:            %s\n", statusOrUnknown(s.HMACRoot))
+	fmt.Fprintf(&b, "  Armed:           %s\n", statusOrUnknown(s.HMACArmed))
+	fmt.Fprintf(&b, "  Credentials:     %s\n", statusOrUnknown(s.HMACCreds))
+	b.WriteString("\n" + titleStyle.Render("Retry protection") + "\n")
+	fmt.Fprintf(&b, "  Device passphrase: %s (blocked: %s)\n", countText(s.PassFail), boolText(s.PassBlocked))
+	fmt.Fprintf(&b, "  CTAP2 PIN:         %s (blocked: %s)\n", countText(s.PinFail), yesNoUnknown(s.PinBlocked, s.PinFail))
+	fmt.Fprintf(&b, "  Recovery PUK:      %s\n", countText(s.PUKFail))
 	m.output = b.String()
+}
+
+func countText(n int) string {
+	if n < 0 {
+		return "?"
+	}
+	return fmt.Sprintf("%d", n)
+}
+
+func boolText(v bool) string { return map[bool]string{true: "yes", false: "no"}[v] }
+
+func yesNoUnknown(v bool, count int) string {
+	if count < 0 {
+		return "?"
+	}
+	return boolText(v)
 }
 
 func statusOrUnknown(s string) string {
